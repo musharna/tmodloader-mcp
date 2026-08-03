@@ -1,0 +1,54 @@
+[project]
+name = "tmodloader-mcp"
+version = "0.1.0"
+description = "Drive a running tModLoader instance: launch it, ask it questions, photograph it, and read its state back."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "mjarnold" }]
+keywords = ["mcp", "tmodloader", "terraria", "modding", "testing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    # 2.x only. This package imports mcp.server.mcpserver, which does not exist
+    # in 1.x, so a range spanning both majors could resolve to a version that
+    # cannot import the server at all.
+    "mcp>=2,<3",
+]
+
+[project.urls]
+Homepage = "https://github.com/musharna/tmodloader-mcp"
+Repository = "https://github.com/musharna/tmodloader-mcp"
+Issues = "https://github.com/musharna/tmodloader-mcp/issues"
+
+[project.scripts]
+tmodloader-mcp = "tmodloader_mcp.server:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tmodloader_mcp"]
+
+[tool.hatch.build.targets.sdist]
+# hatchling's `packages` covers the WHEEL ONLY, so the sdist needs its own
+# allow-list or it ships the whole working tree.
+include = ["src/tmodloader_mcp", "tests", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
