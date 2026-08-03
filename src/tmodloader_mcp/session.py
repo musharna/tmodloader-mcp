@@ -1,0 +1,389 @@
+"""Launching, driving and tearing down a tModLoader session.
+
+WHAT MAKES THIS FIDDLY
+
+tModLoader runs as a WINDOWS process even when driven from WSL, so processes are
+listed and killed through `tasklist.exe` / `taskkill.exe` rather than POSIX
+signals. And a teardown must kill ONLY what this session started: a developer
+usually has their own game open, and a harness that killed every tModLoader it
+could find would take that with it.
+
+The pid diff is how that is decided. It is not elegant, and the alternative —
+trusting a launched handle — does not survive the launcher being a shell that
+exits immediately.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .config import Config
+from .diag import parse as parse_diag
+from .triggers import (
+    DIAG_NAME,
+    HEARTBEAT_NAME,
+    RESULT_NAME,
+    SHOT_NAME,
+    TRIGGER_NAME,
+    Reply,
+    TriggerError,
+    compose,
+    heartbeat_is_live,
+    world_is_ready,
+)
+
+#: PowerShell that returns one pid per line for every tModLoader process.
+#:
+#: NOT a tasklist name grep. tModLoader runs as `dotnet.exe`, so a grep for
+#: "tmodloader" in the process NAME matches nothing at all - which is silent and
+#: much worse than noisy: the already-running guard never fires, and teardown
+#: computes an empty set and reports killing nothing AS SUCCESS, leaving orphans
+#: that hold a lock on the .tmod and break the next build.
+#:
+#: Nor is it a grep for `dotnet.exe`, which matches Roslyn's VBCSCompiler idling
+#: after any dotnet build and would report the game running while it is closed.
+#: The COMMAND LINE is the only thing that distinguishes them, and only CIM
+#: exposes it. Both of these are lessons the shell harness had already learned
+#: and written down; this reimplemented them wrongly before reading it.
+_PID_QUERY = (
+    "Get-CimInstance Win32_Process -Filter \"Name='dotnet.exe'\" | "
+    "Where-Object { $_.CommandLine -like '*tModLoader.dll*' } | "
+    "ForEach-Object { $_.ProcessId }"
+)
+
+
+def parse_pids(text: str) -> set[int]:
+    """Pull pids out of the query's output.
+
+    Split out so the parsing is testable without Windows. An empty result is
+    ambiguous by nature - no games running, or a query that broke - so callers
+    that need to tell those apart must have a positive control, exactly as the
+    shell harness does.
+    """
+    pids: set[int] = set()
+    for line in text.replace("\r", "").split("\n"):
+        stripped = line.strip()
+        if stripped.isdigit():
+            pids.add(int(stripped))
+    return pids
+
+
+#: Terraria has no headless singleplayer entry point. Measured, not assumed:
+#: `-join -player <name> -skipselect` lands at the MAIN MENU under both
+#: -savedirectory and -tmlsavedirectory, with and without a Worlds folder, and
+#: regardless of which character is used.
+NO_HEADLESS_SINGLEPLAYER = (
+    "tModLoader cannot start a singleplayer world headlessly - `-join -player "
+    "-skipselect` lands at the main menu, which is measured rather than assumed. "
+    "Load a world yourself, then every other tool here will drive it: the mod "
+    "polls its trigger file the same way in singleplayer as in multiplayer. "
+    "This is refused rather than silently launched as something else, because a "
+    "harness that quietly tested the wrong netmode is how a singleplayer-only "
+    "bug shipped here before."
+)
+
+
+class SessionError(RuntimeError):
+    """The game could not be launched, reached, or shut down."""
+
+
+def _tml_pids(cfg: Config) -> set[int]:
+    """Every tModLoader pid Windows currently reports."""
+    try:
+        out = subprocess.run(
+            [str(cfg.powershell), "-NoProfile", "-Command", _PID_QUERY],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+
+    return parse_pids(out)
+
+
+@dataclass
+class Session:
+    """One driven game. Holds the pids it started so teardown can be surgical."""
+
+    cfg: Config
+    mode: str
+    port: int
+    player: str
+    started: set[int] = field(default_factory=set)
+
+    # ---- artifacts -------------------------------------------------------
+
+    def path(self, name: str, *, server: bool) -> Path:
+        return self.cfg.artifact(name, server=server)
+
+    # ---- driving ---------------------------------------------------------
+
+    def ask(
+        self,
+        command: str,
+        *,
+        target: str | None = None,
+        argument: str | None = None,
+        server: bool = False,
+        timeout: float = 60.0,
+    ) -> Reply:
+        """Fire a trigger and wait for the reply file.
+
+        The result file is REMOVED FIRST. Without that, a reply left over from a
+        previous request is indistinguishable from a fresh one, and the caller
+        reads a stale answer as a current one.
+        """
+        payload = compose(command, target=target, argument=argument)
+
+        trigger = self.path(TRIGGER_NAME, server=server)
+        result = self.path(RESULT_NAME, server=server)
+
+        result.unlink(missing_ok=True)
+        trigger.write_text(payload)
+
+        text = self._await_text(result, timeout=timeout, what=f"reply to {payload!r}")
+        return Reply(command=command, text=text.strip())
+
+    def diag(
+        self, *, server: bool = False, target: str | None = None, timeout: float = 60.0
+    ) -> dict:
+        """Ask a side for its state and return it PARSED.
+
+        The diag file is removed before asking for the same reason the reply file
+        is: an old dump reads exactly like a new one.
+        """
+        dump = self.path(DIAG_NAME, server=server)
+        dump.unlink(missing_ok=True)
+
+        reply = self.ask("diag", target=target, server=server, timeout=timeout)
+        if not reply.ok:
+            raise TriggerError(f"the game refused a diag: {reply.text}")
+
+        text = self._await_text(dump, timeout=timeout, what="diag dump")
+        return parse_diag(text)
+
+    def shot(
+        self, region: str, *, target: str | None = None, timeout: float = 60.0
+    ) -> Path:
+        """Capture a region of the frame and return the PNG path.
+
+        Region is REQUIRED and has no default - see the README. The reply is
+        checked before the file is waited for, so a refusal (bad region name, a
+        dedicated server with no back buffer) is reported as itself rather than
+        as a timeout.
+        """
+        shot = self.path(SHOT_NAME, server=False)
+        shot.unlink(missing_ok=True)
+
+        reply = self.ask("shot", argument=region, target=target, timeout=timeout)
+        if not reply.ok:
+            raise TriggerError(f"the game refused a shot: {reply.text}")
+
+        self._await_file(shot, timeout=timeout, what="shot PNG")
+        return shot
+
+    # ---- waiting ---------------------------------------------------------
+
+    def _await_file(self, path: Path, *, timeout: float, what: str) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.is_file():
+                return
+            time.sleep(0.5)
+
+        raise TriggerError(
+            f"no {what} within {timeout:.0f}s at {path}. The game may not be "
+            f"polling - check that a world is loaded and the mod is enabled."
+        )
+
+    def _await_text(self, path: Path, *, timeout: float, what: str) -> str:
+        self._await_file(path, timeout=timeout, what=what)
+        # A short settle: the file appears before the write completes, and an
+        # empty read here reads as an empty answer.
+        time.sleep(0.4)
+        return path.read_text(errors="replace")
+
+
+def world_problem(world: str) -> str | None:
+    """Why this world argument will not work, or None.
+
+    Checked BEFORE launching because the failure is otherwise silent and
+    misattributed: tModLoader runs as a WINDOWS process, so a /mnt/c path is
+    simply not found, the server never loads a world, and the only symptom is a
+    readiness timeout that blames the heartbeat. Five minutes to learn the wrong
+    thing.
+    """
+    if world.startswith("/"):
+        return (
+            f"world path {world!r} is a WSL path. tModLoader runs as a Windows "
+            "process and cannot resolve /mnt/c - pass a Windows path such as "
+            r"C:\\Users\\you\\Documents\\My Games\\Terraria\\tModLoader"
+            r"\\Worlds\\Yours.wld (set TMODLOADER_WORLD_WIN)."
+        )
+
+    if not world.lower().endswith(".wld"):
+        return (
+            f"world path {world!r} does not name a .wld file. A directory is not "
+            "a world: the server starts, finds nothing to load, and never "
+            "reports a ready heartbeat."
+        )
+
+    return None
+
+
+def launch(
+    cfg: Config,
+    mode: str,
+    *,
+    port: int = 7810,
+    player: str = "n43n",
+    world: str | None = None,
+    timeout: float = 300.0,
+) -> Session:
+    """Start a game and wait until it is actually ready to answer.
+
+    `mode` is "server" or "server_client". Singleplayer is refused - see
+    NO_HEADLESS_SINGLEPLAYER.
+    """
+    if mode == "singleplayer":
+        raise SessionError(NO_HEADLESS_SINGLEPLAYER)
+
+    if mode not in {"server", "server_client"}:
+        raise SessionError(
+            f"unknown mode {mode!r} - expected 'server' or 'server_client'"
+        )
+
+    existing = _tml_pids(cfg)
+    if existing:
+        raise SessionError(
+            f"tModLoader is already running (pids {sorted(existing)}). Close it, "
+            "or stop the previous session - two instances share one save "
+            "directory and would consume each other's trigger files."
+        )
+
+    session = Session(cfg=cfg, mode=mode, port=port, player=player)
+
+    # Clear stale artifacts BEFORE launching. A heartbeat or reply left by a
+    # previous run is what lets a readiness check pass against a dead process.
+    for name in (TRIGGER_NAME, RESULT_NAME, DIAG_NAME, HEARTBEAT_NAME, SHOT_NAME):
+        for server in (False, True):
+            cfg.artifact(name, server=server).unlink(missing_ok=True)
+
+    world_arg = world or cfg.world_win
+    problem = world_problem(world_arg)
+    if problem:
+        raise SessionError(problem)
+
+    server_cmd = [
+        str(cfg.dotnet),
+        "tModLoader.dll",
+        "-server",
+        "-world",
+        world_arg,
+        "-players",
+        "4",
+        "-port",
+        str(port),
+        "-noupnp",
+        "-lang",
+        "en-US",
+    ]
+    subprocess.Popen(
+        server_cmd,
+        cwd=str(cfg.tml_dir),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+
+    if mode == "server_client":
+        client_cmd = [
+            str(cfg.dotnet),
+            "tModLoader.dll",
+            "-join",
+            "127.0.0.1",
+            "-port",
+            str(port),
+            "-player",
+            player,
+            "-skipselect",
+        ]
+        subprocess.Popen(
+            client_cmd,
+            cwd=str(cfg.tml_dir),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+
+    _wait_ready(cfg, mode=mode, timeout=timeout)
+    session.started = _tml_pids(cfg) - existing
+    return session
+
+
+def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
+    """Block until the heartbeat says a world is live AND is recent.
+
+    Both conditions, because they fail differently: a stale-but-ready heartbeat
+    means the process died after loading, and a fresh-but-not-ready one means it
+    is still loading. Checking only existence conflates them, which is exactly
+    how a harness once sailed past three gates on a killed client's file.
+    """
+    server_hb = cfg.artifact(HEARTBEAT_NAME, server=True)
+    client_hb = cfg.artifact(HEARTBEAT_NAME, server=False)
+    wanted = [server_hb] + ([client_hb] if mode == "server_client" else [])
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if all(
+            heartbeat_is_live(p) and world_is_ready(p.read_text(errors="replace"))
+            for p in wanted
+        ):
+            # A short settle after world-ready: the mod refuses commands until a
+            # world has been live a few seconds, because serving one at the
+            # instant capture first becomes possible crashed the engine once.
+            time.sleep(5)
+            return
+        time.sleep(2)
+
+    missing = [p.name for p in wanted if not heartbeat_is_live(p)]
+    raise SessionError(
+        f"no live heartbeat within {timeout:.0f}s (missing or stale: {missing}). "
+        "The game may have failed to start - check the logs, and note the "
+        "client requires Steam to be running and logged in."
+    )
+
+
+def stop(cfg: Config, session: Session | None) -> list[int]:
+    """Kill only the processes this session started. Returns the pids killed.
+
+    Surgical on purpose. A developer usually has their own game open, and a
+    teardown that killed every tModLoader it could find would take it with them.
+    """
+    if session is None:
+        return []
+
+    killed: list[int] = []
+    live = _tml_pids(cfg)
+
+    for pid in sorted(session.started & live):
+        try:
+            subprocess.run(
+                [str(cfg.taskkill), "/F", "/PID", str(pid)],
+                capture_output=True,
+                timeout=30,
+            )
+            killed.append(pid)
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+    for name in (TRIGGER_NAME,):
+        for server in (False, True):
+            cfg.artifact(name, server=server).unlink(missing_ok=True)
+
+    session.started.clear()
+    return killed

@@ -30,6 +30,17 @@ DEFAULT_MOD_SOURCE_WIN = (
     r"C:\Users\a2b32\Documents\My Games\Terraria\tModLoader\ModSources\Biomancy"
 )
 
+#: The world a session loads, as WINDOWS sees it. tModLoader runs as a Windows
+#: process and cannot resolve a /mnt/c path, so this cannot be derived from
+#: save_dir - passing the WSL path makes the server fail to load a world and the
+#: only symptom is a readiness timeout that names the wrong cause entirely.
+DEFAULT_WORLD_WIN = (
+    r"C:\Users\a2b32\Documents\My Games\Terraria\tModLoader\Worlds"
+    r"\BiomancySelfTest.wld"
+)
+
+DEFAULT_POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+
 DEFAULT_TASKKILL = "/mnt/c/Windows/System32/taskkill.exe"
 DEFAULT_TASKLIST = "/mnt/c/Windows/System32/tasklist.exe"
 
@@ -46,8 +57,10 @@ class Config:
     save_dir: Path
     mod_source: Path
     mod_source_win: str
+    world_win: str
     taskkill: Path
     tasklist: Path
+    powershell: Path
 
     @property
     def dotnet(self) -> Path:
@@ -90,8 +103,10 @@ def load(env: dict[str, str] | None = None) -> Config:
         save_dir=save,
         mod_source=mod,
         mod_source_win=mod_win,
+        world_win=src.get("TMODLOADER_WORLD_WIN", DEFAULT_WORLD_WIN),
         taskkill=Path(src.get("TMODLOADER_TASKKILL", DEFAULT_TASKKILL)),
         tasklist=Path(src.get("TMODLOADER_TASKLIST", DEFAULT_TASKLIST)),
+        powershell=Path(src.get("TMODLOADER_POWERSHELL", DEFAULT_POWERSHELL)),
     )
 
 
