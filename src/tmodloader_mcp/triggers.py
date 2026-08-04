@@ -45,6 +45,7 @@ COMMANDS = frozenset(
         "strains",
         "seed",
         "creep",
+        "place",
         "shot",
     }
 )
