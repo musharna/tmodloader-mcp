@@ -1,6 +1,9 @@
 """Drive the real thing through the same code paths the MCP tools use."""
-import sys, traceback
+
+import sys
+import traceback
 from tmodloader_mcp import server
+
 
 def step(name, fn):
     try:
@@ -11,6 +14,7 @@ def step(name, fn):
         print(f"  FAIL {name}: {type(e).__name__}: {e}")
         traceback.print_exc(limit=1)
         raise
+
 
 print(">>> singleplayer must be REFUSED, with a reason")
 try:
@@ -32,7 +36,9 @@ try:
     print(">>> diag (client)")
     d = step("diag", lambda: server.diag())
     f = d["fields"]
-    print(f"       side={d['side']} version={f.get('version')} motes={f.get('ambient-motes')} creep-tiles={f.get('creep-tiles')}")
+    print(
+        f"       side={d['side']} version={f.get('version')} motes={f.get('ambient-motes')} creep-tiles={f.get('creep-tiles')}"
+    )
     assert d["side"] in {"client", "singleplayer"}, d["side"]
     assert isinstance(f.get("ambient-motes"), int), "counter did not parse as int"
 
@@ -42,7 +48,19 @@ try:
 
     print(">>> diag again - creep should now exist")
     d2 = step("diag2", lambda: server.diag())
-    print(f"       creep-sources={d2['fields'].get('creep-sources')} tiles={d2['fields'].get('creep-tiles')} drawn={d2['fields'].get('creep-drawn')}")
+    f2 = d2["fields"]
+    print(
+        f"       creep-sources={f2.get('creep-sources')} tiles={f2.get('creep-tiles')} converted={f2.get('creep-converted')} census={f2.get('creep-census')}"
+    )
+    print(f"       creep-residue={f2.get('creep-residue')}")
+    # `creep-drawn` was printed here until 2026-08-05, months after the mod
+    # renamed it — so this line reported `drawn=None` on every run and nobody
+    # noticed, because a live check that PRINTS is not a live check that ASSERTS.
+    #
+    # Type only, deliberately not `census > 0`: creep grows over ticks, and the
+    # 2026-08-04 probe needed ~6s before the first non-zero sample. Asserting a
+    # value here would be a timing race dressed up as a correctness check.
+    assert isinstance(f2.get("creep-census"), int), "census did not parse as int"
 
     print(">>> shot bottomleft")
     s = step("shot", lambda: server.shot("bottomleft"))
