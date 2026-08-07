@@ -30,16 +30,41 @@ _LINE = re.compile(r"^(?P<key>[a-z0-9][a-z0-9-]*): ?(?P<value>.*)$")
 #: structurally unable to answer, which is different from an empty answer.
 _ABSENT = {"NONE", "N/A (never sent to clients)", "N/A (no local player)"}
 
-#: Fields that are counters. Parsed to int so a caller can compare rather than
-#: string-match, which is where `"10" < "9"` bugs come from.
-_INT_FIELDS = frozenset(
+#: A counter, recognised by the SHAPE OF ITS VALUE rather than by its name.
+#: Parsed to int so a caller can compare rather than string-match, which is
+#: where `"10" < "9"` bugs come from.
+#:
+#: This was a list of known counter NAMES until 2026-08-05, and that list drifted
+#: the moment the mod renamed one: `creep-drawn` became `creep-converted` plus
+#: `creep-census` in 0.8.0, nothing here was told, and both new counters parsed
+#: as strings for a whole release. Silent in the worst way — `"0"` is truthy, so
+#: a harness control asserting "creep exists" would pass on an empty world.
+#:
+#: Naming the counters put the burden on this file to keep pace with a mod that
+#: gains diag lines faster than it can. The `parse` docstring already refuses
+#: that bargain for DROPPING unknown keys; typing by shape refuses it here too.
+#:
+#: No redundant leading zero: a count is never written `007`, so a zero-padded
+#: value is an identifier, and `int()` would silently renumber it.
+_COUNTER = re.compile(r"^-?(?:0|[1-9][0-9]*)$")
+
+#: Fields that stay text however numeric they look, because they NAME something
+#: rather than count it. `int()` on an identifier is lossy and irreversible: an
+#: all-decimal md5 would stop matching the file it names, and a player called
+#: "43" would stop matching their own character.
+#:
+#: This list can drift too — but forgetting an identifier is LOUD (the value
+#: changes shape, comparisons against the real string fail) where forgetting a
+#: counter was silent. The residual failure mode is the visible one.
+_TEXT_FIELDS = frozenset(
     {
-        "netmode",
-        "cue-particles",
-        "ambient-motes",
-        "creep-sources",
-        "creep-tiles",
-        "creep-drawn",
+        "version",
+        "tmod-md5",
+        "player",
+        "strain-readout",
+        "directive",
+        "shot-path",
+        "world-path",
     }
 )
 
@@ -75,15 +100,14 @@ def parse(text: str) -> dict[str, Any]:
             out[key] = None
             continue
 
-        if key in _INT_FIELDS:
-            try:
-                out[key] = int(value)
-            except ValueError:
-                # A counter that is not a number is a real signal, not something
-                # to coerce to 0 — that would read as "nothing happened".
-                out[key] = value
+        if key not in _TEXT_FIELDS and _COUNTER.match(value):
+            out[key] = int(value)
             continue
 
+        # Anything else stays exactly as written. A counter reading `unavailable`
+        # is a real signal, not something to coerce to 0 — that would read as
+        # "nothing happened" — and a composite like `creep-residue` carries its
+        # meaning in the whole string.
         out[key] = value
 
     return out
