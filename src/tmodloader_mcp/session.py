@@ -115,6 +115,12 @@ class Session:
     player: str
     started: set[int] = field(default_factory=set)
 
+    #: How many captures this session has taken. Used to give each one its own
+    #: filename - see `shot`. A counter rather than a timestamp because it also
+    #: records the ORDER they were taken in, which is what you want when reading
+    #: a directory of them afterwards.
+    captures: int = 0
+
     # ---- artifacts -------------------------------------------------------
 
     def path(self, name: str, *, server: bool) -> Path:
@@ -175,16 +181,33 @@ class Session:
         checked before the file is waited for, so a refusal (bad region name, a
         dedicated server with no back buffer) is reported as itself rather than
         as a timeout.
+
+        THE RETURNED PATH IS UNIQUE PER CAPTURE, and it has to be. The mod
+        writes one fixed filename, so this used to hand that same path back
+        every time: three regions in a row returned three references to one
+        file, each capture silently overwriting the last, and the caller ended
+        up holding only whichever it took last. Nothing failed - every call
+        reported OK and returned a path that existed - which is exactly why it
+        survived a live run and was only caught by opening the images.
+
+        So the fixed name is treated as what it is: a drop box the game writes
+        into, which this moves out of before the next capture can land on it.
         """
-        shot = self.path(SHOT_NAME, server=False)
-        shot.unlink(missing_ok=True)
+        drop = self.path(SHOT_NAME, server=False)
+        drop.unlink(missing_ok=True)
 
         reply = self.ask("shot", argument=region, target=target, timeout=timeout)
         if not reply.ok:
             raise TriggerError(f"the game refused a shot: {reply.text}")
 
-        self._await_file(shot, timeout=timeout, what="shot PNG")
-        return shot
+        self._await_file(drop, timeout=timeout, what="shot PNG")
+
+        self.captures += 1
+        # Numbered first so a listing sorts into capture order, and the region
+        # kept so a directory of these is readable without a log beside it.
+        kept = drop.with_name(f"{drop.stem}-{self.captures:03d}-{region}{drop.suffix}")
+        drop.replace(kept)
+        return kept
 
     # ---- waiting ---------------------------------------------------------
 
@@ -320,7 +343,25 @@ def launch(
             stdin=subprocess.DEVNULL,
         )
 
-    _wait_ready(cfg, mode=mode, timeout=timeout)
+    try:
+        _wait_ready(cfg, mode=mode, timeout=timeout)
+    except BaseException:
+        # WHOEVER SPAWNS OWNS THEM UNTIL IT CAN HAND THEM BACK.
+        #
+        # This used to raise straight out. The processes it had just started
+        # stayed up held by nobody: `launch` never returned, so no Session ever
+        # reached the caller, and `stop()` answered "no session was running" and
+        # killed nothing. The orphan then poisoned the NEXT launch, which refuses
+        # to start over a running game - so one readiness timeout cost two
+        # failures and a manual hunt through tasklist.
+        #
+        # BaseException rather than Exception: a KeyboardInterrupt or a timeout
+        # during a five-minute wait is exactly when this matters most, and those
+        # do not derive from Exception.
+        session.started = _tml_pids(cfg) - existing
+        stop(cfg, session)
+        raise
+
     session.started = _tml_pids(cfg) - existing
     return session
 
@@ -351,10 +392,32 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
         time.sleep(2)
 
     missing = [p.name for p in wanted if not heartbeat_is_live(p)]
+
+    # THE ADVICE HAS TO MATCH THE MODE THAT FAILED.
+    #
+    # This used to blame Steam unconditionally. In `server` mode there is no
+    # client, so that sentence named a cause which could not apply - and it
+    # cost a real debugging session: Steam genuinely WAS down, the advice fit
+    # the client failure, so the identical server-mode failure was filed under
+    # the same cause. Bringing Steam up fixed one and not the other, which is
+    # the only reason the wrong attribution surfaced at all.
+    if mode == "server_client" and client_hb.name in missing:
+        hint = (
+            "The client requires Steam to be running and logged in - check that "
+            "first, it is the usual cause."
+        )
+    else:
+        hint = (
+            "No client is involved in this mode, so Steam is NOT the likely "
+            "cause. A dedicated server has never been observed writing a "
+            "heartbeat here even with Steam up and the mod loading cleanly "
+            "(verified 2026-08-07), so `server` mode may not be usable at all "
+            "- prefer `server_client`."
+        )
+
     raise SessionError(
         f"no live heartbeat within {timeout:.0f}s (missing or stale: {missing}). "
-        "The game may have failed to start - check the logs, and note the "
-        "client requires Steam to be running and logged in."
+        f"The game may have failed to start - check the logs. {hint}"
     )
 
 
