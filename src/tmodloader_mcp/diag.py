@@ -128,7 +128,7 @@ def sections(text: str) -> dict[str, list[str]]:
         if not raw.strip():
             continue
 
-        if raw.startswith(" ") or raw.startswith("\t"):
+        if raw.startswith((" ", "\t")):
             if current is not None:
                 out.setdefault(current, []).append(raw.strip())
             continue

@@ -102,6 +102,9 @@ def build(cfg: Config, *, timeout: float = 600.0) -> BuildResult:
             capture_output=True,
             text=True,
             timeout=timeout,
+            # Success is read from the OUTPUT, not the exit code, which is not
+            # reliable here - so a non-zero exit must not raise past the parser.
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return BuildResult(
