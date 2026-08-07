@@ -24,7 +24,7 @@ What earns the surface here is that a running game is not stateless:
 | `launch` / `stop` | Session state across calls                                   |
 | `diag`            | Structured fields, not text you `sed` and misparse           |
 | `trigger`         | The write → poll → timeout → clean-up loop, written once     |
-| `shot`            | Region validation and a PNG header check                     |
+| `shot`            | A capture path per call, and refusals reported as refusals   |
 | `build_mod`       | Encodes tModLoader's refusal to build while the game is open |
 | `logs`            | Either side's log, filtered                                  |
 
@@ -32,6 +32,12 @@ Those glue steps are where the hand-written version actually went wrong: a
 `pkill` pattern that matched its own command line, a readiness check that passed
 on a killed process's leftover heartbeat, and a capture that reported success
 while the thing it photographed had never drawn.
+
+That row used to promise a PNG header check. There was never one, in any
+version — the file is waited for and renamed, never opened. It is written down
+here rather than quietly corrected because a README is read by people deciding
+what they no longer have to check themselves, which makes an imagined guarantee
+worse than an absent one.
 
 ## What it cannot do
 

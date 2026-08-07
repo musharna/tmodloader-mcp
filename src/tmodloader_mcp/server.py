@@ -262,12 +262,16 @@ def logs(
     Args:
         server: Read the server log rather than the client one.
         contains: Keep only lines containing this substring, case-insensitively.
-        lines: How many trailing lines to return.
+        lines: How many trailing lines to return. Zero returns none; a negative
+            count is refused rather than guessed at.
 
     Useful when a launch fails: the reason is usually in the log and not in
     anything the trigger protocol can reach, because the game never got far
     enough to poll.
     """
+    if lines < 0:
+        raise ValueError(f"lines={lines} is not a number of lines to return")
+
     cfg = _cfg()
     name = "server.log" if server else "client.log"
     path = cfg.tml_dir / "tModLoader-Logs" / name
@@ -280,7 +284,14 @@ def logs(
         needle = contains.lower()
         text = [ln for ln in text if needle in ln.lower()]
 
-    return {"path": str(path), "found": True, "lines": text[-lines:]}
+    # `text[-lines:]` looks like a tail and is one for every value but zero:
+    # -0 is 0, so `text[-0:]` is the WHOLE log. Asking for no lines returned
+    # every line there had ever been, as a successful answer of the right
+    # shape - an agent spending its context on a log it did not ask for has
+    # nothing to notice.
+    kept = text[-lines:] if lines else []
+
+    return {"path": str(path), "found": True, "lines": kept}
 
 
 @mcp.tool(
