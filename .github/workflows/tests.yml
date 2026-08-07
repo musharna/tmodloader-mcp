@@ -1,0 +1,51 @@
+name: tests
+
+# NO PATH FILTERS, deliberately.
+#
+# A workflow that only runs when certain paths change cannot fire on the pull
+# request that introduces it, and a green PR then reads as a passing check that
+# never ran. Everything here is cheap - the suite is a few seconds - so there is
+# nothing to buy by narrowing the trigger, and a real check to lose.
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# A push to a branch with an open PR would otherwise run this twice. The
+# `push` trigger above is limited to master for the same reason: one run per
+# change, on an account where Actions minutes are a real budget.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # v7 is a floating major tag that was verified to exist. setup-uv below
+      # is pinned exactly because it publishes NO floating major - it has
+      # v9.0.0 and v7.6, but no v9, so `@v9` would fail to resolve at all.
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      # Lint before tests: this suite stayed green while `live_check.py` held
+      # an undefined name, because that script is not collected by pytest.
+      # Ruff is what caught it, so ruff is a gate rather than a suggestion.
+      - name: ruff
+        run: uv run ruff check .
+
+      - name: pytest
+        run: uv run pytest -q
+
+  # The suite drives a Windows game through /mnt/c, so nothing here can test
+  # THAT seam - a Linux runner has no tModLoader to launch. What runs is
+  # everything that does not need one, which is all of it: no test touches a
+  # real install (`world_problem` is string logic, and the config paths are
+  # stubbed). `tests/live_check.py` is the part that needs a real game, and it
+  # is a script rather than a collected test for exactly that reason.
