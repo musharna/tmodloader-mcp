@@ -15,6 +15,8 @@ exits immediately.
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -105,6 +107,43 @@ def _tml_pids(cfg: Config) -> set[int]:
     return parse_pids(out)
 
 
+def _next_capture_index(drop: Path) -> int:
+    """The next free capture number in the directory the drop box lives in.
+
+    Asked of the filesystem because the filesystem is what the answer has to be
+    true about. Anything held in memory is scoped to one session and cannot
+    know what an earlier one already wrote there.
+    """
+    pattern = re.compile(rf"{re.escape(drop.stem)}-(\d+)-.*")
+
+    highest = 0
+    for existing in drop.parent.glob(f"{drop.stem}-*{drop.suffix}"):
+        found = pattern.fullmatch(existing.stem)
+        if found:
+            highest = max(highest, int(found.group(1)))
+
+    return highest + 1
+
+
+def _write_atomically(path: Path, text: str) -> None:
+    """Put `text` at `path` without `path` ever holding a fragment of it.
+
+    The game POLLS the trigger path, so a write in place is readable by it
+    half-finished, and a truncated command word is not an error on that side:
+    `DevCommands.Parse` maps anything it does not recognise to Unknown and does
+    nothing at all. The harness then waits out its timeout for a reply to a
+    request that was thrown away, and reports a hang.
+
+    Staged under a name nothing watches and renamed into place, so the polled
+    name only ever refers to a finished payload. The staging file is a sibling
+    deliberately: a rename is only a rename within one filesystem, and the save
+    directory is on /mnt/c while a temp dir would not be.
+    """
+    staged = path.with_name(f"{path.name}.staging")
+    staged.write_text(text)
+    os.replace(staged, path)
+
+
 @dataclass
 class Session:
     """One driven game. Holds the pids it started so teardown can be surgical."""
@@ -114,12 +153,6 @@ class Session:
     port: int
     player: str
     started: set[int] = field(default_factory=set)
-
-    #: How many captures this session has taken. Used to give each one its own
-    #: filename - see `shot`. A counter rather than a timestamp because it also
-    #: records the ORDER they were taken in, which is what you want when reading
-    #: a directory of them afterwards.
-    captures: int = 0
 
     # ---- artifacts -------------------------------------------------------
 
@@ -149,7 +182,7 @@ class Session:
         result = self.path(RESULT_NAME, server=server)
 
         result.unlink(missing_ok=True)
-        trigger.write_text(payload)
+        _write_atomically(trigger, payload)
 
         text = self._await_text(result, timeout=timeout, what=f"reply to {payload!r}")
         return Reply(command=command, text=text.strip())
@@ -192,6 +225,14 @@ class Session:
 
         So the fixed name is treated as what it is: a drop box the game writes
         into, which this moves out of before the next capture can land on it.
+
+        The number comes from the DIRECTORY, not from a counter on this object.
+        A counter fixed the collision within one session and reintroduced it
+        between two: a session ends when the game stops, the save directory
+        does not, and a second session began numbering at 001 again and landed
+        on the first one's captures. Same silent loss, wearing the fix as a
+        disguise - the path handed back was unique among the calls that made
+        it, which is not the property anybody needed.
         """
         drop = self.path(SHOT_NAME, server=False)
         drop.unlink(missing_ok=True)
@@ -202,10 +243,10 @@ class Session:
 
         self._await_file(drop, timeout=timeout, what="shot PNG")
 
-        self.captures += 1
         # Numbered first so a listing sorts into capture order, and the region
         # kept so a directory of these is readable without a log beside it.
-        kept = drop.with_name(f"{drop.stem}-{self.captures:03d}-{region}{drop.suffix}")
+        index = _next_capture_index(drop)
+        kept = drop.with_name(f"{drop.stem}-{index:03d}-{region}{drop.suffix}")
         drop.replace(kept)
         return kept
 
@@ -224,11 +265,39 @@ class Session:
         )
 
     def _await_text(self, path: Path, *, timeout: float, what: str) -> str:
+        """Read a file once it has STOPPED CHANGING, not once it exists.
+
+        A file appears when it is created, not when it is written, so this used
+        to sleep 0.4s first - a race with a timer on it. The timer does not make
+        the write finish; it makes it usually finish, and "usually" moves with
+        the machine and the size of the dump.
+
+        A short read is not a visible failure either, which is what makes it
+        worth a loop rather than a longer sleep: `Reply.ok` reads a truncated
+        `REFUSED...` as success, and half a diag parses into believable fields
+        with some keys simply absent.
+
+        An empty file is treated as still being written rather than as an empty
+        answer. The mod has no command that legitimately replies with nothing,
+        so emptiness here means the writer got as far as creating the file - and
+        returning "" would be the same torn read wearing different clothes.
+        """
+        deadline = time.monotonic() + timeout
         self._await_file(path, timeout=timeout, what=what)
-        # A short settle: the file appears before the write completes, and an
-        # empty read here reads as an empty answer.
-        time.sleep(0.4)
-        return path.read_text(errors="replace")
+
+        previous = path.read_text(errors="replace")
+        while time.monotonic() < deadline:
+            time.sleep(0.2)
+            current = path.read_text(errors="replace")
+            if current == previous and current != "":
+                return current
+            previous = current
+
+        raise TriggerError(
+            f"the {what} at {path} was still being written after {timeout:.0f}s "
+            "(its contents kept changing, or it stayed empty). Nothing there is "
+            "safe to read as an answer."
+        )
 
 
 def world_problem(world: str) -> str | None:
