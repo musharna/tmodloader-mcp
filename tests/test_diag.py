@@ -10,11 +10,12 @@ import pytest
 
 from tmodloader_mcp import diag
 
-# A real capture, trimmed. Kept verbatim rather than synthesised: a parser
-# tested only against text the test author wrote will handle exactly the shapes
-# the author remembered.
+# Line-for-line the shape `DiagReport.Format` emits, with the creep values taken
+# from a real 0.8.1 capture (the `probe_verify` run of 2026-08-04). Not composed
+# from memory: a parser tested only against text the test author wrote will
+# handle exactly the shapes the author remembered.
 SAMPLE = """\
-version: 0.7.0
+version: 0.8.1
 tmod-md5: d6f3a15efc991e64522d9476d0ff2164
 side: client netmode=1
 player: n43n
@@ -23,10 +24,12 @@ npcs: active=2 mutated=1
   idx=1 type=22 name=Guide mutated=0 mutation=None apex=0 life=250/250 at=2171,253
 cue-particles: 0
 ambient-motes: 346
-strain-readout: Zombie in Surface
 creep-sources: 1
-creep-tiles: 48
-creep-drawn: 36096
+creep-tiles: 47
+creep-converted: 56
+creep-census: 52
+creep-residue: 0=35 2=12 706=5 85=2 3=1
+strain-readout: Zombie in Surface
 strains: N/A (never sent to clients)
 directive: N/A (never sent to clients)
 """
@@ -34,7 +37,7 @@ directive: N/A (never sent to clients)
 
 def test_scalars_are_parsed():
     got = diag.parse(SAMPLE)
-    assert got["version"] == "0.7.0"
+    assert got["version"] == "0.8.1"
     assert got["player"] == "n43n"
     assert got["strain-readout"] == "Zombie in Surface"
 
@@ -43,8 +46,71 @@ def test_counters_are_ints_not_strings():
     """String counters are where "10" < "9" comes from."""
     got = diag.parse(SAMPLE)
     assert got["ambient-motes"] == 346
-    assert got["creep-drawn"] == 36096
+    assert got["creep-converted"] == 56
+    assert got["creep-census"] == 52
     assert isinstance(got["creep-tiles"], int)
+
+
+def test_a_counter_this_parser_has_never_heard_of_is_still_a_number():
+    """THE REGRESSION THIS FILE EXISTS FOR.
+
+    `creep-drawn` was renamed to `creep-converted`/`creep-census` in the mod's
+    0.8.0. Nothing here knew, so both new counters parsed as strings for a whole
+    release — visible in the 2026-08-04 probe logs as `"creep-census": "0"`
+    beside an honest `"creep-sources": 0`. Nothing failed; `"0"` is truthy, so a
+    control asserting "creep exists" would have passed on an empty world.
+
+    The old design named its counters, so a rename silently demoted one. Typing
+    on the VALUE's shape instead means the mod can add or rename counters
+    without this parser being told.
+    """
+    got = diag.parse("counter-invented-after-this-test-was-written: 12\n")
+    assert got["counter-invented-after-this-test-was-written"] == 12
+
+
+def test_a_composite_value_is_not_mistaken_for_a_number():
+    """Negative control for shape-typing: not every creep line is a count.
+
+    `creep-residue` is a per-type tally, and the whole point of it is reading
+    which tile types are listed. Collapsing it to a number would destroy exactly
+    the signal it was built to carry.
+    """
+    got = diag.parse(SAMPLE)
+    assert got["creep-residue"] == "0=35 2=12 706=5 85=2 3=1"
+
+
+@pytest.mark.parametrize(
+    ("line", "key", "expected"),
+    [
+        # An md5 is 32 hex digits; roughly one in ten million is all-decimal.
+        (
+            "tmod-md5: 06730015689102266131458830061455",
+            "tmod-md5",
+            "06730015689102266131458830061455",
+        ),
+        ("version: 1", "version", "1"),
+        ("player: 43", "player", "43"),
+    ],
+)
+def test_an_identifier_that_looks_numeric_stays_text(line, key, expected):
+    """THE HAZARD SHAPE-TYPING INTRODUCES, controlled.
+
+    Typing by shape means any all-digit value would become an int, and for an
+    identifier that is lossy and irreversible — `int()` eats leading zeros, so
+    an md5 would no longer match the file it names. These fields are text
+    whatever they happen to look like.
+    """
+    assert diag.parse(line + "\n")[key] == expected
+
+
+def test_a_leading_zero_means_identifier_not_count():
+    """A count is never written `007`. Something zero-padded is an id.
+
+    This is the structural half of the guard above: it protects ids nobody
+    thought to register, which is the failure mode the named-counter list had.
+    """
+    got = diag.parse("some-padded-id: 007\n")
+    assert got["some-padded-id"] == "007"
 
 
 def test_absent_markers_become_none():
@@ -86,9 +152,13 @@ def test_unknown_keys_are_kept():
 
     Dropping unrecognised keys would make a newly added counter invisible here,
     which is indistinguishable from the mod never emitting it.
+
+    Deliberately a non-numeric value: retention is a separate property from
+    typing, and testing them through one assertion means a typing change reads
+    as a retention failure.
     """
-    got = diag.parse(SAMPLE + "some-future-counter: 12\n")
-    assert got["some-future-counter"] == "12"
+    got = diag.parse(SAMPLE + "some-future-readout: Zombie in Cavern\n")
+    assert got["some-future-readout"] == "Zombie in Cavern"
 
 
 def test_crlf_is_not_part_of_the_value():
