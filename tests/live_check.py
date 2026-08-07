@@ -2,6 +2,8 @@
 
 import sys
 import traceback
+from pathlib import Path
+
 from tmodloader_mcp import server
 
 
@@ -21,7 +23,10 @@ try:
     server.launch(mode="singleplayer")
     print("  FAIL: it launched something instead of refusing")
     sys.exit(1)
-except Exception as e:
+except Exception as e:  # noqa: BLE001 - the refusal's TYPE is not the contract
+    # What is promised is that it refuses and says why. Narrowing this to
+    # SessionError would let a different exception - an unresolvable path, a
+    # missing dotnet - pass as if the refusal had worked.
     assert "headless" in str(e).lower(), f"refusal did not explain: {e}"
     print("  OK   refused and explained")
 
@@ -62,14 +67,30 @@ try:
     # value here would be a timing race dressed up as a correctness check.
     assert isinstance(f2.get("creep-census"), int), "census did not parse as int"
 
-    print(">>> shot bottomleft")
-    s = step("shot", lambda: server.shot("bottomleft"))
+    print(">>> two shots must not be the same file")
+    # Taken twice on purpose. One capture proves nothing about the defect that
+    # actually shipped: `shot` returned the mod's fixed output path, so every
+    # call handed back the same name and each capture quietly replaced the last.
+    # Every call reported OK and returned a path that existed. Only a SECOND
+    # capture can show that.
+    s1 = step("shot 1", lambda: server.shot("bottomleft"))
+    s2 = step("shot 2", lambda: server.shot("topright"))
+    assert s1["path"] != s2["path"], f"both captures returned {s1['path']}"
+
+    for shot in (s1, s2):
+        png = Path(shot["path"])
+        assert png.is_file(), f"{png} was returned but is not on disk"
+        assert png.stat().st_size > 0, f"{png} is on disk but empty"
+        # The README claimed for a long time that the server did this. It never
+        # did, and it still does not - but a LIVE check is where the claim can
+        # be made true cheaply, against the real file the real game wrote.
+        assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n", f"{png} is not a PNG"
 
     print(">>> an unknown command must be refused BEFORE hitting disk")
     try:
         server.trigger("creeep")
         print("  FAIL: bad command was not refused")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - any refusal beats reaching disk
         print(f"  OK   refused: {e}")
 finally:
     print(">>> stop")

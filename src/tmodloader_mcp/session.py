@@ -100,6 +100,9 @@ def _tml_pids(cfg: Config) -> set[int]:
             capture_output=True,
             text=True,
             timeout=60,
+            # An empty pid list is a legitimate answer (no game running), so a
+            # non-zero exit is parsed rather than raised.
+            check=False,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return set()
@@ -476,12 +479,27 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
             "first, it is the usual cause."
         )
     else:
+        # NARROWER THAN IT USED TO BE, BECAUSE THE OLD CLAIM WAS TOO STRONG.
+        #
+        # This said a dedicated server had "never been observed writing a
+        # heartbeat". That cannot be right: `server_client` waits on the SERVER
+        # heartbeat too (see `wanted` above), and that mode works - so the
+        # server does write one, when a client is connected.
+        #
+        # What is actually measured (2026-08-07): a server started ALONE, with
+        # the mod loading cleanly - `Adding Content: Biomancy v0.8.2` in
+        # tModLoader's own log - the world loaded and the port listening, wrote
+        # no artifact anywhere on disk in 300s. The likely mechanism is that an
+        # empty server does not tick the world, so the mod's update hooks never
+        # run; that is inference from the two observations, not something
+        # measured directly, and it is left as such rather than dressed up.
         hint = (
             "No client is involved in this mode, so Steam is NOT the likely "
-            "cause. A dedicated server has never been observed writing a "
-            "heartbeat here even with Steam up and the mod loading cleanly "
-            "(verified 2026-08-07), so `server` mode may not be usable at all "
-            "- prefer `server_client`."
+            "cause. A dedicated server running ALONE has not been observed "
+            "writing a heartbeat, even with the mod loading cleanly and the "
+            "world loaded (measured 2026-08-07) - most likely because an empty "
+            "server never ticks the world. The same server DOES report once a "
+            "client joins it, so prefer `server_client`."
         )
 
     raise SessionError(
@@ -508,6 +526,9 @@ def stop(cfg: Config, session: Session | None) -> list[int]:
                 [str(cfg.taskkill), "/F", "/PID", str(pid)],
                 capture_output=True,
                 timeout=30,
+                # A pid that died between the listing and the kill exits
+                # non-zero, and that is the outcome we wanted anyway.
+                check=False,
             )
             killed.append(pid)
         except (OSError, subprocess.SubprocessError):
