@@ -13,6 +13,19 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ### Added
 
+- `read_capture` tool and a `capture://{name}` resource — a capture's PNG comes
+  back as image content, so an agent that is not on this machine can finally see
+  what it photographed. `shot` still answers with a path and stays cheap: a
+  full-frame PNG is tens of kilobytes before base64, and a caller who only
+  wanted to know the capture succeeded should not pay for pixels. (#15)
+- `captures` tool — the capture filenames on disk, names rather than paths. (#15)
+- `captures.read()` — the one reader behind both surfaces. Containment is
+  structural: a NAME never a path, the resolved parent compared against the
+  resolved save directory (which catches `..`, absolute paths and symlinks as
+  one case), and a capture-shaped name required, because the save directory
+  also holds diag dumps, heartbeats and the world. A reader that opens whatever
+  path it is handed is a file-exfiltration primitive with an MCP interface —
+  the same leak this project exists to prevent, arriving from the other end. (#15)
 - `status` tool — whether a session is running, and what it is. Read-only, and
   the only way to ask without provoking an error: `launch` fails when a session
   exists and `diag` fails when one does not, so the cheapest question on the
