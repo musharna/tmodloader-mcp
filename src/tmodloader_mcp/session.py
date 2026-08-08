@@ -111,6 +111,13 @@ NO_EMPTY_SERVER = (
 )
 
 
+#: How long a killed process may take to leave the process table, in seconds.
+#: Long enough that a slow exit is not mistaken for a refused kill, short
+#: enough that a genuinely stuck process is reported while the caller is still
+#: paying attention.
+KILL_SETTLE = 10.0
+
+
 class SessionError(RuntimeError):
     """The game could not be launched, reached, or shut down."""
 
@@ -414,37 +421,45 @@ def launch(
         "-lang",
         "en-US",
     ]
-    subprocess.Popen(
-        server_cmd,
-        cwd=str(cfg.tml_dir),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-    )
-
-    if mode == "server_client":
-        client_cmd = [
-            str(cfg.dotnet),
-            "tModLoader.dll",
-            "-join",
-            "127.0.0.1",
-            "-port",
-            str(port),
-            "-player",
-            player,
-            "-skipselect",
-        ]
+    # THE OWNERSHIP BLOCK OPENS AT THE FIRST SPAWN, NOT AT THE FIRST WAIT.
+    #
+    # It used to start below, after both processes were already running. The
+    # window that left is small and entirely real: a client that cannot be
+    # started leaves the server up, and so does a KeyboardInterrupt arriving
+    # between the two - the very interrupt the comment below cites as the case
+    # that matters most. A leak the block was written to close, one statement
+    # above where the block began.
+    try:
         subprocess.Popen(
-            client_cmd,
+            server_cmd,
             cwd=str(cfg.tml_dir),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
         )
 
-    try:
+        if mode == "server_client":
+            client_cmd = [
+                str(cfg.dotnet),
+                "tModLoader.dll",
+                "-join",
+                "127.0.0.1",
+                "-port",
+                str(port),
+                "-player",
+                player,
+                "-skipselect",
+            ]
+            subprocess.Popen(
+                client_cmd,
+                cwd=str(cfg.tml_dir),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+
         _wait_ready(cfg, mode=mode, timeout=timeout)
-    except BaseException:
+    except BaseException as failure:
         # WHOEVER SPAWNS OWNS THEM UNTIL IT CAN HAND THEM BACK.
         #
         # This used to raise straight out. The processes it had just started
@@ -458,7 +473,17 @@ def launch(
         # during a five-minute wait is exactly when this matters most, and those
         # do not derive from Exception.
         session.started = _tml_pids(cfg) - existing
-        stop(cfg, session)
+        try:
+            stop(cfg, session)
+        except SessionError as leak:
+            # ATTACHED TO THE ORIGINAL FAILURE, NOT RAISED OVER IT. Why the
+            # launch failed is what the caller has to act on; that a process
+            # also survived the cleanup is something they need told, not
+            # something that should replace it. Raising here would swap a
+            # readiness timeout - with its mode-specific advice - for a message
+            # about pids, and the reason the game never came up would be gone
+            # from the top of the traceback.
+            failure.add_note(str(leak))
         raise
 
     session.started = _tml_pids(cfg) - existing
@@ -531,34 +556,73 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
 
 
 def stop(cfg: Config, session: Session | None) -> list[int]:
-    """Kill only the processes this session started. Returns the pids killed.
+    """Kill only the processes this session started. Returns the pids VERIFIED gone.
 
     Surgical on purpose. A developer usually has their own game open, and a
     teardown that killed every tModLoader it could find would take it with them.
+
+    ISSUING A KILL IS NOT EVIDENCE THAT ANYTHING DIED. This used to append each
+    pid to its result as soon as taskkill returned. The exit code is ignored on
+    purpose - a pid that died between the listing and the kill exits non-zero,
+    and that is the outcome we wanted - but the same ignoring absorbed the
+    opposite case, a kill that is refused while the process carries on. What
+    came back was a list of the right shape that read as a completed teardown,
+    and the mistake surfaced later and elsewhere: as the NEXT launch refusing
+    to start over a game nobody remembered leaving open.
+
+    So the result is read back off the process table, which is the thing the
+    claim has to be true about - the same move as numbering captures from the
+    directory rather than from a counter. Anything still there stays in
+    `session.started`, because a survivor that has lost its owner is exactly
+    the orphan the launch path already paid for once, arriving by the opposite
+    route: there it was never owned, here ownership was given up while the
+    process was still alive.
     """
     if session is None:
         return []
 
-    killed: list[int] = []
     live = _tml_pids(cfg)
+    aimed = sorted(session.started & live)
 
-    for pid in sorted(session.started & live):
+    for pid in aimed:
         try:
             subprocess.run(
                 [str(cfg.taskkill), "/F", "/PID", str(pid)],
                 capture_output=True,
                 timeout=30,
-                # A pid that died between the listing and the kill exits
-                # non-zero, and that is the outcome we wanted anyway.
+                # See the docstring: the exit code cannot distinguish the two
+                # failures that matter, so nothing is concluded from it.
                 check=False,
             )
-            killed.append(pid)
         except (OSError, subprocess.SubprocessError):
+            # Not skipped past - a kill that could not even be issued leaves a
+            # live process, and the check below is what will say so.
             continue
+
+    # Terminating is not instantaneous: /F asks Windows to end the process and
+    # returns before the table has caught up. Verifying immediately would
+    # report a successful kill as a survivor, which is a false alarm about the
+    # one thing this function now exists to be trusted on.
+    deadline = time.monotonic() + KILL_SETTLE
+    survivors = set(aimed) & _tml_pids(cfg)
+    while survivors and time.monotonic() < deadline:
+        time.sleep(0.5)
+        survivors = set(aimed) & _tml_pids(cfg)
 
     for name in (TRIGGER_NAME,):
         for server in (False, True):
             cfg.artifact(name, server=server).unlink(missing_ok=True)
 
-    session.started.clear()
-    return killed
+    session.started = survivors
+
+    if survivors:
+        raise SessionError(
+            f"taskkill was issued for {aimed}, but {sorted(survivors)} is still "
+            f"running {KILL_SETTLE:.0f}s later. Those pids remain owned by this "
+            "session, so calling `stop` again will retry them - but if they "
+            "survive that too, end them yourself: a leftover game holds the "
+            ".tmod against the next build and makes the next launch refuse to "
+            "start over a process nobody remembers starting."
+        )
+
+    return aimed
