@@ -106,8 +106,13 @@ class StopOut(TypedDict):
     annotations=_MUTATES,
     structured_output=True,
 )
-def build_mod() -> BuildOut:
+def build_mod(timeout: float = 600.0) -> BuildOut:
     """Compile the configured mod source into a .tmod.
+
+    Args:
+        timeout: Seconds to wait for the compile. A large mod on a slow machine
+            can outlast the default, and a build that runs out of time says so
+            rather than reporting a compile failure with no errors in it.
 
     tModLoader REFUSES to build while the game is open, and says so with an
     error that otherwise reads like a compile failure. That case is reported as
@@ -118,7 +123,7 @@ def build_mod() -> BuildOut:
     Success is read from the output, not the exit code, which is not reliable
     here.
     """
-    result = build_mod_impl.build(_cfg())
+    result = build_mod_impl.build(_cfg(), timeout=timeout)
     return BuildOut(
         ok=result.ok,
         errors=result.errors,
@@ -458,8 +463,14 @@ def log_files() -> dict[str, Any]:
     annotations=_DESTRUCTIVE,
     structured_output=True,
 )
-def stop() -> StopOut:
+def stop(settle: float = session_mod.KILL_SETTLE) -> StopOut:
     """Kill only the processes this session started, and confirm they are gone.
+
+    Args:
+        settle: Seconds a killed process may take to leave the process table
+            before it counts as a survivor. `/F` returns before Windows has
+            caught up, so verifying too eagerly reports a successful teardown as
+            a refused one — raise this on a loaded machine rather than lower it.
 
     Surgical on purpose: a developer usually has their own game open, and a
     teardown that killed every tModLoader it could find would take it with them.
@@ -478,7 +489,7 @@ def stop() -> StopOut:
 
     # Not in a `finally`: a survivor has to stay owned, so the session is
     # released only once stop() has confirmed there is nothing left to own.
-    killed = session_mod.stop(_cfg(), _session)
+    killed = session_mod.stop(_cfg(), _session, settle=settle)
     _session = None
     return StopOut(killed_pids=killed)
 
