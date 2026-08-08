@@ -13,6 +13,11 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ### Changed
 
+- `build_mod` accepts `timeout` and `stop` accepts `settle`, finishing what
+  #14 started. Both bounds existed underneath and neither was reachable from the
+  surface — `stop` grew `settle` in #11 _because_ a bound nothing can set is a
+  bound nothing can check, and the tool still could not set it. A test now asks
+  it of every timed tool at once, rather than of the ones somebody noticed. (#18)
 - **`logs` can reach every log, and the run that already rotated away.** It read
   `client.log` or `server.log` and nothing else, of six log files — `Launch.log`
   and the `environment-*.log` pair are where a run that dies BEFORE the game
