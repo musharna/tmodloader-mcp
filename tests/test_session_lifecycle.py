@@ -40,6 +40,44 @@ class FakeCfg:
         return self.root / (f"server-{name}" if server else name)
 
 
+class FakeWindows:
+    """A process table a kill can actually change.
+
+    The fake this replaces recorded which pids `taskkill` was aimed at and
+    reported success for all of them - which is precisely the assumption the
+    code under test was making, so it could not have disagreed with it. A
+    double is only worth what it can contradict.
+
+    `unkillable` is how a kill that does not take is expressed: taskkill still
+    runs and still returns, and the process is still there afterwards.
+    """
+
+    def __init__(self, live: set[int], *, unkillable: frozenset[int] = frozenset()):
+        self.live = set(live)
+        self.unkillable = set(unkillable)
+        self.aimed: list[int] = []
+
+    def run(self, cmd, **kwargs):
+        if "/PID" in cmd:
+            pid = int(cmd[cmd.index("/PID") + 1])
+            self.aimed.append(pid)
+            if pid not in self.unkillable:
+                self.live.discard(pid)
+
+        class R:
+            returncode = 0
+
+        return R()
+
+    def install(self, monkeypatch) -> None:
+        monkeypatch.setattr(session_mod, "_tml_pids", lambda cfg: set(self.live))
+        monkeypatch.setattr(session_mod.subprocess, "run", self.run)
+        # The settle poll waits for the table to catch up with the kill. This
+        # table is instant, so the wait is only wall-clock the suite spends
+        # proving a survivor is a survivor.
+        monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+
+
 # ---- shot() ------------------------------------------------------------
 
 
@@ -137,32 +175,31 @@ def test_a_second_session_does_not_overwrite_the_first_ones_captures(
 
 
 def _fake_launch_world(monkeypatch, *, existing, after, ready_raises):
-    """Wire launch()'s dependencies so no game is started."""
-    cfg_pids = iter([existing] + [after] * 10)
-    monkeypatch.setattr(session_mod, "_tml_pids", lambda cfg: next(cfg_pids))
+    """Wire launch()'s dependencies so no game is started.
+
+    Backed by a real (fake) process table rather than a canned sequence of
+    answers: spawning puts `after` in it and killing takes pids out of it, so
+    what these tests read back is a consequence of what happened rather than a
+    reply arranged in advance.
+    """
+    windows = FakeWindows(existing)
+    windows.install(monkeypatch)
     monkeypatch.setattr(session_mod, "world_problem", lambda w: None)
-    monkeypatch.setattr(session_mod.subprocess, "Popen", lambda *a, **k: None)
 
-    killed: list[int] = []
+    def fake_popen(*a, **k):
+        # Whole set per spawn, not one pid each: how many processes a mode
+        # starts is the code's business, and pairing them here would make this
+        # helper break when that changes rather than when behaviour does.
+        windows.live |= set(after)
 
-    def fake_run(cmd, **kwargs):
-        # stop() shells out to taskkill; record what it aimed at.
-        if "/PID" in cmd:
-            killed.append(int(cmd[cmd.index("/PID") + 1]))
-
-        class R:
-            returncode = 0
-
-        return R()
-
-    monkeypatch.setattr(session_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(session_mod.subprocess, "Popen", fake_popen)
 
     def fake_wait(cfg, *, mode, timeout):
         if ready_raises:
             raise session_mod.SessionError("no live heartbeat within 300s")
 
     monkeypatch.setattr(session_mod, "_wait_ready", fake_wait)
-    return killed
+    return windows.aimed
 
 
 def test_a_failed_launch_kills_what_it_spawned(monkeypatch):
@@ -470,3 +507,153 @@ def test_a_reply_that_never_settles_times_out_rather_than_hanging(
 
     with pytest.raises(TriggerError):
         sess._await_text(reply, timeout=1.0, what="reply")
+
+
+# ---- stop() ------------------------------------------------------------
+
+
+def _stopping(monkeypatch, *, started, live, unkillable=frozenset()):
+    """A session that believes it started `started`, over a table holding `live`."""
+    windows = FakeWindows(live, unkillable=unkillable)
+    windows.install(monkeypatch)
+
+    session = Session(
+        cfg=FakeCfg(Path("/tmp")), mode="server_client", port=1, player="n43n"
+    )
+    session.started = set(started)
+    return windows, session
+
+
+def test_stop_does_not_report_killing_something_that_is_still_running(monkeypatch):
+    """ISSUING A KILL IS NOT EVIDENCE THAT ANYTHING DIED.
+
+    `stop` ran taskkill and then appended the pid to its result, and the two
+    were never connected: the exit code is deliberately ignored - a pid that
+    died between the listing and the kill exits non-zero, and that is the
+    outcome we wanted - but the same ignoring absorbs the opposite case, a
+    taskkill that is refused while the process carries on.
+
+    What comes back then is the worst kind of wrong: a list of pids, of the
+    right shape, that reads as a completed teardown. The failure surfaces later
+    and somewhere else, as the NEXT launch refusing to start over a game
+    nobody remembers leaving open.
+
+    The fix is not a better reading of taskkill's exit code. It is to ask the
+    process table, which is the thing the claim has to be true about - the same
+    move as numbering captures from the directory rather than from a counter.
+    """
+    windows, session = _stopping(
+        monkeypatch, started={4808}, live={4808}, unkillable={4808}
+    )
+
+    with pytest.raises(session_mod.SessionError) as e:
+        session_mod.stop(session.cfg, session)
+
+    assert windows.aimed == [4808], "it never even tried to kill it"
+    assert "4808" in str(e.value), (
+        "the survivor has to be named - the pid is the only thing that makes "
+        "it findable by hand"
+    )
+
+
+def test_a_process_that_outlived_its_kill_stays_owned(monkeypatch):
+    """THE OTHER HALF, and the one that turns a bad report into an orphan.
+
+    `stop` cleared `started` unconditionally, so a process that survived stopped
+    being anybody's - and `server.py` drops the session on the way out, which
+    is what makes it unreachable rather than merely mis-reported. That is the
+    same orphan this module already paid for once on the launch path, arriving
+    by the opposite route: there the process was never owned, here ownership
+    was given up while the process was still alive.
+    """
+    _, session = _stopping(monkeypatch, started={4808}, live={4808}, unkillable={4808})
+
+    with pytest.raises(session_mod.SessionError):
+        session_mod.stop(session.cfg, session)
+
+    assert session.started == {4808}, (
+        "a surviving process lost its owner, so nothing can be asked to kill it again"
+    )
+
+
+def test_stop_reports_the_processes_that_actually_died(monkeypatch):
+    """POSITIVE CONTROL. Without it, a `stop` that reported nothing and raised
+    every time would satisfy both tests above."""
+    windows, session = _stopping(monkeypatch, started={4808, 42224}, live={4808, 42224})
+
+    killed = session_mod.stop(session.cfg, session)
+
+    assert sorted(killed) == [4808, 42224]
+    assert session.started == set(), "nothing survived, so nothing is still owned"
+    assert windows.live == set()
+
+
+def test_a_slow_exit_is_not_mistaken_for_a_refused_kill(monkeypatch):
+    """THE FALSE ALARM THE SETTLE POLL EXISTS TO PREVENT.
+
+    Verification that asked the process table once, immediately, would pass
+    every test above and be wrong in the common case: /F asks Windows to end
+    the process and returns before the table has caught up, so a perfectly
+    successful teardown would report a survivor and refuse to release its
+    session. A check that cries wolf about the one thing it was added to be
+    trusted on is worse than no check.
+
+    Here the pid ignores the kill and then leaves on its own a moment later,
+    which is what a normal shutdown looks like from outside.
+    """
+    _, session = _stopping(monkeypatch, started={4808}, live={4808}, unkillable={4808})
+    tables = iter([{4808}, {4808}])
+    monkeypatch.setattr(session_mod, "_tml_pids", lambda cfg: next(tables, set()))
+
+    killed = session_mod.stop(session.cfg, session)
+
+    assert killed == [4808], "a process that did leave was not reported as killed"
+    assert session.started == set()
+
+
+def test_stop_still_leaves_alone_a_game_it_did_not_start(monkeypatch):
+    """The surgical property, restated against the new verification.
+
+    A teardown that verified by clearing the table - or that widened its aim to
+    make sure - would pass the tests above and take the developer's own game
+    with it.
+    """
+    windows, session = _stopping(monkeypatch, started={4808}, live={4808, 31337})
+
+    session_mod.stop(session.cfg, session)
+
+    assert windows.aimed == [4808], "it aimed at a process it had not started"
+    assert 31337 in windows.live, "it killed a game that was not its to kill"
+
+
+def test_a_spawn_that_fails_halfway_does_not_leak_the_half_that_started(monkeypatch):
+    """THE OWNERSHIP WINDOW OPENED TOO LATE.
+
+    `launch` spawned the server, spawned the client, and only THEN entered the
+    try that owns them. Anything raising in between - a client that cannot be
+    started, or the KeyboardInterrupt that comment says matters most - left the
+    server running and held by nobody, which is the exact leak the try was
+    added to close, one statement above where it starts.
+
+    Whoever spawns owns them from the first spawn, not from the first wait.
+    """
+    windows = FakeWindows(set())
+    windows.install(monkeypatch)
+    monkeypatch.setattr(session_mod, "world_problem", lambda w: None)
+    monkeypatch.setattr(session_mod, "_wait_ready", lambda cfg, *, mode, timeout: None)
+
+    def half_a_spawn(cmd, **kwargs):
+        if "-join" in cmd:
+            raise OSError("the client could not be started")
+        windows.live.add(4808)
+
+    monkeypatch.setattr(session_mod.subprocess, "Popen", half_a_spawn)
+
+    with pytest.raises(OSError):
+        session_mod.launch(FakeCfg(Path("/tmp")), "server_client", port=1)
+
+    assert windows.aimed == [4808], (
+        "the server it had already started was left running when the client "
+        "failed to start"
+    )
+    assert 4808 not in windows.live

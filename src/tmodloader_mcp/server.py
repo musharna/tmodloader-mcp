@@ -302,16 +302,25 @@ def logs(
     structured_output=True,
 )
 def stop() -> StopOut:
-    """Kill only the processes this session started.
+    """Kill only the processes this session started, and confirm they are gone.
 
     Surgical on purpose: a developer usually has their own game open, and a
     teardown that killed every tModLoader it could find would take it with them.
+
+    `killed_pids` are pids VERIFIED to have left the process table, not pids a
+    kill was aimed at. If any survive, this FAILS rather than answering with a
+    shorter list — and the session is deliberately kept, so calling `stop`
+    again retries exactly those pids. Releasing it would leave a running game
+    that nothing owns, which is how the next `launch` ends up refusing to start
+    over a process nobody remembers starting.
     """
     global _session
 
     if _session is None:
         return StopOut(killed_pids=[], note="no session was running")
 
+    # Not in a `finally`: a survivor has to stay owned, so the session is
+    # released only once stop() has confirmed there is nothing left to own.
     killed = session_mod.stop(_cfg(), _session)
     _session = None
     return StopOut(killed_pids=killed)
