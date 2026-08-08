@@ -26,6 +26,17 @@ rather than dated individually; the PR numbers are the audit trail.
   also holds diag dumps, heartbeats and the world. A reader that opens whatever
   path it is handed is a file-exfiltration primitive with an MCP interface —
   the same leak this project exists to prevent, arriving from the other end. (#15)
+- `status` tool — whether a session is running, and what it is. Read-only, and
+  the only way to ask without provoking an error: `launch` fails when a session
+  exists and `diag` fails when one does not, so the cheapest question on the
+  surface previously had to be asked by breaking something. (#14)
+- `diag` now returns `records` beside `fields` — the indented per-record lines
+  the scalars only summarise. `fields["npcs"]` says `active=6 mutated=1`;
+  `records["npcs"]` says which six. `diag.sections()` had parsed them since it
+  was written and no tool ever called it, so they were parsed and dropped. (#14)
+- `launch` accepts `world` and `timeout`; `trigger`, `diag` and `shot` accept
+  `timeout`. All were supported underneath and exposed by none of them, so an
+  agent could neither choose a world nor wait longer on a slow machine. (#14)
 - `triggers.parse()` — reads a trigger payload back the way the mod's
   `DevCommands.Parse` will, so `compose()` can refuse anything that would not
   survive the round trip. (#8)
