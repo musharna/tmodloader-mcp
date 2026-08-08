@@ -199,7 +199,7 @@ def test_a_successful_launch_keeps_its_processes(monkeypatch):
         monkeypatch, existing=set(), after={4808}, ready_raises=False
     )
 
-    sess = session_mod.launch(FakeCfg(Path("/tmp")), "server", port=1)
+    sess = session_mod.launch(FakeCfg(Path("/tmp")), "server_client", port=1)
 
     assert killed == [], "a successful launch killed its own game"
     assert sess.started == {4808}, "the session did not record what it started"
@@ -219,9 +219,12 @@ def test_refusing_to_launch_over_a_running_game_kills_nothing(monkeypatch):
     )
 
     with pytest.raises(session_mod.SessionError) as e:
-        session_mod.launch(FakeCfg(Path("/tmp")), "server", port=1)
+        session_mod.launch(FakeCfg(Path("/tmp")), "server_client", port=1)
 
-    assert "already running" in str(e.value)
+    assert "already running" in str(e.value), (
+        "it refused for the wrong reason - the already-running guard must come "
+        "before any mode-specific refusal, or this stops testing what it says"
+    )
     assert killed == [], "refusing to launch killed the game that was already up"
 
 
@@ -239,22 +242,66 @@ def _wait_ready_error(tmp_path, monkeypatch, mode):
     return str(e.value)
 
 
-def test_server_mode_failure_does_not_blame_steam(tmp_path, monkeypatch):
-    """THE MISATTRIBUTION THAT COST A DEBUGGING SESSION.
+def test_server_mode_is_refused_because_it_cannot_ever_be_ready(monkeypatch):
+    """MEASURED, THEN REFUSED - the same treatment singleplayer already gets.
 
-    The advice was unconditional, so a `server` run - which starts no client at
-    all - was told to check that its client's Steam login was working. Steam
-    happened to be down at the time, which made the wrong advice fit, and both
-    modes got filed under one cause. Only bringing Steam up, and watching
-    `server` fail identically, exposed it.
+    A dedicated server runs NO ModSystem update hooks until a client connects,
+    so the mod never polls, never writes a heartbeat, and `launch`'s promise -
+    "started AND able to answer" - cannot be met by a server on its own.
 
-    An error that names a cause the mode cannot have is worse than one that
-    names none: it is confidently wrong, and it gets believed.
+    Measured 2026-08-07 on one server process, changing only whether a client
+    was attached: alone for 90s it wrote nothing anywhere on disk; 30s after a
+    client joined THAT SAME PROCESS its heartbeat appeared, reporting
+    `polls: 1` and `hooks-seen: PostUpdateEverything,PostUpdateWorld`.
+
+    So this is refused up front rather than after a five-minute timeout, and
+    the refusal carries the measurement - the previous version spent 300s
+    rediscovering it and then guessed at why.
     """
-    message = _wait_ready_error(tmp_path, monkeypatch, "server")
+    killed = _fake_launch_world(
+        monkeypatch, existing=set(), after={4808}, ready_raises=False
+    )
 
-    assert "Steam is NOT the likely cause" in message
+    with pytest.raises(session_mod.SessionError) as e:
+        session_mod.launch(FakeCfg(Path("/tmp")), "server", port=1)
+
+    message = str(e.value)
     assert "server_client" in message, "it should point at the mode that works"
+    assert "client" in message, "it should say what is missing"
+    assert killed == [], "it should refuse before starting anything, not clean up after"
+
+
+def test_a_server_heartbeat_missing_under_server_client_does_not_blame_steam(
+    tmp_path, monkeypatch
+):
+    """THE MISATTRIBUTION THAT COST A DEBUGGING SESSION, kept as a live case.
+
+    The advice was once unconditional, so a run with no client involved was
+    told to check its client's Steam login. Steam happened to be down, which
+    made the wrong advice fit, and two different failures got filed under one
+    cause.
+
+    `server` mode is refused outright now, but this branch is still reachable
+    and still matters: under `server_client`, the CLIENT can be up while the
+    SERVER heartbeat is missing. Steam is not the explanation for that one.
+    """
+    cfg = FakeCfg(tmp_path)
+    client_hb = cfg.artifact("biomancy-hooks.txt", server=False)
+    monkeypatch.setattr(
+        session_mod, "heartbeat_is_live", lambda p: p.name == client_hb.name
+    )
+    monkeypatch.setattr(session_mod, "world_is_ready", lambda text: False)
+
+    with pytest.raises(session_mod.SessionError) as e:
+        session_mod._wait_ready(cfg, mode="server_client", timeout=0.0)
+
+    message = str(e.value)
+    assert "Steam is NOT the likely cause" in message
+    assert "join" in message, "it should say the server reports once a client joins"
+    assert "No client is involved" not in message, (
+        "a client IS involved here - it is up, and the SERVER is the missing "
+        "one. The sentence was written for a mode that no longer reaches this."
+    )
 
 
 def test_client_mode_failure_still_blames_steam(tmp_path, monkeypatch):
