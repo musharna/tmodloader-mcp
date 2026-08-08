@@ -128,10 +128,12 @@ def launch(
     """Start tModLoader and wait until it can actually answer.
 
     Args:
-        mode: "server" for a dedicated server alone, or "server_client" for a
-            server plus one joined client — the only way to observe what a
-            CLIENT sees, which is where most sync bugs live. "singleplayer" is
-            refused: Terraria has no headless entry point for it.
+        mode: "server_client" — a server plus one joined client. It is the only
+            mode there is, and the only way to observe what a CLIENT sees, which
+            is where most sync bugs live. The other two are refused because the
+            engine cannot satisfy them: "singleplayer" has no headless entry
+            point, and "server" alone never ticks, so the mod never polls and
+            never answers.
         port: Server port. Change it only if something else holds the default.
         player: Character name for the client. Must already exist — `-player`
             does not create one, and a duplicate name is kicked.
