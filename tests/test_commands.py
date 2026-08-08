@@ -6,13 +6,23 @@ import pytest
 
 from tmodloader_mcp import commands as commands_mod
 
-#: A VERBATIM sample of what `DevCommandRegistry.Publish` writes, tabs and all.
+#: THE REAL 975 BYTES a real Biomancy wrote, captured 2026-08-08.
 #:
-#: The point of this module is that the harness stops holding its own idea of
-#: the mod, so a fixture invented here to suit the parser would put the same
-#: mistake back one layer down: it would prove the reader reads what this file
-#: imagines, which is exactly what the old hardcoded list proved. Copied from
-#: the producer instead — two header comments, then name, flag, summary.
+#: Not transcribed from the C# — transcribed FROM THE ARTIFACT. The whole point
+#: of this module is that the harness stops holding its own idea of the mod, and
+#: a fixture written here to suit the parser would put the same mistake back one
+#: layer down: it would prove the reader reads what this file imagines, which is
+#: exactly what the hardcoded list proved for years.
+#:
+#: So it was produced rather than composed. A dedicated server was launched
+#: headlessly against BiomancySelfTest.wld with both candidate files deleted
+#: first, and this is what appeared, byte for byte.
+#:
+#: What that run also established, by what did NOT appear: no heartbeat. An
+#: empty server never ticks, so `biomancy-hooks-server.txt` was never written —
+#: while the list was, because publishing happens at Load(). That is the case
+#: this whole change is for, measured rather than argued: the state where
+#: readiness times out is a state where the command list is already on disk.
 PUBLISHED = (
     "# commands served by this responder, written at load\n"
     "# name\targ|noarg\tsummary\n"
@@ -21,18 +31,61 @@ PUBLISHED = (
     "shot\targ\tSave a PNG of one region of the frame, from the back buffer "
     "(topleft, topright, bottomleft, bottomright, full).\n"
     "mutate\tnoarg\tPlant a mutated NPC in a world that is already ticking.\n"
+    "vat\tnoarg\tRestart gestation in the first vat found, server-side.\n"
+    "creature\tnoarg\tRelease an assembled creature into a live world.\n"
+    "kill\tnoarg\tKill every mutated enemy, server-side, so their loot drops.\n"
+    "strains\tnoarg\tWrite the strain report, as the Field Notebook does.\n"
+    "seed\tnoarg\tSeed a strain in the biome a connected player is standing in.\n"
+    "creep\tnoarg\tRegister a creep source where a connected player is standing.\n"
+    "place\tnoarg\tStamp a solid patch of a creep tile type into the world.\n"
     "killcreep\tnoarg\tRemove every creep source, so the converter puts the "
     "terrain back.\n"
 )
 
+#: What this harness used to hardcode. Kept ONLY as the check below.
+WAS_HARDCODED = (
+    "capture",
+    "diag",
+    "mutate",
+    "vat",
+    "creature",
+    "kill",
+    "strains",
+    "seed",
+    "creep",
+    "place",
+    "killcreep",
+    "shot",
+)
+
 
 def test_reads_what_the_mod_actually_writes():
-    """The contract, against the producer's own format."""
+    """The contract, against bytes a real mod really wrote."""
     served = commands_mod.parse_published(PUBLISHED)
 
-    assert served.names == ("capture", "diag", "shot", "mutate", "killcreep")
+    assert len(served) == 12
     assert served.taking_an_argument == ("shot",)
-    assert len(served) == 5
+    assert served.names[0] == "capture"
+    assert served.names[-1] == "killcreep"
+
+
+def test_the_published_list_agrees_with_what_was_hardcoded():
+    """The migration's one-time proof, and the reason to trust the swap.
+
+    Reading the list instead of keeping one is only an improvement if the thing
+    read back is the thing that was there. If the published set differed from
+    the twelve this harness carried, every existing script would have changed
+    behaviour silently at the moment of the swap — some command refused that used
+    to work, or accepted that used to be caught.
+
+    It does not differ, and that is a measurement: these twelve names and the one
+    argument-taker came off a real run, and match the old constant exactly. What
+    changes is not the answer but where it comes from.
+    """
+    served = commands_mod.parse_published(PUBLISHED)
+
+    assert sorted(served.names) == sorted(WAS_HARDCODED)
+    assert served.taking_an_argument == ("shot",)
 
 
 def test_the_summary_survives_whole():
@@ -65,8 +118,10 @@ def test_resolution_ignores_case_both_ways():
 def test_a_command_that_is_absent_is_absent():
     served = commands_mod.parse_published(PUBLISHED)
 
-    assert served.get("vat") is None
-    assert "vat" not in served
+    # A plausible verb this mod does not serve, which is the case that matters:
+    # another mod's command, or one this build compiled out.
+    assert served.get("teleport") is None
+    assert "teleport" not in served
 
     # Positive control: the lookup is not simply failing.
     assert served.get("diag") is not None
@@ -198,10 +253,15 @@ def test_a_list_with_no_commands_is_not_the_same_as_no_list(tmp_path):
 
 
 def test_reads_a_real_file_off_disk(tmp_path):
-    """Positive control for every refusal above: the happy path works."""
+    """Positive control for every refusal above: the happy path works.
+
+    Byte for byte what the mod wrote, through the same entry point the session
+    uses — so this exercises the file read, not just the string parser.
+    """
     path = tmp_path / "biomancy-commands.txt"
     path.write_text(PUBLISHED, encoding="utf-8")
 
     served = commands_mod.read(path)
 
-    assert served.names == ("capture", "diag", "shot", "mutate", "killcreep")
+    assert sorted(served.names) == sorted(WAS_HARDCODED)
+    assert served.get("shot").takes_argument is True

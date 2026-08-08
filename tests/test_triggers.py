@@ -8,6 +8,38 @@ from tmodloader_mcp import commands as commands_mod
 from tmodloader_mcp import server as server_mod
 from tmodloader_mcp import triggers
 
+
+def test_every_artifact_the_class_names_is_one_the_launcher_clears():
+    """`all` is what a launch deletes, and a name missing from it is never
+    cleared — so a file from a previous run is read as this run's.
+
+    Asked of the CLASS rather than of the names somebody remembered. Adding an
+    artifact and forgetting to clear it is silent by construction: everything
+    still works, and the only symptom is a stale answer that looks current.
+    `commands` is the case in point — its whole value as an "is a responder
+    running" signal depends on a previous run's copy not being left behind.
+    """
+    artifacts = triggers.artifacts_for("Biomancy")
+
+    named = {
+        getattr(artifacts, attribute)
+        for attribute in dir(triggers.Artifacts)
+        if attribute != "all"
+        and isinstance(getattr(triggers.Artifacts, attribute, None), property)
+    }
+
+    # Positive control: an introspection that found nothing would make the
+    # assertion below pass while checking no artifact at all.
+    assert len(named) >= 6, f"only found {named} - the introspection is broken"
+    assert artifacts.commands in named
+
+    missing = sorted(named - set(artifacts.all))
+    assert not missing, (
+        f"{missing} are artifacts this class names but a launch never clears, "
+        f"so a previous run's copy survives into the next one"
+    )
+
+
 #: What a running Biomancy publishes, as `compose` now receives it.
 #:
 #: A FIXTURE rather than a constant this module believes in. It used to be
