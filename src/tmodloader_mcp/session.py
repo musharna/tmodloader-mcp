@@ -117,6 +117,11 @@ NO_EMPTY_SERVER = (
 #: paying attention.
 KILL_SETTLE = 10.0
 
+#: How often the settle poll asks the process table again. Capped by whatever
+#: is left of the settle, so a caller passing a bound shorter than this gets the
+#: bound it asked for rather than one poll's worth of overshoot.
+SETTLE_POLL = 0.5
+
 
 class SessionError(RuntimeError):
     """The game could not be launched, reached, or shut down."""
@@ -555,8 +560,19 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
     )
 
 
-def stop(cfg: Config, session: Session | None) -> list[int]:
+def stop(
+    cfg: Config, session: Session | None, *, settle: float = KILL_SETTLE
+) -> list[int]:
     """Kill only the processes this session started. Returns the pids VERIFIED gone.
+
+    `settle` is how long a killed process may take to leave the process table.
+    It is an ARGUMENT because every other timed thing here takes one - `ask`,
+    `launch`, `build`, `_await_text` - and this was the exception. A bound
+    nothing can set is a bound nothing can check: the tests could not shorten
+    it, so they reached for the only lever left and patched `time.sleep` to a
+    no-op, which shortens nothing. The loop ends on `time.monotonic()`, so
+    removing the sleep left the full wait in place and took away the only thing
+    yielding during it - two tests spinning at full CPU for ten seconds each.
 
     Surgical on purpose. A developer usually has their own game open, and a
     teardown that killed every tModLoader it could find would take it with them.
@@ -603,10 +619,17 @@ def stop(cfg: Config, session: Session | None) -> list[int]:
     # returns before the table has caught up. Verifying immediately would
     # report a successful kill as a survivor, which is a false alarm about the
     # one thing this function now exists to be trusted on.
-    deadline = time.monotonic() + KILL_SETTLE
+    #
+    # The poll never outlasts what is left of the settle, so the loop cannot
+    # overshoot its own bound and cannot spin: every iteration either sleeps or
+    # ends.
+    deadline = time.monotonic() + settle
     survivors = set(aimed) & _tml_pids(cfg)
-    while survivors and time.monotonic() < deadline:
-        time.sleep(0.5)
+    while survivors:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(SETTLE_POLL, remaining))
         survivors = set(aimed) & _tml_pids(cfg)
 
     for name in (TRIGGER_NAME,):
@@ -618,7 +641,7 @@ def stop(cfg: Config, session: Session | None) -> list[int]:
     if survivors:
         raise SessionError(
             f"taskkill was issued for {aimed}, but {sorted(survivors)} is still "
-            f"running {KILL_SETTLE:.0f}s later. Those pids remain owned by this "
+            f"running {settle:.0f}s later. Those pids remain owned by this "
             "session, so calling `stop` again will retry them - but if they "
             "survive that too, end them yourself: a leftover game holds the "
             ".tmod against the next build and makes the next launch refuse to "
