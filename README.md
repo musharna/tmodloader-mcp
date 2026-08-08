@@ -25,8 +25,15 @@ What earns the surface here is that a running game is not stateless:
 | `diag`            | Structured fields, not text you `sed` and misparse           |
 | `trigger`         | The write → poll → timeout → clean-up loop, written once     |
 | `shot`            | A capture path per call, and refusals reported as refusals   |
+| `read_capture`    | The picture itself, for an agent not on this machine         |
 | `build_mod`       | Encodes tModLoader's refusal to build while the game is open |
 | `logs`            | Either side's log, filtered                                  |
+
+Captures are also addressable as `capture://{name}` resources. Both surfaces go
+through one reader that accepts a **name, never a path**, and serves only
+capture-shaped files whose resolved parent is the save directory — a reader that
+opened whatever it was handed would be the leak this project exists to prevent,
+arriving from the other end.
 
 Those glue steps are where the hand-written version actually went wrong: a
 `pkill` pattern that matched its own command line, a readiness check that passed

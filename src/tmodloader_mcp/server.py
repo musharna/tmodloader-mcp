@@ -11,10 +11,11 @@ from typing import Any, NotRequired, TypedDict
 
 # mcp 2.x renamed FastMCP to MCPServer and moved it out of mcp.server.fastmcp,
 # which no longer exists. Same class, same decorator, same kwargs.
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Image, MCPServer
 from mcp.types import ToolAnnotations
 
 from . import build as build_mod_impl
+from . import captures as captures_mod
 from . import config as config_mod
 from . import diag as diag_mod
 from . import session as session_mod
@@ -251,6 +252,58 @@ def shot(region: str, target: str | None = None) -> ShotOut:
 
     path = _session.shot(region, target=target)
     return ShotOut(path=str(path), region=region)
+
+
+@mcp.tool(
+    title="List the captures on disk",
+    annotations=_READ_ONLY,
+    structured_output=True,
+)
+def captures() -> dict[str, list[str]]:
+    """Every capture in the save directory, newest last.
+
+    Names, not paths — a path handed out is a path that can come back changed,
+    and `read_capture` deliberately accepts only a name.
+    """
+    return {"captures": captures_mod.available(_cfg().save_dir)}
+
+
+@mcp.tool(
+    title="Read a capture back as an image",
+    annotations=_READ_ONLY,
+)
+def read_capture(name: str) -> Image:
+    """Return one capture's PNG as image content.
+
+    `shot` answers with a filesystem path, which is worth nothing to an agent
+    that is not running on this machine. This is how the picture itself gets
+    back, and it is a SEPARATE call on purpose: a full-frame PNG is tens of
+    kilobytes before base64, so a caller that only wanted to know the capture
+    succeeded should not be made to pay for the pixels.
+
+    Args:
+        name: A capture filename from `captures`, e.g.
+            `biomancy-shot-001-topleft.png`. A NAME, never a path — see
+            `captures.read` for why the containment is structural.
+    """
+    save_dir = _cfg().save_dir
+    return Image(data=captures_mod.read(save_dir, name), format="png")
+
+
+@mcp.resource(
+    "capture://{name}",
+    title="A captured frame",
+    mime_type="image/png",
+)
+def capture_resource(name: str) -> bytes:
+    """The same capture, addressable as a resource.
+
+    The server was tools-only, which is a poor fit for something that is
+    plainly an artifact rather than an action. Same reader, same refusals — a
+    second surface, not a second implementation, because two paths to one file
+    is how one of them ends up with a weaker check.
+    """
+    return captures_mod.read(_cfg().save_dir, name)
 
 
 @mcp.tool(
