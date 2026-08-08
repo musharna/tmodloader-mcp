@@ -31,18 +31,25 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-#: What `shot` writes: the mod's drop-box name plus the index and region this
-#: harness renames it to. Anchored at both ends - an unanchored match would
-#: accept `evil-biomancy-shot-001-full.png.exe`.
-CAPTURE_NAME = re.compile(r"^biomancy-shot-\d{3}-[a-z]+\.png$")
+
+def capture_pattern(mod_name: str) -> re.Pattern[str]:
+    """What `shot` writes for ONE mod: its artifact prefix, plus the index and
+    region this harness renames the drop box to.
+
+    Anchored at both ends — an unanchored match would accept
+    `evil-biomancy-shot-001-full.png.exe`. Built per mod rather than fixed,
+    because two mods share one save directory and neither should be served the
+    other's captures.
+    """
+    return re.compile(rf"^{re.escape(mod_name.lower())}-shot-\d{{3}}-[a-z]+\.png$")
 
 
 class CaptureError(RuntimeError):
     """The named capture cannot be served, and the message says which rule."""
 
 
-def available(save_dir: Path) -> list[str]:
-    """Every capture in the save directory, sorted, names only.
+def available(save_dir: Path, mod_name: str) -> list[str]:
+    """Every capture THIS MOD wrote, sorted, names only.
 
     Names rather than paths for the same reason `read` takes one: a path handed
     out is a path that can come back changed.
@@ -50,12 +57,13 @@ def available(save_dir: Path) -> list[str]:
     if not save_dir.is_dir():
         return []
 
+    pattern = capture_pattern(mod_name)
     return sorted(
-        entry.name for entry in save_dir.iterdir() if CAPTURE_NAME.match(entry.name)
+        entry.name for entry in save_dir.iterdir() if pattern.match(entry.name)
     )
 
 
-def read(save_dir: Path, name: str) -> bytes:
+def read(save_dir: Path, mod_name: str, name: str) -> bytes:
     """The bytes of one capture, or `CaptureError` saying why not.
 
     The three refusals are deliberately distinct: "that is not a capture name",
@@ -63,11 +71,12 @@ def read(save_dir: Path, name: str) -> bytes:
     are different mistakes, and collapsing them into one message makes a typo
     look like a security refusal.
     """
-    if not CAPTURE_NAME.match(name):
+    if not capture_pattern(mod_name).match(name):
         raise CaptureError(
-            f"{name!r} is not a capture name. Only files this harness wrote - "
-            f"biomancy-shot-<index>-<region>.png - can be read back; the save "
-            "directory also holds diag dumps, heartbeats and the world."
+            f"{name!r} is not a capture name for {mod_name}. Only files this "
+            f"harness wrote - {mod_name.lower()}-shot-<index>-<region>.png - can "
+            "be read back; the save directory also holds diag dumps, heartbeats, "
+            "the world, and any other mod's captures."
         )
 
     root = save_dir.resolve()
