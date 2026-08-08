@@ -72,10 +72,12 @@ class FakeWindows:
     def install(self, monkeypatch) -> None:
         monkeypatch.setattr(session_mod, "_tml_pids", lambda cfg: set(self.live))
         monkeypatch.setattr(session_mod.subprocess, "run", self.run)
-        # The settle poll waits for the table to catch up with the kill. This
-        # table is instant, so the wait is only wall-clock the suite spends
-        # proving a survivor is a survivor.
-        monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+        # `time.sleep` is deliberately NOT patched here any more. It used to be,
+        # to keep the settle poll from costing the suite anything, and it did
+        # the opposite: the poll ends on `time.monotonic()`, so a no-op sleep
+        # left the full ten seconds in place and removed the only thing yielding
+        # during them. Tests that want a short settle now say so - see
+        # TEST_SETTLE - which is a lever that actually moves the thing it names.
 
 
 # ---- shot() ------------------------------------------------------------
@@ -512,6 +514,12 @@ def test_a_reply_that_never_settles_times_out_rather_than_hanging(
 # ---- stop() ------------------------------------------------------------
 
 
+#: What these tests pass for `settle`. Small because nothing here is really
+#: waiting on Windows, and explicit because the alternative - reaching into the
+#: clock or the sleep - is what went wrong before. See SETTLE in the module docs.
+TEST_SETTLE = 0.05
+
+
 def _stopping(monkeypatch, *, started, live, unkillable=frozenset()):
     """A session that believes it started `started`, over a table holding `live`."""
     windows = FakeWindows(live, unkillable=unkillable)
@@ -522,6 +530,37 @@ def _stopping(monkeypatch, *, started, live, unkillable=frozenset()):
     )
     session.started = set(started)
     return windows, session
+
+
+def test_stop_waits_for_the_settle_it_was_given_and_not_a_constant(monkeypatch):
+    """THE ONE NOTHING WAS ASKING.
+
+    Every other timed operation here takes its bound as an argument - `ask`,
+    `launch`, `build`, `_await_text`. `stop` alone read a module constant, so a
+    test could not shorten it and reached for the only lever left: patching
+    `time.sleep` to a no-op.
+
+    That lever moves nothing. The loop ends on `time.monotonic()`, so removing
+    the sleep does not shorten the wait - it removes the only thing yielding
+    during it, turning a twenty-iteration poll into a ten-second spin at full
+    CPU. Twice, for twenty of the suite's twenty-three seconds, under a comment
+    claiming it made the wait cost nothing.
+
+    A bound nothing can set is a bound nothing can check.
+    """
+    _, session = _stopping(monkeypatch, started={4808}, live={4808}, unkillable={4808})
+
+    started_at = time.monotonic()
+    with pytest.raises(session_mod.SessionError):
+        session_mod.stop(session.cfg, session, settle=TEST_SETTLE)
+    elapsed = time.monotonic() - started_at
+
+    # Generous against a loaded CI box, and still two orders of magnitude below
+    # the ten-second constant this used to wait regardless of what it was told.
+    assert elapsed < 1.0, (
+        f"stop took {elapsed:.1f}s for a {TEST_SETTLE}s settle - it is waiting "
+        "on something other than the bound it was given"
+    )
 
 
 def test_stop_does_not_report_killing_something_that_is_still_running(monkeypatch):
@@ -547,7 +586,7 @@ def test_stop_does_not_report_killing_something_that_is_still_running(monkeypatc
     )
 
     with pytest.raises(session_mod.SessionError) as e:
-        session_mod.stop(session.cfg, session)
+        session_mod.stop(session.cfg, session, settle=TEST_SETTLE)
 
     assert windows.aimed == [4808], "it never even tried to kill it"
     assert "4808" in str(e.value), (
@@ -569,7 +608,7 @@ def test_a_process_that_outlived_its_kill_stays_owned(monkeypatch):
     _, session = _stopping(monkeypatch, started={4808}, live={4808}, unkillable={4808})
 
     with pytest.raises(session_mod.SessionError):
-        session_mod.stop(session.cfg, session)
+        session_mod.stop(session.cfg, session, settle=TEST_SETTLE)
 
     assert session.started == {4808}, (
         "a surviving process lost its owner, so nothing can be asked to kill it again"
@@ -581,7 +620,7 @@ def test_stop_reports_the_processes_that_actually_died(monkeypatch):
     every time would satisfy both tests above."""
     windows, session = _stopping(monkeypatch, started={4808, 42224}, live={4808, 42224})
 
-    killed = session_mod.stop(session.cfg, session)
+    killed = session_mod.stop(session.cfg, session, settle=TEST_SETTLE)
 
     assert sorted(killed) == [4808, 42224]
     assert session.started == set(), "nothing survived, so nothing is still owned"
@@ -605,7 +644,7 @@ def test_a_slow_exit_is_not_mistaken_for_a_refused_kill(monkeypatch):
     tables = iter([{4808}, {4808}])
     monkeypatch.setattr(session_mod, "_tml_pids", lambda cfg: next(tables, set()))
 
-    killed = session_mod.stop(session.cfg, session)
+    killed = session_mod.stop(session.cfg, session, settle=TEST_SETTLE)
 
     assert killed == [4808], "a process that did leave was not reported as killed"
     assert session.started == set()
@@ -620,7 +659,7 @@ def test_stop_still_leaves_alone_a_game_it_did_not_start(monkeypatch):
     """
     windows, session = _stopping(monkeypatch, started={4808}, live={4808, 31337})
 
-    session_mod.stop(session.cfg, session)
+    session_mod.stop(session.cfg, session, settle=TEST_SETTLE)
 
     assert windows.aimed == [4808], "it aimed at a process it had not started"
     assert 31337 in windows.live, "it killed a game that was not its to kill"

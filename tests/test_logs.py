@@ -74,6 +74,48 @@ def test_a_negative_tail_is_refused_rather_than_silently_inverted(logs_dir):
         server_mod.logs(lines=-5)
 
 
+def test_the_filter_runs_over_the_whole_log_not_just_the_tail(logs_dir):
+    """THE ORDER, which had no test at all and is the whole value of `contains`.
+
+    Filtering and tailing do not commute. Filter first and you get the last N
+    MATCHING lines; tail first and you get the matches among the last N, which
+    for a launch failure is usually none - the interesting line is near the top
+    and the tail is the shutdown noise after it.
+
+    `line 2` falls outside a three-line tail of the twenty-line fixture only
+    because the fixture is small; in a real log the gap is thousands of lines.
+    An implementation that tailed first would return `["line 20"]` here and read
+    as though `line 2` had never been written.
+    """
+    found = server_mod.logs(contains="line 2", lines=3)["lines"]
+
+    assert found == ["line 2", "line 20"], (
+        "the filter did not see the whole log - `line 2` is early enough to "
+        "fall outside any tail taken before filtering"
+    )
+
+
+def test_the_filter_is_case_insensitive_as_documented(logs_dir):
+    """Positive control for the filter, and the documented behaviour.
+
+    Without it, a `contains` that quietly matched nothing would satisfy any
+    assertion about what it excludes.
+    """
+    assert server_mod.logs(contains="LINE 7")["lines"] == ["line 7"]
+
+
+def test_a_filter_matching_nothing_returns_nothing_rather_than_everything(logs_dir):
+    """The other direction, and the one a falsy check gets wrong.
+
+    `if contains:` skips filtering for an empty string, which is right - asking
+    to keep lines containing nothing is asking for the whole log. But a filter
+    that matches no lines has to return none of them rather than fall back to
+    unfiltered, which is the same shape as the `-0` tail bug above.
+    """
+    assert server_mod.logs(contains="no such line")["lines"] == []
+    assert server_mod.logs(contains="")["lines"] != []
+
+
 def test_a_missing_log_is_reported_as_missing(tmp_path, monkeypatch):
     """POSITIVE CONTROL for the empty answer above.
 
