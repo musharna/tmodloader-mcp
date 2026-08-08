@@ -23,7 +23,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Config
+from .diag import Diag
 from .diag import parse as parse_diag
+from .diag import sections as diag_sections
 from .triggers import (
     DIAG_NAME,
     HEARTBEAT_NAME,
@@ -227,11 +229,16 @@ class Session:
 
     def diag(
         self, *, server: bool = False, target: str | None = None, timeout: float = 60.0
-    ) -> dict:
-        """Ask a side for its state and return it PARSED.
+    ) -> Diag:
+        """Ask a side for its state and return it PARSED, both halves.
 
         The diag file is removed before asking for the same reason the reply file
         is: an old dump reads exactly like a new one.
+
+        BOTH halves, because the dump has two and only one used to survive. The
+        scalars said `npcs: active=6 mutated=1`; the indented per-NPC lines under
+        them said which six, and were parsed and thrown away — so a caller could
+        learn that six existed and never what any of them was.
         """
         dump = self.path(DIAG_NAME, server=server)
         dump.unlink(missing_ok=True)
@@ -241,7 +248,7 @@ class Session:
             raise TriggerError(f"the game refused a diag: {reply.text}")
 
         text = self._await_text(dump, timeout=timeout, what="diag dump")
-        return parse_diag(text)
+        return Diag(fields=parse_diag(text), records=diag_sections(text))
 
     def shot(
         self, region: str, *, target: str | None = None, timeout: float = 60.0

@@ -19,7 +19,27 @@ dict out, so it is testable without a game.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class Diag:
+    """Both halves of a dump: the scalars, and the record lists under them.
+
+    Named fields rather than a tuple. `(fields, records)` reads identically to
+    `(records, fields)` at every call site, and this codebase has already paid
+    for a positional seam once.
+
+    They are separate because they answer different questions. `fields` says
+    `npcs: active=6 mutated=1`; `records` says WHICH six. Returning only the
+    first is what this server did until now — it parsed the per-NPC lines and
+    dropped them, so a caller could see that something was there and never what.
+    """
+
+    fields: dict[str, Any]
+    records: dict[str, list[str]]
+
 
 #: `key: value`, one per line. Values may contain colons (paths do), so the
 #: split is on the FIRST colon only.
