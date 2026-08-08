@@ -22,6 +22,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .triggers import MOD_NAME, Artifacts, artifacts_for
+
 #: Defaults for the machine this was extracted from.
 DEFAULT_TML = "/mnt/c/Program Files (x86)/Steam/steamapps/common/tModLoader"
 DEFAULT_SAVE = "/mnt/c/Users/a2b32/Documents/My Games/Terraria/tModLoader"
@@ -91,10 +93,20 @@ class Config:
     #: call it instead. Unusable rather than wrong — `check` reports it, and
     #: `build` refuses rather than passing the word "None" to tModLoader.
     mod_source_win: str | None
+    #: The mod's INTERNAL name, which is what every artifact filename is built
+    #: from. tModLoader takes it from the source folder, so it defaults to that
+    #: and rarely needs setting; a checkout whose folder is named something else
+    #: is the case `TMODLOADER_MOD_NAME` exists for.
+    mod_name: str
     world_win: str
     taskkill: Path
     tasklist: Path
     powershell: Path
+
+    @property
+    def artifacts(self) -> Artifacts:
+        """The filenames this mod writes and this harness reads."""
+        return artifacts_for(self.mod_name)
 
     @property
     def dotnet(self) -> Path:
@@ -157,6 +169,9 @@ def load(env: dict[str, str] | None = None) -> Config:
         mod_source=mod,
         mod_source_win=_setting(src, "TMODLOADER_MOD_SOURCE_WIN", "")
         or windows_path_for(mod),
+        # tModLoader's internal name is the source folder's name, so that is the
+        # default rather than a constant naming one mod.
+        mod_name=_setting(src, "TMODLOADER_MOD_NAME", mod.name),
         world_win=_setting(src, "TMODLOADER_WORLD_WIN", DEFAULT_WORLD_WIN),
         taskkill=Path(_setting(src, "TMODLOADER_TASKKILL", DEFAULT_TASKKILL)),
         tasklist=Path(_setting(src, "TMODLOADER_TASKLIST", DEFAULT_TASKLIST)),
@@ -190,6 +205,14 @@ def check(cfg: Config) -> list[str]:
         # build.txt is what makes a directory a tModLoader mod. Without it the
         # build fails with a much less obvious error.
         problems.append(f"{cfg.mod_source} has no build.txt, so it is not a mod source")
+
+    if not MOD_NAME.match(cfg.mod_name):
+        problems.append(
+            f"TMODLOADER_MOD_NAME is {cfg.mod_name!r}, which cannot be a mod's "
+            "internal name. It becomes the prefix of every artifact filename, "
+            "so it must be letters and digits only - a separator would build a "
+            "path rather than a name."
+        )
 
     problems.extend(_windows_source_problems(cfg))
 

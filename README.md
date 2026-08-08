@@ -99,6 +99,15 @@ Every path is an environment variable with a default:
 | `TMODLOADER_SAVE_DIR`       | Save directory the mod writes artifacts into |
 | `TMODLOADER_MOD_SOURCE`     | Mod source directory (WSL path)              |
 | `TMODLOADER_MOD_SOURCE_WIN` | Usually leave unset — see below              |
+| `TMODLOADER_MOD_NAME`       | Usually leave unset — see below              |
+
+`TMODLOADER_MOD_NAME` is the mod's **internal** name, which every artifact
+filename is built from: `<modname>-capture.trigger`, `<modname>-diag.txt`,
+`<modname>-shot.png`, lowercased. tModLoader takes that name from the source
+folder, so it is derived from `TMODLOADER_MOD_SOURCE` and only needs setting for
+a checkout whose folder is named something other than the mod. Deriving it is
+also what keeps two mods driven from one machine out of each other's trigger
+files — they share a save directory.
 
 `TMODLOADER_MOD_SOURCE_WIN` is the mod source as Windows sees it, which `-build`
 needs because tModLoader compiles inside a Windows process with no `/mnt/c`. It
@@ -112,13 +121,20 @@ refuses to start and says so, rather than driving one and building the other.
 
 ## Phase 2 — what would make this yours
 
-1. Extract the mod-side responder into a package any mod can depend on, rather
-   than requiring Biomancy's copy.
-2. Make `TMODLOADER_MOD_SOURCE` required and drop the machine-specific defaults.
-3. A template mod and documentation.
+1. ~~Artifact filenames are one mod's~~ — **done.** Every artifact name is
+   derived from the mod's internal name, which tModLoader takes from the source
+   folder. Nothing needs setting for the usual case; `TMODLOADER_MOD_NAME`
+   exists for a checkout whose folder is named something else.
+2. Extract the mod-side responder into a source package a mod can vendor, rather
+   than requiring Biomancy's copy — and let it publish its own command list, so
+   this harness stops carrying one mod's twelve commands as the universe.
+3. Make `TMODLOADER_MOD_SOURCE` required and drop the machine-specific defaults.
+4. A template mod and documentation.
 
-Until then this is honestly a tool for one mod that happens to be built to
-generalise.
+Until 2 lands this is honestly a tool for one mod that happens to be built to
+generalise: the filenames are yours now, but the responder that answers them
+still lives inside Biomancy, and `trigger` still validates against Biomancy's
+command set.
 
 ## Licence
 

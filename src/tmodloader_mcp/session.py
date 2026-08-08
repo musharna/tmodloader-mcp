@@ -27,11 +27,6 @@ from .diag import Diag
 from .diag import parse as parse_diag
 from .diag import sections as diag_sections
 from .triggers import (
-    DIAG_NAME,
-    HEARTBEAT_NAME,
-    RESULT_NAME,
-    SHOT_NAME,
-    TRIGGER_NAME,
     Reply,
     TriggerError,
     compose,
@@ -218,8 +213,8 @@ class Session:
         """
         payload = compose(command, target=target, argument=argument)
 
-        trigger = self.path(TRIGGER_NAME, server=server)
-        result = self.path(RESULT_NAME, server=server)
+        trigger = self.path(self.cfg.artifacts.trigger, server=server)
+        result = self.path(self.cfg.artifacts.result, server=server)
 
         result.unlink(missing_ok=True)
         _write_atomically(trigger, payload)
@@ -240,7 +235,7 @@ class Session:
         them said which six, and were parsed and thrown away — so a caller could
         learn that six existed and never what any of them was.
         """
-        dump = self.path(DIAG_NAME, server=server)
+        dump = self.path(self.cfg.artifacts.diag, server=server)
         dump.unlink(missing_ok=True)
 
         reply = self.ask("diag", target=target, server=server, timeout=timeout)
@@ -279,7 +274,7 @@ class Session:
         disguise - the path handed back was unique among the calls that made
         it, which is not the property anybody needed.
         """
-        drop = self.path(SHOT_NAME, server=False)
+        drop = self.path(self.cfg.artifacts.shot, server=False)
         drop.unlink(missing_ok=True)
 
         reply = self.ask("shot", argument=region, target=target, timeout=timeout)
@@ -410,7 +405,7 @@ def launch(
 
     # Clear stale artifacts BEFORE launching. A heartbeat or reply left by a
     # previous run is what lets a readiness check pass against a dead process.
-    for name in (TRIGGER_NAME, RESULT_NAME, DIAG_NAME, HEARTBEAT_NAME, SHOT_NAME):
+    for name in cfg.artifacts.all:
         for server in (False, True):
             cfg.artifact(name, server=server).unlink(missing_ok=True)
 
@@ -510,8 +505,8 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
     is still loading. Checking only existence conflates them, which is exactly
     how a harness once sailed past three gates on a killed client's file.
     """
-    server_hb = cfg.artifact(HEARTBEAT_NAME, server=True)
-    client_hb = cfg.artifact(HEARTBEAT_NAME, server=False)
+    server_hb = cfg.artifact(cfg.artifacts.heartbeat, server=True)
+    client_hb = cfg.artifact(cfg.artifacts.heartbeat, server=False)
     wanted = [server_hb] + ([client_hb] if mode == "server_client" else [])
 
     deadline = time.monotonic() + timeout
@@ -639,7 +634,7 @@ def stop(
         time.sleep(min(SETTLE_POLL, remaining))
         survivors = set(aimed) & _tml_pids(cfg)
 
-    for name in (TRIGGER_NAME,):
+    for name in (cfg.artifacts.trigger,):
         for server in (False, True):
             cfg.artifact(name, server=server).unlink(missing_ok=True)
 

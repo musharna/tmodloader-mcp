@@ -38,12 +38,12 @@ def test_a_capture_is_returned_as_bytes(save_dir):
     Every other test here asserts a refusal. Without this one, a reader that
     refused everything unconditionally would pass the lot.
     """
-    assert captures.read(save_dir, "biomancy-shot-001-topleft.png") == PNG
+    assert captures.read(save_dir, "Biomancy", "biomancy-shot-001-topleft.png") == PNG
 
 
 def test_the_listing_shows_captures_and_nothing_else(save_dir):
     """`biomancy-diag.txt` is in the same directory and is not a capture."""
-    assert captures.available(save_dir) == ["biomancy-shot-001-topleft.png"]
+    assert captures.available(save_dir, "Biomancy") == ["biomancy-shot-001-topleft.png"]
 
 
 @pytest.mark.parametrize(
@@ -64,7 +64,7 @@ def test_a_traversal_out_of_the_save_directory_is_refused(save_dir, escape):
     pin them individually.
     """
     with pytest.raises(captures.CaptureError):
-        captures.read(save_dir, escape)
+        captures.read(save_dir, "Biomancy", escape)
 
 
 def test_an_absolute_path_is_refused(save_dir, tmp_path):
@@ -74,7 +74,7 @@ def test_an_absolute_path_is_refused(save_dir, tmp_path):
     outside.write_bytes(PNG)
 
     with pytest.raises(captures.CaptureError):
-        captures.read(save_dir, str(outside))
+        captures.read(save_dir, "Biomancy", str(outside))
 
 
 def test_a_symlink_pointing_out_is_refused(save_dir, tmp_path):
@@ -92,7 +92,7 @@ def test_a_symlink_pointing_out_is_refused(save_dir, tmp_path):
     link.symlink_to(secret)
 
     with pytest.raises(captures.CaptureError):
-        captures.read(save_dir, "biomancy-shot-002-full.png")
+        captures.read(save_dir, "Biomancy", "biomancy-shot-002-full.png")
 
 
 def test_a_file_in_the_save_dir_that_is_not_a_capture_is_refused(save_dir):
@@ -104,14 +104,14 @@ def test_a_file_in_the_save_dir_that_is_not_a_capture_is_refused(save_dir):
     check and this fails alone.
     """
     with pytest.raises(captures.CaptureError) as e:
-        captures.read(save_dir, "biomancy-diag.txt")
+        captures.read(save_dir, "Biomancy", "biomancy-diag.txt")
 
     assert "capture" in str(e.value).lower()
 
 
 def test_a_capture_that_is_not_there_says_so_rather_than_pretending(save_dir):
     with pytest.raises(captures.CaptureError) as e:
-        captures.read(save_dir, "biomancy-shot-404-full.png")
+        captures.read(save_dir, "Biomancy", "biomancy-shot-404-full.png")
 
     assert "biomancy-shot-404-full.png" in str(e.value)
 
@@ -122,7 +122,7 @@ def test_the_refusals_are_not_all_the_same_check(save_dir):
     reasons = set()
     for name in ["../outside.png", "biomancy-diag.txt", "biomancy-shot-404-x.png"]:
         try:
-            captures.read(save_dir, name)
+            captures.read(save_dir, "Biomancy", name)
         except captures.CaptureError as e:
             reasons.add(str(e))
 
@@ -134,4 +134,4 @@ def test_reading_does_not_depend_on_the_save_dir_being_absolute(tmp_path, monkey
     (tmp_path / "biomancy-shot-001-full.png").write_bytes(PNG)
     monkeypatch.chdir(tmp_path)
 
-    assert captures.read(Path("."), "biomancy-shot-001-full.png") == PNG
+    assert captures.read(Path("."), "Biomancy", "biomancy-shot-001-full.png") == PNG

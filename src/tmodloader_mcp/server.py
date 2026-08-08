@@ -304,7 +304,8 @@ def captures() -> dict[str, list[str]]:
     Names, not paths — a path handed out is a path that can come back changed,
     and `read_capture` deliberately accepts only a name.
     """
-    return {"captures": captures_mod.available(_cfg().save_dir)}
+    cfg = _cfg()
+    return {"captures": captures_mod.available(cfg.save_dir, cfg.mod_name)}
 
 
 @mcp.tool(
@@ -322,11 +323,11 @@ def read_capture(name: str) -> Image:
 
     Args:
         name: A capture filename from `captures`, e.g.
-            `biomancy-shot-001-topleft.png`. A NAME, never a path — see
+            `<mod>-shot-001-topleft.png`. A NAME, never a path — see
             `captures.read` for why the containment is structural.
     """
-    save_dir = _cfg().save_dir
-    return Image(data=captures_mod.read(save_dir, name), format="png")
+    cfg = _cfg()
+    return Image(data=captures_mod.read(cfg.save_dir, cfg.mod_name, name), format="png")
 
 
 @mcp.resource(
@@ -342,7 +343,8 @@ def capture_resource(name: str) -> bytes:
     second surface, not a second implementation, because two paths to one file
     is how one of them ends up with a weaker check.
     """
-    return captures_mod.read(_cfg().save_dir, name)
+    cfg = _cfg()
+    return captures_mod.read(cfg.save_dir, cfg.mod_name, name)
 
 
 @mcp.tool(
