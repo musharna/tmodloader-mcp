@@ -6,7 +6,25 @@ game being open, and warnings without errors.
 
 from __future__ import annotations
 
+import subprocess
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
 from tmodloader_mcp import build
+from tmodloader_mcp import config as config_mod
+
+_CFG = config_mod.Config(
+    tml_dir=Path("/mnt/c/tModLoader"),
+    save_dir=Path("/mnt/c/save"),
+    mod_source=Path("/mnt/c/Mods/Yours"),
+    mod_source_win=r"C:\Mods\Yours",
+    world_win=r"C:\Worlds\Test.wld",
+    taskkill=Path("/mnt/c/Windows/System32/taskkill.exe"),
+    tasklist=Path("/mnt/c/Windows/System32/tasklist.exe"),
+    powershell=Path("/mnt/c/Windows/System32/powershell.exe"),
+)
 
 CLEAN = """\
 Reading properties: Biomancy
@@ -85,6 +103,64 @@ def test_output_with_no_verdict_line_is_not_silently_ok():
     assert not got.game_was_open
 
 
-def test_a_timeout_is_not_success():
+def test_output_that_never_reached_a_verdict_is_not_success():
+    """Was called `test_a_timeout_is_not_success`, and never timed out.
+
+    It passed an empty string to `interpret`, which is the no-output path, not
+    the timeout path — `interpret` is never even called when a build times out.
+    So the only test naming timeouts asserted nothing about them, and the wrong
+    summary below sat under a green suite. A test's NAME is not its coverage.
+    """
     got = build.interpret("")
     assert not got.ok
+
+
+class _Timeout:
+    """A `subprocess.run` that never comes back in time."""
+
+    def __call__(self, *args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="tModLoader.dll -build", timeout=600.0)
+
+
+def test_a_build_that_timed_out_says_so_instead_of_blaming_the_compiler(monkeypatch):
+    """THE ONE THAT NAMED THE WRONG CAUSE.
+
+    A timeout produced `ok=False, errors=0, warnings=0`, and `summary` — the
+    field the MCP tool actually surfaces — rendered that as "build failed: 0
+    error(s), 0 warning(s)". A ten-minute hang reported as a compile failure
+    with nothing wrong in it, which is the confidently-wrong error this repo has
+    now shipped twice: it gets believed, and it sends the reader to the code.
+    """
+    monkeypatch.setattr(build.subprocess, "run", _Timeout())
+
+    got = build.build(_CFG, timeout=600.0)
+
+    assert got.timed_out
+    assert not got.ok
+    assert "did not finish" in got.summary
+    assert "error(s)" not in got.summary
+
+
+def test_an_ordinary_failure_still_reads_as_one():
+    """Positive control: the timeout wording must not swallow real failures."""
+    got = build.interpret(ERRORS)
+    assert not got.timed_out
+    assert "1 error(s)" in got.summary
+
+
+def test_a_source_windows_cannot_name_is_refused_before_launching_anything(
+    monkeypatch,
+):
+    """`mod_source_win` is None when it could be neither derived nor given.
+
+    Passing that to the command line would spell the word "None" as a path, and
+    tModLoader would fail with an error about a directory nobody named.
+    """
+    ran = []
+    monkeypatch.setattr(build.subprocess, "run", lambda *a, **k: ran.append(a))
+
+    with pytest.raises(config_mod.ConfigError) as e:
+        build.build(replace(_CFG, mod_source_win=None))
+
+    assert "TMODLOADER_MOD_SOURCE_WIN" in str(e.value)
+    assert ran == []  # refused before spawning, not after

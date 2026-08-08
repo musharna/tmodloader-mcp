@@ -18,7 +18,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 
-from .config import Config
+from .config import Config, ConfigError
 
 #: The line tModLoader prints when it will not build over a running game.
 GAME_OPEN_MARKER = "TML003"
@@ -34,6 +34,12 @@ class BuildResult:
     warnings: int
     game_was_open: bool
     output: str
+    #: The build never finished, so there are no counts to report. A state the
+    #: other fields cannot express: a timeout arrives as `errors=0, warnings=0`,
+    #: which is shaped exactly like a build that completed with nothing wrong.
+    #: Recorded rather than inferred, because `summary` was reading those zeros
+    #: as a verdict and announcing a compile failure with no errors in it.
+    timed_out: bool = False
 
     @property
     def summary(self) -> str:
@@ -42,6 +48,10 @@ class BuildResult:
                 "tModLoader refused to build because the game is open. Close "
                 "tModLoader and build again - this is not a compile failure."
             )
+        if self.timed_out:
+            # Ahead of the counts, because here they are zero for want of a
+            # build rather than for want of anything wrong with the code.
+            return self.output
         if not self.ok:
             return f"build failed: {self.errors} error(s), {self.warnings} warning(s)"
         return f"Compilation finished with {self.errors} errors and {self.warnings} warnings"
@@ -89,6 +99,15 @@ def interpret(output: str) -> BuildResult:
 
 def build(cfg: Config, *, timeout: float = 600.0) -> BuildResult:
     """Build the configured mod source."""
+    if cfg.mod_source_win is None:
+        # Refused here rather than spelled into the command line, where it would
+        # arrive as the literal word "None" and come back as tModLoader failing
+        # to find a directory nobody ever named.
+        raise ConfigError(
+            f"{cfg.mod_source} has no known Windows path, so there is nothing to "
+            "hand `-build`. Set TMODLOADER_MOD_SOURCE_WIN."
+        )
+
     try:
         proc = subprocess.run(
             [
@@ -112,7 +131,11 @@ def build(cfg: Config, *, timeout: float = 600.0) -> BuildResult:
             errors=0,
             warnings=0,
             game_was_open=False,
-            output=f"the build did not finish within {timeout:.0f}s",
+            output=(
+                f"the build did not finish within {timeout:.0f}s, so nothing is "
+                "known about whether the code compiles"
+            ),
+            timed_out=True,
         )
 
     return interpret(proc.stdout + proc.stderr)
