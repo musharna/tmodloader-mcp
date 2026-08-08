@@ -13,6 +13,35 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ### Changed
 
+- **The command list is read from the mod, not kept here.** This harness held
+  its own copy of one mod's twelve verbs and its own belief about which of them
+  read an argument — facts owned by running C#, in a file the mod could not see.
+  A mod that added a command got no support here until somebody edited Python;
+  one that removed a command left this side composing triggers nothing would
+  answer. The responder now publishes `<prefix>-commands.txt` at load and
+  `compose` is checked against it. There is deliberately **no fallback list**: a
+  guess about which commands exist is exactly what this removes, and a fallback
+  would be that guess under another name. **Breaking:** `triggers.COMMANDS` is
+  gone and `compose` takes a required `commands` keyword. (#19)
+- New `commands` tool — what the running mod serves, with `responder: false`
+  when nothing published a list. That is a distinct answer from a game still
+  starting, and it used to arrive as a readiness timeout, which names the wrong
+  thing entirely: it reads as slow rather than as never going to answer. A list
+  that exists but cannot be parsed stays an error, because it means a responder
+  IS running and this side cannot understand it. (#19)
+- `triggers.parse` models the mod's GRAMMAR only. It used to return None for a
+  word outside the hardcoded list, which stopped matching the mod when the mod's
+  own parser stopped judging vocabulary too — a registry now answers that at
+  dispatch. Reporting "unparseable" for a payload the game parses perfectly and
+  simply declines conflated two different answers, and only one of them tells a
+  caller what to do. (#19)
+- `compose` refuses a command that NEEDS an argument and was given none. Only
+  the opposite case was checked, so `shot` with no region reached the game and
+  came back refused — a round trip to learn what the published list already
+  says. (#19)
+- The command list is cleared with the other artifacts before a launch, for the
+  same reason the heartbeat is: one left by a previous run would say "responder
+  present" about a build that may no longer have one. (#19)
 - `build_mod` accepts `timeout` and `stop` accepts `settle`, finishing what
   #14 started. Both bounds existed underneath and neither was reachable from the
   surface — `stop` grew `settle` in #11 _because_ a bound nothing can set is a

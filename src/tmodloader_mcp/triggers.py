@@ -23,10 +23,10 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
+
+from .commands import CommandSet
 
 #: A mod name that can be a filename prefix. Letters and digits only, which is
 #: what tModLoader internal names are: the prefix lands in filenames and inside
@@ -73,45 +73,38 @@ class Artifacts:
         return f"{self.prefix}-shot.png"
 
     @property
+    def commands(self) -> str:
+        """What the mod says it serves, written at load rather than on request.
+
+        The only one of these that is not a reply. The rest are a channel; this
+        describes the channel, which is why the mod writes it unasked — see
+        `commands.py` for why reading it replaced believing a copy of it.
+        """
+        return f"{self.prefix}-commands.txt"
+
+    @property
     def all(self) -> tuple[str, ...]:
-        """Every artifact, for the callers that clear them between runs."""
-        return (self.trigger, self.result, self.diag, self.heartbeat, self.shot)
+        """Every artifact, for the callers that clear them between runs.
+
+        `commands` belongs here for the same reason the heartbeat does, and it
+        is not housekeeping: a list left by a previous run would say "responder
+        present" about a build that may no longer have one. Cleared first, its
+        reappearance proves the mod loaded in THIS run.
+        """
+        return (
+            self.trigger,
+            self.result,
+            self.diag,
+            self.heartbeat,
+            self.shot,
+            self.commands,
+        )
 
 
 def artifacts_for(mod_name: str) -> Artifacts:
     """The artifact names one mod writes and this harness reads."""
     return Artifacts(prefix=mod_name.lower())
 
-
-#: Commands the mod's DevCapture understands, and whether it READS an argument.
-#: Listed so an unknown one is refused HERE, with the valid set, rather than
-#: written to disk and silently ignored by a game that has no arm for it —
-#: which reads as a hang.
-#:
-#: The flag is the second half of that same guarantee, and it is one command
-#: wide: `request.Argument` is consumed in exactly one place in the whole mod,
-#: `DevCapture.cs:386`, where `TakeShot` names a region. `DevCommands.Parse`
-#: hands `seed` an argument as well, and `SeedWherePlayerStands()` then takes
-#: none and hardcodes Zombie/Bloom — so an argument given to anything but `shot`
-#: is parsed, dropped, and answered with success. It is recorded per command
-#: rather than as a set of exceptions so that adding a command means saying
-#: which it is, instead of getting an answer by default.
-COMMANDS: Mapping[str, bool] = MappingProxyType(
-    {
-        "capture": False,
-        "diag": False,
-        "mutate": False,
-        "vat": False,
-        "creature": False,
-        "kill": False,
-        "strains": False,
-        "seed": False,
-        "creep": False,
-        "place": False,
-        "killcreep": False,
-        "shot": True,
-    }
-)
 
 #: How stale a heartbeat may be and still count as a live game, in seconds.
 #: A heartbeat file outlives the process that wrote it, so existence alone
@@ -158,22 +151,29 @@ class Request:
 
 def parse(payload: str) -> Request | None:
     """Read a payload back the way `DevCommands.Parse` will, or None for one it
-    cannot parse — which the mod calls Unknown and answers by doing nothing.
+    cannot parse at all — which the mod calls malformed.
 
     A MODEL of the mod's parser, kept here so this side can check that what it
     wrote means what it meant. The rules it mirrors, in order: the whole string
-    is trimmed; an empty one is Capture, because a bare `touch` of the trigger
+    is trimmed; an empty one is `capture`, because a bare `touch` of the trigger
     meant that before commands existed; the FIRST `@` splits off the target; the
     FIRST `:` in what remains splits off the argument; both are trimmed again; an
-    empty half on either split is Unknown; the command is matched
-    case-insensitively while the target keeps its case, being a player name that
-    gets shown back to a human.
+    empty half on either split is malformed; the command word is lowercased while
+    the target keeps its case, being a player name shown back to a human.
+
+    IT NO LONGER JUDGES WHETHER THE COMMAND EXISTS, and that is a correction
+    rather than a relaxation. It used to return None for a word outside a
+    hardcoded list, which stopped matching the mod the day the mod's own parser
+    stopped deciding that too: a registry now answers it at dispatch, so `Parse`
+    hands back the word as written and an unserved verb is refused with a
+    message naming what IS served. A model that still rejected here would report
+    "unparseable" for a payload the game parses perfectly and simply declines —
+    two different answers, and the second is the one a caller can act on.
+    Validity is asked of the published set, in `compose`.
 
     Being a model is the limit worth stating plainly: this catches a payload
     this module would read back differently from how it built it. It cannot
-    catch the mod changing its grammar. Nothing on this side can, short of
-    asking a running game — which is the cost that composing carefully exists to
-    avoid paying.
+    catch the mod changing its GRAMMAR — only its vocabulary is published.
     """
     text = payload.strip()
     if not text:
@@ -195,30 +195,40 @@ def parse(payload: str) -> Request | None:
         if not argument or not text:
             return None
 
-    command = text.lower()
-    if command not in COMMANDS:
-        return None
-
-    return Request(command, target, argument)
+    return Request(text.lower(), target, argument)
 
 
 def compose(
-    command: str, target: str | None = None, argument: str | None = None
+    command: str,
+    target: str | None = None,
+    argument: str | None = None,
+    *,
+    commands: CommandSet,
 ) -> str:
     """Build a trigger payload: `cmd`, `cmd:arg`, `cmd@who`, `cmd:arg@who`.
 
     Validated here so a typo is refused before it reaches a game that would
-    simply not recognise it. `DevCommands.Parse` treats an unknown word as
-    Unknown rather than falling back to a capture, deliberately — but it does so
-    silently from our side, and a silent no-op is indistinguishable from a hang.
+    simply not recognise it. The mod refuses an unserved verb rather than
+    falling back to a capture, deliberately — but a refusal costs a round trip
+    and only arrives if a game is running to give it.
+
+    `commands` IS THE MOD'S OWN LIST, and is required rather than defaulted.
+    This function used to check the word against a hardcoded twelve kept in this
+    file, which made this side's idea of the mod a thing that could be wrong: a
+    command the mod added was refused here as unknown, and one it removed was
+    composed here and answered by nobody. There is deliberately no fallback
+    list. A guess about which commands exist is exactly what this replaces, and
+    a fallback would be that guess wearing a different name — when no list has
+    been published, the honest answer is that no responder is running, which
+    `commands.read` says in those words.
 
     THE COMMAND WORD WAS THE ONLY PART EVER CHECKED. Everything after it was
     pasted between delimiters and trusted, which left the two ways of being
-    misheard that the check above exists to prevent:
+    misheard that the checks below exist to prevent:
 
-    An argument nothing will read. `shot` is the only command whose argument the
-    mod consumes, and the other eleven answer with success while dropping it —
-    see the note on COMMANDS.
+    An argument nothing will read. The mod parses one for every command and only
+    some read it, answering with success having dropped the rest — so which is
+    which is published per command, and it is asked here rather than assumed.
 
     An argument that reparses. `Parse` splits on the FIRST `@`, and the target
     is appended LAST, so an `@` inside an argument steals it: `shot:top@left`
@@ -235,9 +245,11 @@ def compose(
     because `Parse` trims every field). The grammar knows all three; a list of
     bad characters knows whichever ones have bitten so far.
     """
-    if command not in COMMANDS:
+    known = commands.get(command)
+    if known is None:
         raise TriggerError(
-            f"unknown command {command!r} - expected one of {sorted(COMMANDS)}"
+            f"the running mod does not serve {command!r} - it serves "
+            f"{list(commands.names)}"
         )
 
     if argument is not None and not argument:
@@ -248,21 +260,30 @@ def compose(
     if target is not None and not target:
         raise TriggerError(f"{command!r} was addressed to nobody")
 
-    if argument is not None and not COMMANDS[command]:
+    if argument is not None and not known.takes_argument:
         raise TriggerError(
-            f"{command!r} takes no argument, so {argument!r} would be parsed and "
-            f"then dropped, and the game would report success having never read "
-            f"it - only {sorted(c for c, takes in COMMANDS.items() if takes)} "
-            f"does anything with one"
+            f"{command!r} takes no argument, so {argument!r} would be refused by "
+            f"the mod rather than acted on - of what it serves, only "
+            f"{list(commands.taking_an_argument)} reads one"
         )
 
-    payload = command
+    if argument is None and known.takes_argument:
+        raise TriggerError(
+            f"{command!r} needs an argument, as {command}:<argument>"
+            + (f" - {known.summary}" if known.summary else "")
+        )
+
+    # The mod's own spelling, not the caller's. Resolution is case-insensitive
+    # on both sides, so `DIAG` names a real command — but the round trip below
+    # compares against what the game HEARS, which is lowercased, and a caller's
+    # casing would fail that comparison as though the payload were malformed.
+    payload = known.name
     if argument is not None:
         payload = f"{payload}:{argument}"
     if target is not None:
         payload = f"{payload}@{target}"
 
-    meant = Request(command, target, argument)
+    meant = Request(known.name, target, argument)
     heard = parse(payload)
     if heard != meant:
         raise TriggerError(
