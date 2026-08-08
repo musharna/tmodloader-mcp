@@ -19,14 +19,15 @@ one — a stateless local binary does not need a protocol in front of it.
 
 What earns the surface here is that a running game is not stateless:
 
-| Tool              | What it buys over `bash`                                     |
-| ----------------- | ------------------------------------------------------------ |
-| `launch` / `stop` | Session state across calls                                   |
-| `diag`            | Structured fields, not text you `sed` and misparse           |
-| `trigger`         | The write → poll → timeout → clean-up loop, written once     |
-| `shot`            | A capture path per call, and refusals reported as refusals   |
-| `build_mod`       | Encodes tModLoader's refusal to build while the game is open |
-| `logs`            | Either side's log, filtered                                  |
+| Tool              | What it buys over `bash`                                        |
+| ----------------- | --------------------------------------------------------------- |
+| `launch` / `stop` | Session state across calls                                      |
+| `status`          | Asking whether a session exists without provoking an error      |
+| `diag`            | Structured fields AND the records under them, not text to `sed` |
+| `trigger`         | The write → poll → timeout → clean-up loop, written once        |
+| `shot`            | A capture path per call, and refusals reported as refusals      |
+| `build_mod`       | Encodes tModLoader's refusal to build while the game is open    |
+| `logs`            | Either side's log, filtered                                     |
 
 Those glue steps are where the hand-written version actually went wrong: a
 `pkill` pattern that matched its own command line, a readiness check that passed

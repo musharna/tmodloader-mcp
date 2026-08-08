@@ -1,4 +1,4 @@
-"""MCP server. Seven tools over a running tModLoader instance.
+"""MCP server over a running tModLoader instance.
 
 Tools are synchronous. A game session is process-global state — there is one
 game, one save directory, and one trigger file — so serialising calls on the
@@ -78,6 +78,15 @@ class ReplyOut(TypedDict):
 class DiagOut(TypedDict):
     side: str
     fields: dict[str, Any]
+    records: dict[str, list[str]]
+
+
+class StatusOut(TypedDict):
+    running: bool
+    mode: NotRequired[str]
+    port: NotRequired[int]
+    player: NotRequired[str]
+    started_pids: NotRequired[list[int]]
 
 
 class ShotOut(TypedDict):
@@ -123,7 +132,11 @@ def build_mod() -> BuildOut:
     structured_output=True,
 )
 def launch(
-    mode: str = "server_client", port: int = 7810, player: str = "n43n"
+    mode: str = "server_client",
+    port: int = 7810,
+    player: str = "n43n",
+    world: str | None = None,
+    timeout: float = 300.0,
 ) -> LaunchOut:
     """Start tModLoader and wait until it can actually answer.
 
@@ -137,6 +150,12 @@ def launch(
         port: Server port. Change it only if something else holds the default.
         player: Character name for the client. Must already exist — `-player`
             does not create one, and a duplicate name is kicked.
+        world: WINDOWS path to a `.wld`, overriding TMODLOADER_WORLD_WIN. A WSL
+            path is refused rather than tried: tModLoader runs as a Windows
+            process, cannot resolve /mnt/c, and the only symptom is a readiness
+            timeout blaming the heartbeat.
+        timeout: Seconds to wait for readiness. Raise it on a slow machine or a
+            large world — the default assumes neither.
 
     Waits for a heartbeat that is BOTH recent and reporting a live world. Those
     fail differently — a stale-but-ready heartbeat means the process died, a
@@ -151,7 +170,9 @@ def launch(
             "share one save directory and consume each other's trigger files."
         )
 
-    _session = session_mod.launch(_cfg(), mode, port=port, player=player)
+    _session = session_mod.launch(
+        _cfg(), mode, port=port, player=player, world=world, timeout=timeout
+    )
     return LaunchOut(
         mode=_session.mode,
         port=_session.port,
@@ -170,6 +191,7 @@ def trigger(
     target: str | None = None,
     argument: str | None = None,
     server: bool = False,
+    timeout: float = 60.0,
 ) -> ReplyOut:
     """Ask the running game to do something, and return what it said.
 
@@ -186,6 +208,8 @@ def trigger(
             with success, so passing one is refused here instead.
         server: Send to the dedicated server rather than the client. Some
             commands are server-authoritative and refuse on a client.
+        timeout: Seconds to wait for the game's reply. A command that does real
+            work on a large world can outlast the default.
 
     `refused` is reported separately from `ok`: a refusal is the mod
     deliberately saying no, and treating it as success is how a rejected action
@@ -194,7 +218,9 @@ def trigger(
     if _session is None:
         raise RuntimeError("no session — call `launch` first")
 
-    reply = _session.ask(command, target=target, argument=argument, server=server)
+    reply = _session.ask(
+        command, target=target, argument=argument, server=server, timeout=timeout
+    )
     return ReplyOut(
         command=reply.command, ok=reply.ok, refused=reply.refused, text=reply.text
     )
@@ -205,26 +231,38 @@ def trigger(
     annotations=_READ_ONLY,
     structured_output=True,
 )
-def diag(server: bool = False, target: str | None = None) -> DiagOut:
-    """Ask one side of the session what it currently sees, parsed into fields.
+def diag(
+    server: bool = False, target: str | None = None, timeout: float = 60.0
+) -> DiagOut:
+    """Ask one side of the session what it currently sees, parsed.
 
     Args:
         server: Read the dedicated server's view instead of the client's.
         target: Address a specific client by name.
+        timeout: Seconds to wait for the dump. A large world takes longer.
 
     Returns counters as integers and the mod's absence markers as null, so a
     reading of 0 — a real measurement — cannot be confused with "no data".
     Asking both sides at the same moment is the only way to answer "the client
     reports no NPC", which one side alone cannot.
+
+    `records` carries the indented list bodies the scalars only summarise:
+    `fields["npcs"]` says `active=6 mutated=1`, and `records["npcs"]` says which
+    six. Those lines were parsed and discarded until now, so a caller could see
+    that something was there and never what it was.
     """
     if _session is None:
         raise RuntimeError("no session — call `launch` first")
 
-    fields = _session.diag(server=server, target=target)
+    dump = _session.diag(server=server, target=target, timeout=timeout)
     # side_of, not the raw line. The mod writes "client netmode=1"; handing that
     # back whole makes the field useless for comparison and invites callers to
     # substring-match it, which is the parsing this server exists to remove.
-    return DiagOut(side=diag_mod.side_of(fields), fields=fields)
+    return DiagOut(
+        side=diag_mod.side_of(dump.fields),
+        fields=dump.fields,
+        records=dump.records,
+    )
 
 
 @mcp.tool(
@@ -232,7 +270,7 @@ def diag(server: bool = False, target: str | None = None) -> DiagOut:
     annotations=_READ_ONLY,
     structured_output=True,
 )
-def shot(region: str, target: str | None = None) -> ShotOut:
+def shot(region: str, target: str | None = None, timeout: float = 60.0) -> ShotOut:
     """Capture a region of the game's own back buffer and return the PNG path.
 
     Args:
@@ -241,6 +279,7 @@ def shot(region: str, target: str | None = None) -> ShotOut:
             character name, world name and any chat, so a request says which
             corner it wants.
         target: Address a specific client.
+        timeout: Seconds to wait for the reply and the PNG.
 
     This reads what the game rendered, not the screen, so no other window can
     appear in it — by construction rather than by luck. It also sees things the
@@ -249,8 +288,37 @@ def shot(region: str, target: str | None = None) -> ShotOut:
     if _session is None:
         raise RuntimeError("no session — call `launch` first")
 
-    path = _session.shot(region, target=target)
+    path = _session.shot(region, target=target, timeout=timeout)
     return ShotOut(path=str(path), region=region)
+
+
+@mcp.tool(
+    title="Is a session running?",
+    annotations=_READ_ONLY,
+    structured_output=True,
+)
+def status() -> StatusOut:
+    """Whether a session is running, and what it is.
+
+    The only read-only way to ask. Without it an agent that lost track had to
+    provoke an error to find out — `launch` fails when one exists, `diag` fails
+    when one does not — so the cheapest question on the surface was the one
+    that had to be asked by breaking something.
+
+    Reports what this server BELIEVES it started. It does not re-query the
+    process table, so it cannot tell you a game was closed from outside; `stop`
+    is what verifies against reality.
+    """
+    if _session is None:
+        return StatusOut(running=False)
+
+    return StatusOut(
+        running=True,
+        mode=_session.mode,
+        port=_session.port,
+        player=_session.player,
+        started_pids=sorted(_session.started),
+    )
 
 
 @mcp.tool(
