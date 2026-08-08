@@ -22,8 +22,10 @@ that read a heartbeat left behind by a process that had already been killed.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 TRIGGER_NAME = "biomancy-capture.trigger"
 RESULT_NAME = "biomancy-capture.txt"
@@ -31,23 +33,33 @@ DIAG_NAME = "biomancy-diag.txt"
 HEARTBEAT_NAME = "biomancy-hooks.txt"
 SHOT_NAME = "biomancy-shot.png"
 
-#: Commands the mod's DevCapture understands. Listed so an unknown one is
-#: refused HERE, with the valid set, rather than written to disk and silently
-#: ignored by a game that has no arm for it — which reads as a hang.
-COMMANDS = frozenset(
+#: Commands the mod's DevCapture understands, and whether it READS an argument.
+#: Listed so an unknown one is refused HERE, with the valid set, rather than
+#: written to disk and silently ignored by a game that has no arm for it —
+#: which reads as a hang.
+#:
+#: The flag is the second half of that same guarantee, and it is one command
+#: wide: `request.Argument` is consumed in exactly one place in the whole mod,
+#: `DevCapture.cs:386`, where `TakeShot` names a region. `DevCommands.Parse`
+#: hands `seed` an argument as well, and `SeedWherePlayerStands()` then takes
+#: none and hardcodes Zombie/Bloom — so an argument given to anything but `shot`
+#: is parsed, dropped, and answered with success. It is recorded per command
+#: rather than as a set of exceptions so that adding a command means saying
+#: which it is, instead of getting an answer by default.
+COMMANDS: Mapping[str, bool] = MappingProxyType(
     {
-        "capture",
-        "diag",
-        "mutate",
-        "vat",
-        "creature",
-        "kill",
-        "strains",
-        "seed",
-        "creep",
-        "place",
-        "killcreep",
-        "shot",
+        "capture": False,
+        "diag": False,
+        "mutate": False,
+        "vat": False,
+        "creature": False,
+        "kill": False,
+        "strains": False,
+        "seed": False,
+        "creep": False,
+        "place": False,
+        "killcreep": False,
+        "shot": True,
     }
 )
 
@@ -85,6 +97,61 @@ class Reply:
         return self.text.startswith("REFUSED")
 
 
+@dataclass(frozen=True)
+class Request:
+    """A payload as the GAME will understand it, rather than as it was meant."""
+
+    command: str
+    target: str | None = None
+    argument: str | None = None
+
+
+def parse(payload: str) -> Request | None:
+    """Read a payload back the way `DevCommands.Parse` will, or None for one it
+    cannot parse — which the mod calls Unknown and answers by doing nothing.
+
+    A MODEL of the mod's parser, kept here so this side can check that what it
+    wrote means what it meant. The rules it mirrors, in order: the whole string
+    is trimmed; an empty one is Capture, because a bare `touch` of the trigger
+    meant that before commands existed; the FIRST `@` splits off the target; the
+    FIRST `:` in what remains splits off the argument; both are trimmed again; an
+    empty half on either split is Unknown; the command is matched
+    case-insensitively while the target keeps its case, being a player name that
+    gets shown back to a human.
+
+    Being a model is the limit worth stating plainly: this catches a payload
+    this module would read back differently from how it built it. It cannot
+    catch the mod changing its grammar. Nothing on this side can, short of
+    asking a running game — which is the cost that composing carefully exists to
+    avoid paying.
+    """
+    text = payload.strip()
+    if not text:
+        return Request("capture")
+
+    target = None
+    at = text.find("@")
+    if at >= 0:
+        target = text[at + 1 :].strip()
+        text = text[:at].strip()
+        if not target or not text:
+            return None
+
+    argument = None
+    colon = text.find(":")
+    if colon >= 0:
+        argument = text[colon + 1 :].strip()
+        text = text[:colon].strip()
+        if not argument or not text:
+            return None
+
+    command = text.lower()
+    if command not in COMMANDS:
+        return None
+
+    return Request(command, target, argument)
+
+
 def compose(
     command: str, target: str | None = None, argument: str | None = None
 ) -> str:
@@ -94,6 +161,29 @@ def compose(
     simply not recognise it. `DevCommands.Parse` treats an unknown word as
     Unknown rather than falling back to a capture, deliberately — but it does so
     silently from our side, and a silent no-op is indistinguishable from a hang.
+
+    THE COMMAND WORD WAS THE ONLY PART EVER CHECKED. Everything after it was
+    pasted between delimiters and trusted, which left the two ways of being
+    misheard that the check above exists to prevent:
+
+    An argument nothing will read. `shot` is the only command whose argument the
+    mod consumes, and the other eleven answer with success while dropping it —
+    see the note on COMMANDS.
+
+    An argument that reparses. `Parse` splits on the FIRST `@`, and the target
+    is appended LAST, so an `@` inside an argument steals it: `shot:top@left`
+    is heard as a `shot` addressed to `left` naming no region at all. Addressed
+    to nobody, it is answered by nobody, and a request no client claims leaves
+    no reply file — the same observation as a hung game, which is the failure
+    this whole module is arranged around not producing.
+
+    The second is checked by READING THE PAYLOAD BACK, not by refusing the
+    characters that happen to break it today. A blacklist would have to reject
+    `@` while permitting `:` (which survives, the mod splitting on the first one
+    and keeping the rest) and would never think to reject a leading space
+    (which breaks nothing syntactically and still changes what the game does,
+    because `Parse` trims every field). The grammar knows all three; a list of
+    bad characters knows whichever ones have bitten so far.
     """
     if command not in COMMANDS:
         raise TriggerError(
@@ -108,11 +198,29 @@ def compose(
     if target is not None and not target:
         raise TriggerError(f"{command!r} was addressed to nobody")
 
+    if argument is not None and not COMMANDS[command]:
+        raise TriggerError(
+            f"{command!r} takes no argument, so {argument!r} would be parsed and "
+            f"then dropped, and the game would report success having never read "
+            f"it - only {sorted(c for c, takes in COMMANDS.items() if takes)} "
+            f"does anything with one"
+        )
+
     payload = command
     if argument is not None:
         payload = f"{payload}:{argument}"
     if target is not None:
         payload = f"{payload}@{target}"
+
+    meant = Request(command, target, argument)
+    heard = parse(payload)
+    if heard != meant:
+        raise TriggerError(
+            f"{payload!r} would not be read back as it was meant: the game hears "
+            f"{heard}, not {meant}. Delimiters (`:` before an argument, `@` before "
+            f"a target) and surrounding whitespace are the parts that cannot "
+            f"survive being inside a field"
+        )
 
     return payload
 

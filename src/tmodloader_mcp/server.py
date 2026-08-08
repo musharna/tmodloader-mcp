@@ -174,14 +174,16 @@ def trigger(
     """Ask the running game to do something, and return what it said.
 
     Args:
-        command: One of the mod's dev commands — currently
-            capture, diag, mutate, vat, creature, kill, strains, seed, creep,
+        command: One of the mod's dev commands — currently capture, diag,
+            mutate, vat, creature, kill, strains, seed, creep, place, killcreep,
             shot. An unknown word is refused HERE rather than written to disk,
             because a game that does not recognise it simply does nothing, and
             from outside that is indistinguishable from a hang.
         target: Address the request to one player by name. Two clients on one
             machine share a trigger file and would otherwise race for it.
-        argument: For commands that take one, e.g. a region for `shot`.
+        argument: Only `shot` reads one, naming a region. Every other command
+            has it parsed and then dropped by the mod while still answering
+            with success, so passing one is refused here instead.
         server: Send to the dedicated server rather than the client. Some
             commands are server-authoritative and refuse on a client.
 
