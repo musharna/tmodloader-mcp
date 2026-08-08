@@ -28,7 +28,7 @@ What earns the surface here is that a running game is not stateless:
 | `shot`            | A capture path per call, and refusals reported as refusals      |
 | `read_capture`    | The picture itself, for an agent not on this machine            |
 | `build_mod`       | Encodes tModLoader's refusal to build while the game is open    |
-| `logs`            | Either side's log, filtered                                     |
+| `logs`            | Any log, filtered — including the run that already rotated away |
 
 Captures are also addressable as `capture://{name}` resources. Both surfaces go
 through one reader that accepts a **name, never a path**, and serves only
