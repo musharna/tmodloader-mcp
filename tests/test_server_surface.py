@@ -127,6 +127,42 @@ def test_the_defaults_are_still_the_defaults(session):
     assert session.calls[-1][-1] == 60.0
 
 
+#: Every tool whose work is bounded by time, and the parameter that bounds it.
+#: A list rather than three more one-off tests, because the defect this pins is
+#: not "one tool forgot" — it is that the surface and the code beneath it drift
+#: apart one function at a time.
+TIMED_TOOLS = [
+    ("build_mod", "timeout"),
+    ("launch", "timeout"),
+    ("trigger", "timeout"),
+    ("diag", "timeout"),
+    ("shot", "timeout"),
+    ("stop", "settle"),
+]
+
+
+@pytest.mark.parametrize(("tool", "parameter"), TIMED_TOOLS)
+def test_every_bounded_tool_lets_the_caller_set_its_bound(tool, parameter):
+    """THE CHECK THAT WOULD HAVE CAUGHT THIS TWICE.
+
+    `stop` grew its `settle` argument precisely because a bound nothing can set
+    is a bound nothing can check — and then the TOOL still could not set it.
+    `build_mod` took no arguments at all while `build()` had taken a timeout all
+    along. Four other tools were fixed in between, one at a time, by noticing.
+
+    Asking it of every timed tool at once is the difference between fixing the
+    instances somebody spotted and pinning the class.
+    """
+    import inspect
+
+    signature = inspect.signature(getattr(server_mod, tool))
+
+    assert parameter in signature.parameters, (
+        f"`{tool}` is bounded by time and the caller cannot say how long; "
+        f"the function beneath it takes `{parameter}`"
+    )
+
+
 # ---- asking without breaking something ---------------------------------
 
 
