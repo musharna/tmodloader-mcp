@@ -21,17 +21,67 @@ that read a heartbeat left behind by a process that had already been killed.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
-TRIGGER_NAME = "biomancy-capture.trigger"
-RESULT_NAME = "biomancy-capture.txt"
-DIAG_NAME = "biomancy-diag.txt"
-HEARTBEAT_NAME = "biomancy-hooks.txt"
-SHOT_NAME = "biomancy-shot.png"
+#: A mod name that can be a filename prefix. Letters and digits only, which is
+#: what tModLoader internal names are: the prefix lands in filenames and inside
+#: the capture-matching pattern, so a separator would build a path instead of a
+#: name and a dot would widen the pattern.
+MOD_NAME = re.compile(r"^[A-Za-z0-9]+$")
+
+
+@dataclass(frozen=True)
+class Artifacts:
+    """The five filenames this harness and the mod have to agree on.
+
+    These were constants spelling `biomancy-`, which is how a tool for one mod
+    stays a tool for one mod. They are DERIVED from the mod's internal name
+    instead, and the rule was chosen so the derivation reproduces Biomancy's
+    existing names exactly: tModLoader's internal name is the source folder
+    name, and lowercasing it gives `biomancy-`.
+
+    That mattered more than elegance. These names are a contract with C# that
+    is already running; a prettier scheme would have renamed files the mod
+    still writes, and the harness would have waited on a trigger nobody reads.
+    """
+
+    prefix: str
+
+    @property
+    def trigger(self) -> str:
+        return f"{self.prefix}-capture.trigger"
+
+    @property
+    def result(self) -> str:
+        return f"{self.prefix}-capture.txt"
+
+    @property
+    def diag(self) -> str:
+        return f"{self.prefix}-diag.txt"
+
+    @property
+    def heartbeat(self) -> str:
+        return f"{self.prefix}-hooks.txt"
+
+    @property
+    def shot(self) -> str:
+        return f"{self.prefix}-shot.png"
+
+    @property
+    def all(self) -> tuple[str, ...]:
+        """Every artifact, for the callers that clear them between runs."""
+        return (self.trigger, self.result, self.diag, self.heartbeat, self.shot)
+
+
+def artifacts_for(mod_name: str) -> Artifacts:
+    """The artifact names one mod writes and this harness reads."""
+    return Artifacts(prefix=mod_name.lower())
+
 
 #: Commands the mod's DevCapture understands, and whether it READS an argument.
 #: Listed so an unknown one is refused HERE, with the valid set, rather than

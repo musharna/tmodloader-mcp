@@ -11,6 +11,20 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ## [Unreleased]
 
+### Changed
+
+- **Artifact filenames are no longer one mod's.** The five names this harness
+  and the mod must agree on are derived from the mod's internal name rather than
+  spelling `biomancy-` as constants. tModLoader takes that name from the source
+  folder, so the rule reproduces Biomancy's existing filenames exactly — which
+  was the requirement, not a nicety: they are a contract with running C#, and a
+  prettier scheme would have renamed files the mod still writes. Two mods driven
+  from one machine now also stay out of each other's triggers and captures,
+  which matters because they share a save directory. `TMODLOADER_MOD_NAME`
+  overrides it for a checkout whose folder is named something else. (#16)
+- `captures.available()` and `captures.read()` take the mod name, so one mod is
+  never served another's captures. (#16)
+
 ### Added
 
 - `read_capture` tool and a `capture://{name}` resource — a capture's PNG comes

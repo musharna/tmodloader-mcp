@@ -18,23 +18,26 @@ import pytest
 from tmodloader_mcp import session as session_mod
 from tmodloader_mcp.session import Session
 from tmodloader_mcp.triggers import (
-    SHOT_NAME,
-    TRIGGER_NAME,
     Reply,
     TriggerError,
+    artifacts_for,
 )
 
 
 class FakeCfg:
     """The handful of Config fields these paths actually touch."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, mod_name: str = "Biomancy"):
         self.root = root
         self.dotnet = Path("/fake/dotnet")
         self.tml_dir = Path("/fake/tml")
         self.taskkill = Path("/fake/taskkill")
         self.powershell = Path("/fake/powershell")
         self.world_win = r"C:\fake\World.wld"
+        self.mod_name = mod_name
+        # Derived here exactly as Config derives it, so these tests exercise the
+        # real naming rule rather than a copy of one mod's filenames.
+        self.artifacts = artifacts_for(mod_name)
 
     def artifact(self, name: str, *, server: bool) -> Path:
         return self.root / (f"server-{name}" if server else name)
@@ -93,7 +96,7 @@ def _session_that_captures(tmp_path, monkeypatch, payloads):
         # The mod always writes ONE fixed filename. That is the whole bug: it
         # is not a thing this harness gets to choose, so the harness has to
         # stop handing that path back as if it were stable.
-        cfg.artifact(SHOT_NAME, server=False).write_bytes(queue.pop(0))
+        cfg.artifact(cfg.artifacts.shot, server=False).write_bytes(queue.pop(0))
         return Reply(command=command, text="ok")
 
     monkeypatch.setattr(Session, "ask", fake_ask)
@@ -378,7 +381,7 @@ def test_the_trigger_file_is_never_written_where_the_game_is_watching(
     cfg = FakeCfg(tmp_path)
     sess = Session(cfg=cfg, mode="server_client", port=1, player="n43n")
 
-    trigger = cfg.artifact(TRIGGER_NAME, server=False)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
     # No game is going to answer, and `ask` deletes any reply it finds before
     # writing - deliberately, so a stale answer cannot be read as a fresh one.
     # So the reply is stubbed rather than planted: this test is about the write.

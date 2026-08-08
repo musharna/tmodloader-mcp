@@ -20,6 +20,7 @@ _CFG = config_mod.Config(
     save_dir=Path("/mnt/c/save"),
     mod_source=Path("/mnt/c/Mods/Yours"),
     mod_source_win=r"C:\Mods\Yours",
+    mod_name="Yours",
     world_win=r"C:\Worlds\Test.wld",
     taskkill=Path("/mnt/c/Windows/System32/taskkill.exe"),
     tasklist=Path("/mnt/c/Windows/System32/tasklist.exe"),
