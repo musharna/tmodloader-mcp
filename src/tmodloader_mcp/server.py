@@ -16,11 +16,12 @@ from mcp.types import ToolAnnotations
 
 from . import build as build_mod_impl
 from . import captures as captures_mod
+from . import commands as commands_mod
 from . import config as config_mod
 from . import diag as diag_mod
 from . import logs as logs_mod
 from . import session as session_mod
-from .triggers import COMMANDS, TriggerError
+from .triggers import TriggerError
 
 INSTRUCTIONS = """\
 Drive a running tModLoader instance: launch it, ask it questions, photograph it,
@@ -98,6 +99,18 @@ class ShotOut(TypedDict):
 
 class StopOut(TypedDict):
     killed_pids: list[int]
+    note: NotRequired[str]
+
+
+class CommandOut(TypedDict):
+    name: str
+    takes_argument: bool
+    summary: str
+
+
+class CommandsOut(TypedDict):
+    responder: bool
+    commands: list[CommandOut]
     note: NotRequired[str]
 
 
@@ -203,18 +216,19 @@ def trigger(
     """Ask the running game to do something, and return what it said.
 
     Args:
-        command: One of the mod's dev commands — currently capture, diag,
-            mutate, vat, creature, kill, strains, seed, creep, place, killcreep,
-            shot. An unknown word is refused HERE rather than written to disk,
-            because a game that does not recognise it simply does nothing, and
-            from outside that is indistinguishable from a hang.
+        command: One of the dev commands THIS mod serves — call `commands` to
+            see them, since they are the running mod's rather than a list kept
+            here. A word it does not serve is refused before anything is
+            written to disk: a game that does not recognise one does nothing,
+            and from outside that is indistinguishable from a hang.
         target: Address the request to one player by name. Two clients on one
             machine share a trigger file and would otherwise race for it.
-        argument: Only `shot` reads one, naming a region. Every other command
-            has it parsed and then dropped by the mod while still answering
-            with success, so passing one is refused here instead.
+        argument: Only some commands read one — `commands` says which. Passing
+            one to a command that takes none is refused here, because the mod
+            would refuse it too and that costs a round trip.
         server: Send to the dedicated server rather than the client. Some
-            commands are server-authoritative and refuse on a client.
+            commands are server-authoritative and refuse on a client, and each
+            side publishes its own list.
         timeout: Seconds to wait for the game's reply. A command that does real
             work on a large world can outlast the default.
 
@@ -230,6 +244,50 @@ def trigger(
     )
     return ReplyOut(
         command=reply.command, ok=reply.ok, refused=reply.refused, text=reply.text
+    )
+
+
+@mcp.tool(
+    title="What the running mod serves",
+    annotations=_READ_ONLY,
+    structured_output=True,
+)
+def commands(server: bool = False) -> CommandsOut:
+    """What this side's mod says it serves, read from the mod itself.
+
+    The list is published by the responder when it loads, not assembled here.
+    This harness used to carry its own copy of one mod's twelve commands and its
+    own belief about which read an argument — facts that belonged to running C#
+    and drifted the moment either side changed alone.
+
+    `responder` IS THE USEFUL FIELD when something is wrong. False means no list
+    was published: the mod is not loaded, or is a build with the dev bridge
+    compiled out. That is a different answer from a game still starting, and it
+    used to arrive as a readiness timeout, which names the wrong thing entirely —
+    it reads as slow rather than as never going to answer.
+
+    A list that exists but cannot be read is an ERROR rather than `responder:
+    false`, because it means a responder IS running and this side cannot
+    understand it — a version mismatch, which needs a human rather than a wait.
+
+    Args:
+        server: Ask the dedicated server rather than the client. Each side
+            publishes its own list, and they are not always the same.
+    """
+    if _session is None:
+        raise RuntimeError("no session — call `launch` first")
+
+    try:
+        published = _session.commands(server=server)
+    except commands_mod.CommandsMissing as absent:
+        return CommandsOut(responder=False, commands=[], note=str(absent))
+
+    return CommandsOut(
+        responder=True,
+        commands=[
+            CommandOut(name=c.name, takes_argument=c.takes_argument, summary=c.summary)
+            for c in published.commands
+        ],
     )
 
 
@@ -504,4 +562,4 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["COMMANDS", "TriggerError", "main", "mcp"]
+__all__ = ["TriggerError", "main", "mcp"]

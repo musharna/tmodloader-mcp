@@ -382,6 +382,11 @@ def test_the_trigger_file_is_never_written_where_the_game_is_watching(
     sess = Session(cfg=cfg, mode="server_client", port=1, player="n43n")
 
     trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    # `ask` composes against what the mod PUBLISHED, so a responder has to have
+    # left a list behind - which a real one does at load, before any request.
+    cfg.artifact(cfg.artifacts.commands, server=False).write_text(
+        "diag\tnoarg\tstate dump\n"
+    )
     # No game is going to answer, and `ask` deletes any reply it finds before
     # writing - deliberately, so a stale answer cannot be read as a fresh one.
     # So the reply is stubbed rather than planted: this test is about the write.

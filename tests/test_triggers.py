@@ -2,67 +2,140 @@
 
 from __future__ import annotations
 
-import re
-
 import pytest
 
+from tmodloader_mcp import commands as commands_mod
 from tmodloader_mcp import server as server_mod
 from tmodloader_mcp import triggers
 
 
-def test_composes_the_four_shapes():
-    assert triggers.compose("diag") == "diag"
-    assert triggers.compose("shot", argument="bottomleft") == "shot:bottomleft"
-    assert triggers.compose("diag", target="n43n") == "diag@n43n"
-    assert (
-        triggers.compose("shot", target="n43n", argument="topleft")
-        == "shot:topleft@n43n"
+def test_every_artifact_the_class_names_is_one_the_launcher_clears():
+    """`all` is what a launch deletes, and a name missing from it is never
+    cleared — so a file from a previous run is read as this run's.
+
+    Asked of the CLASS rather than of the names somebody remembered. Adding an
+    artifact and forgetting to clear it is silent by construction: everything
+    still works, and the only symptom is a stale answer that looks current.
+    `commands` is the case in point — its whole value as an "is a responder
+    running" signal depends on a previous run's copy not being left behind.
+    """
+    artifacts = triggers.artifacts_for("Biomancy")
+
+    named = {
+        getattr(artifacts, attribute)
+        for attribute in dir(triggers.Artifacts)
+        if attribute != "all"
+        and isinstance(getattr(triggers.Artifacts, attribute, None), property)
+    }
+
+    # Positive control: an introspection that found nothing would make the
+    # assertion below pass while checking no artifact at all.
+    assert len(named) >= 6, f"only found {named} - the introspection is broken"
+    assert artifacts.commands in named
+
+    missing = sorted(named - set(artifacts.all))
+    assert not missing, (
+        f"{missing} are artifacts this class names but a launch never clears, "
+        f"so a previous run's copy survives into the next one"
     )
 
 
-def test_an_unknown_command_is_refused_here_not_written_to_disk():
+#: What a running Biomancy publishes, as `compose` now receives it.
+#:
+#: A FIXTURE rather than a constant this module believes in. It used to be
+#: `triggers.COMMANDS`, a hardcoded copy of one mod's verbs that the real mod
+#: could not see — and these tests then checked that copy against itself, which
+#: is why none of them ever caught it drifting. Here it stands in for one
+#: specific mod's answer, and nothing in `src/` knows it exists.
+SERVED = commands_mod.CommandSet(
+    commands=(
+        commands_mod.Command("capture", False, "whole frame"),
+        commands_mod.Command("diag", False, "state dump"),
+        commands_mod.Command("shot", True, "one region"),
+        commands_mod.Command("mutate", False, "plant a mutated NPC"),
+        commands_mod.Command("seed", False, "seed a strain"),
+        commands_mod.Command("creep", False, "register a creep source"),
+        commands_mod.Command("killcreep", False, "remove every creep source"),
+    )
+)
+
+
+def compose(command, **kw):
+    """`triggers.compose` against the fixture set, so each test says one thing."""
+    return triggers.compose(command, commands=SERVED, **kw)
+
+
+def test_composes_the_four_shapes():
+    assert compose("diag") == "diag"
+    assert compose("shot", argument="bottomleft") == "shot:bottomleft"
+    assert compose("diag", target="n43n") == "diag@n43n"
+    assert compose("shot", target="n43n", argument="topleft") == "shot:topleft@n43n"
+
+
+def test_a_command_the_mod_does_not_serve_is_refused_here():
     """THE LOAD-BEARING CHECK.
 
-    DevCommands.Parse treats an unknown word as Unknown and does nothing —
-    correctly, so a misspelling cannot take a screenshot nobody asked for. But
-    from this side "the game ignored it" and "the game is hung" are the same
-    observation: no result file appears either way. Catching it here turns a
-    timeout into a sentence.
+    The mod refuses a verb it does not serve rather than falling back to a
+    capture — correctly, so a misspelling cannot take a screenshot nobody asked
+    for. But that refusal costs a round trip and only arrives if a game is
+    running to give it. Catching it here turns a wait into a sentence.
     """
     with pytest.raises(triggers.TriggerError) as e:
-        triggers.compose("creeep")
+        compose("creeep")
 
     assert "creeep" in str(e.value)
-    assert "creep" in str(e.value)  # the valid set is named, not just rejected
+    assert "creep" in str(e.value)  # what IS served is named, not just the refusal
 
 
-def test_every_advertised_command_actually_composes():
+def test_every_published_command_actually_composes():
     """Positive control for the check above.
 
-    Without this, a COMMANDS set that had drifted to empty would make the
-    rejection test pass while refusing everything.
+    Without it, a published set that had arrived empty would make the rejection
+    test pass while refusing everything.
     """
-    for command in triggers.COMMANDS:
-        assert triggers.compose(command) == command
+    for command in SERVED.names:
+        argument = "x" if SERVED.get(command).takes_argument else None
+        expected = f"{command}:x" if argument else command
+        assert compose(command, argument=argument) == expected
 
 
-def test_the_trigger_tool_advertises_every_command_there_is():
-    """The tool docstring IS the surface an MCP caller reads, and it had drifted.
+def test_a_command_this_mod_lacks_is_refused_even_though_another_mod_has_it():
+    """The point of reading the list rather than keeping one.
 
-    It listed ten of the twelve — `place` and `killcreep` were missing — so a
-    caller with no other source would have concluded they did not exist. That is
-    the same drift the live-check contract test exists for, on the surface an
-    agent actually reads, and it is invisible to every test that goes through
-    `compose` instead of through the description.
+    `vat` and `place` are real Biomancy commands and are absent from this
+    fixture, standing in for a mod that does not serve them. A harness holding
+    its own list would compose them happily and wait for an answer nobody was
+    ever going to write.
+    """
+    for absent in ("vat", "place", "strains"):
+        with pytest.raises(triggers.TriggerError) as e:
+            compose(absent)
+
+        assert absent in str(e.value)
+
+    # Positive control: this set is not simply refusing everything.
+    assert compose("creep") == "creep"
+
+
+def test_the_trigger_tool_points_at_the_published_list():
+    """The tool docstring IS the surface an MCP caller reads, and it held a copy.
+
+    It spelled out twelve commands, and had already drifted once — `place` and
+    `killcreep` were missing, so a caller with no other source would have
+    concluded they did not exist. The old test for that compared the docstring
+    against `triggers.COMMANDS`: two copies of one mod's list agreeing with each
+    other, neither of them the mod.
+
+    Both copies are gone, so the drift is unrepresentable and there is nothing
+    left to compare. What is worth holding is that the surface still tells a
+    caller where the real answer lives.
     """
     described = server_mod.trigger.__doc__ or ""
 
-    missing = [c for c in triggers.COMMANDS if not re.search(rf"\b{c}\b", described)]
-    assert not missing
+    assert "`commands`" in described
 
-    # Positive control: a matcher that found everything would pass the above
-    # while proving nothing.
-    assert not re.search(r"\bcreeep\b", described)
+    # It must not have quietly grown a list again.
+    assert "killcreep" not in described
 
 
 def test_an_empty_half_is_an_error():
@@ -74,38 +147,54 @@ def test_an_empty_half_is_an_error():
     all: a parameter that could not fail, reported as a passing test.
     """
     with pytest.raises(triggers.TriggerError):
-        triggers.compose("shot", argument="")
+        compose("shot", argument="")
 
-    assert triggers.compose("diag") == "diag"  # no argument at all is fine
+    assert compose("diag") == "diag"  # no argument at all is fine
 
 
 def test_an_empty_target_is_an_error():
     """`diag@` addresses nobody; letting it through hands it to whoever polls
     first, which is the exact race addressing exists to remove."""
     with pytest.raises(triggers.TriggerError):
-        triggers.compose("diag", target="")
+        compose("diag", target="")
 
 
 def test_an_argument_the_game_will_never_read_is_refused():
     """The silent one, and the one that fires on ordinary input.
 
-    `request.Argument` is read in exactly ONE place in the whole mod —
-    `DevCapture.cs:386`, `TakeShot`. `Parse` hands `seed` an argument too, and
-    then `SeedWherePlayerStands()` takes none and hardcodes Zombie/Bloom. So
-    `ask("seed", argument="Jungle")` composes cleanly, is parsed cleanly, seeds
-    something else entirely, and reports `SEED: ok`. Nothing anywhere says the
-    specification was dropped.
+    Only some commands read an argument, and the mod used to PARSE one for every
+    command and drop it: `ask("seed", argument="Jungle")` composed cleanly, was
+    parsed cleanly, seeded something else entirely and reported success. Nothing
+    anywhere said the specification had been dropped.
+
+    Which command reads one is now published per command rather than believed
+    here, so this check asks the set instead of a constant.
     """
     with pytest.raises(triggers.TriggerError) as e:
-        triggers.compose("seed", argument="Jungle")
+        compose("seed", argument="Jungle")
 
     assert "seed" in str(e.value)
     assert "Jungle" in str(e.value)
 
     # The positive control belongs in the same test: a harness that refused
-    # every argument would satisfy the assertion above and break the one
-    # command that has an argument to give.
-    assert triggers.compose("shot", argument="topleft") == "shot:topleft"
+    # every argument would satisfy the assertion above and break the commands
+    # that have an argument to give.
+    assert compose("shot", argument="topleft") == "shot:topleft"
+
+
+def test_a_command_that_needs_an_argument_is_refused_without_one():
+    """The other half, and it was never checked.
+
+    `shot` with no region reached the game, which refused it — a round trip to
+    learn something the published list already says. Composing it is the error.
+    """
+    with pytest.raises(triggers.TriggerError) as e:
+        compose("shot")
+
+    assert "shot" in str(e.value)
+
+    # Positive control: the same command with a region composes.
+    assert compose("shot", argument="topleft") == "shot:topleft"
 
 
 def test_a_payload_the_game_would_read_back_differently_is_refused():
@@ -118,7 +207,7 @@ def test_a_payload_the_game_would_read_back_differently_is_refused():
     hung game.
     """
     with pytest.raises(triggers.TriggerError) as e:
-        triggers.compose("shot", target="n43n", argument="top@left")
+        compose("shot", target="n43n", argument="top@left")
 
     assert "top@left" in str(e.value) or "n43n" in str(e.value)
 
@@ -132,10 +221,10 @@ def test_the_check_is_the_grammar_and_not_a_list_of_bad_characters():
     and still changes what the game does, because `Parse` trims every field.
     Only reading the payload back the way the game will can tell those apart.
     """
-    assert triggers.compose("shot", argument="a:b") == "shot:a:b"
+    assert compose("shot", argument="a:b") == "shot:a:b"
 
     with pytest.raises(triggers.TriggerError):
-        triggers.compose("shot", argument=" topleft ")
+        compose("shot", argument=" topleft ")
 
 
 @pytest.mark.parametrize(
@@ -152,7 +241,13 @@ def test_the_check_is_the_grammar_and_not_a_list_of_bad_characters():
         ("diag@", None),
         ("shot:", None),
         ("@n43n", None),
-        ("creeep", None),
+        # A word nothing serves is NOT malformed. It used to come back None,
+        # from a hardcoded list this side kept — which stopped matching the mod
+        # the day the mod's parser stopped judging vocabulary too. The game
+        # parses this perfectly and declines it; those are different answers,
+        # and only the second names what to do about it.
+        ("creeep", triggers.Request("creeep", None, None)),
+        ("mutate", triggers.Request("mutate", None, None)),
     ],
 )
 def test_parse_mirrors_the_mods_own_grammar(payload, expected):
@@ -164,6 +259,10 @@ def test_parse_mirrors_the_mods_own_grammar(payload, expected):
     about. Which is why the cases are spelled out here rather than asserted in
     the abstract — they are the thing that has to be re-checked if the mod's
     grammar moves.
+
+    It models the GRAMMAR only. Vocabulary is published by the mod and checked in
+    `compose`, so the two limits are now different: the grammar can still drift
+    unnoticed, the command set cannot.
     """
     assert triggers.parse(payload) == expected
 

@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import commands as commands_mod
+from .commands import CommandSet
 from .config import Config
 from .diag import Diag
 from .diag import parse as parse_diag
@@ -194,6 +196,20 @@ class Session:
     def path(self, name: str, *, server: bool) -> Path:
         return self.cfg.artifact(name, server=server)
 
+    def commands(self, *, server: bool = False) -> CommandSet:
+        """What this side's mod says it serves.
+
+        Read fresh rather than cached at launch. A mod reload republishes the
+        list, and a set remembered from before one would describe a responder
+        that no longer exists — the same staleness the heartbeat has, where the
+        file outlives what wrote it. It is one small file; re-reading costs less
+        than being wrong about it.
+
+        Raises `CommandsMissing` when nothing published one, which is a
+        different answer from a timeout: nothing is on its way.
+        """
+        return commands_mod.read(self.path(self.cfg.artifacts.commands, server=server))
+
     # ---- driving ---------------------------------------------------------
 
     def ask(
@@ -210,8 +226,20 @@ class Session:
         The result file is REMOVED FIRST. Without that, a reply left over from a
         previous request is indistinguishable from a fresh one, and the caller
         reads a stale answer as a current one.
+
+        The command is checked against WHAT THIS SIDE PUBLISHED, which is why
+        the list is read here rather than passed in. A client and a dedicated
+        server run different builds of nothing in particular but do answer
+        different commands, and each publishes its own list — so asking the
+        server for a client-only command is refused with the server's list
+        rather than a client's.
         """
-        payload = compose(command, target=target, argument=argument)
+        payload = compose(
+            command,
+            target=target,
+            argument=argument,
+            commands=self.commands(server=server),
+        )
 
         trigger = self.path(self.cfg.artifacts.trigger, server=server)
         result = self.path(self.cfg.artifacts.result, server=server)
