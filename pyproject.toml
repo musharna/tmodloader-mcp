@@ -43,7 +43,14 @@ packages = ["src/tmodloader_mcp"]
 [tool.hatch.build.targets.sdist]
 # hatchling's `packages` covers the WHEEL ONLY, so the sdist needs its own
 # allow-list or it ships the whole working tree.
-include = ["src/tmodloader_mcp", "tests", "README.md", "LICENSE", "pyproject.toml"]
+include = [
+    "src/tmodloader_mcp",
+    "tests",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
