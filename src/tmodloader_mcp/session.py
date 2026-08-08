@@ -87,6 +87,29 @@ NO_HEADLESS_SINGLEPLAYER = (
     "bug shipped here before."
 )
 
+#: An EMPTY dedicated server does not tick, so the mod never polls and never
+#: answers. Measured 2026-08-07 on ONE server process, changing only whether a
+#: client was attached to it:
+#:
+#:   alone, 90s          -> no artifact anywhere on disk, while tModLoader's own
+#:                          log showed the mod loaded and the world open
+#:   client joins, +30s  -> the SAME process wrote its heartbeat, reporting
+#:                          `polls: 1` and
+#:                          `hooks-seen: PostUpdateEverything,PostUpdateWorld`
+#:
+#: So it is not that the mod is broken on a server. The server runs no update
+#: hooks at all until somebody connects, and a mode whose readiness can never
+#: arrive is worth refusing rather than waiting five minutes for.
+NO_EMPTY_SERVER = (
+    "a dedicated server alone never becomes ready, so this mode is refused "
+    "rather than left to time out. An empty server runs no update hooks, so the "
+    "mod never polls and never answers - measured by attaching a client to a "
+    "server that had been silent for 90s, whose heartbeat then appeared within "
+    "30s. Use `server_client`, which joins one for you. If you want a server to "
+    "join yourself, start it outside this tool: what cannot be honoured here is "
+    "the promise that `launch` returns something able to answer."
+)
+
 
 class SessionError(RuntimeError):
     """The game could not be launched, reached, or shut down."""
@@ -341,11 +364,15 @@ def launch(
 ) -> Session:
     """Start a game and wait until it is actually ready to answer.
 
-    `mode` is "server" or "server_client". Singleplayer is refused - see
-    NO_HEADLESS_SINGLEPLAYER.
+    `mode` is "server_client". Both other modes are refused, each because the
+    engine cannot satisfy what this function promises - see
+    NO_HEADLESS_SINGLEPLAYER and NO_EMPTY_SERVER.
     """
     if mode == "singleplayer":
         raise SessionError(NO_HEADLESS_SINGLEPLAYER)
+
+    if mode == "server":
+        raise SessionError(NO_EMPTY_SERVER)
 
     if mode not in {"server", "server_client"}:
         raise SessionError(
@@ -473,33 +500,28 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
     # the client failure, so the identical server-mode failure was filed under
     # the same cause. Bringing Steam up fixed one and not the other, which is
     # the only reason the wrong attribution surfaced at all.
-    if mode == "server_client" and client_hb.name in missing:
+    if client_hb.name in missing:
         hint = (
             "The client requires Steam to be running and logged in - check that "
             "first, it is the usual cause."
         )
     else:
-        # NARROWER THAN IT USED TO BE, BECAUSE THE OLD CLAIM WAS TOO STRONG.
+        # THE CLIENT IS UP AND THE SERVER IS NOT - which is a different failure
+        # from the one above, and used to be described with a sentence written
+        # for `server` mode: "no client is involved in this mode". One IS
+        # involved here; it is the half that worked.
         #
-        # This said a dedicated server had "never been observed writing a
-        # heartbeat". That cannot be right: `server_client` waits on the SERVER
-        # heartbeat too (see `wanted` above), and that mode works - so the
-        # server does write one, when a client is connected.
-        #
-        # What is actually measured (2026-08-07): a server started ALONE, with
-        # the mod loading cleanly - `Adding Content: Biomancy v0.8.2` in
-        # tModLoader's own log - the world loaded and the port listening, wrote
-        # no artifact anywhere on disk in 300s. The likely mechanism is that an
-        # empty server does not tick the world, so the mod's update hooks never
-        # run; that is inference from the two observations, not something
-        # measured directly, and it is left as such rather than dressed up.
+        # A server only starts ticking once somebody connects (NO_EMPTY_SERVER),
+        # so the thing to suspect is the JOIN, not the server's startup: it can
+        # be listening, with the world open, and still be silent because nothing
+        # reached it.
         hint = (
-            "No client is involved in this mode, so Steam is NOT the likely "
-            "cause. A dedicated server running ALONE has not been observed "
-            "writing a heartbeat, even with the mod loading cleanly and the "
-            "world loaded (measured 2026-08-07) - most likely because an empty "
-            "server never ticks the world. The same server DOES report once a "
-            "client joins it, so prefer `server_client`."
+            "The client is up but the server is not reporting. Steam is NOT the "
+            "likely cause - a server stays silent until a client actually joins "
+            "it, so suspect the join rather than the server's startup: a wrong "
+            "port, a refused connection, or a character name that was kicked. "
+            "The server can be listening with the world loaded and still never "
+            "answer, because nothing has connected to make it tick."
         )
 
     raise SessionError(

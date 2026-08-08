@@ -50,6 +50,15 @@ human to load a world; the other tools then drive it normally.
 That matters more than it sounds: a bug that only appeared in singleplayer
 shipped once precisely because every harness ran server-plus-client.
 
+**There is no bare dedicated server either.** An empty server runs no update
+hooks, so the mod never polls and never answers — measured on one server
+process, changing only whether a client was attached: silent for 90s alone, and
+its heartbeat appeared within 30s of a client joining that same process,
+reporting `polls: 1`. `launch("server")` refuses for the same reason
+singleplayer does — what it promises is a game that can answer, and a server on
+its own never becomes one. Start a server outside this tool if you want one to
+join yourself.
+
 ## How it works
 
 The game is asked by **writing a file it polls**, not by sending it input. No
