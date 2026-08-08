@@ -18,6 +18,7 @@ from . import build as build_mod_impl
 from . import captures as captures_mod
 from . import config as config_mod
 from . import diag as diag_mod
+from . import logs as logs_mod
 from . import session as session_mod
 from .triggers import COMMANDS, TriggerError
 
@@ -382,43 +383,74 @@ def status() -> StatusOut:
     structured_output=True,
 )
 def logs(
-    server: bool = False, contains: str | None = None, lines: int = 80
+    name: str = "client.log",
+    previous: bool = False,
+    contains: str | None = None,
+    lines: int = 80,
 ) -> dict[str, Any]:
-    """Tail one side's tModLoader log, optionally filtered.
+    """Tail one of tModLoader's logs, optionally filtered.
 
     Args:
-        server: Read the server log rather than the client one.
+        name: Which log — see `log_files` for what this install actually has.
+            `client.log` and `server.log` are the game; `Launch.log` and the
+            `environment-*.log` pair are written by the launcher, which is where
+            a run that died BEFORE the game started says why.
+        previous: Read the run BEFORE this one. tModLoader zips the previous
+            run's logs into `Old/` when a new run starts, so after a failed
+            launch and a retry the failure is in an archive and the live log
+            belongs to the retry.
         contains: Keep only lines containing this substring, case-insensitively.
+            Applied to the WHOLE log before the tail, so this returns the last N
+            MATCHING lines rather than the matches among the last N.
         lines: How many trailing lines to return. Zero returns none; a negative
             count is refused rather than guessed at.
 
-    Useful when a launch fails: the reason is usually in the log and not in
+    Useful when a launch fails: the reason is usually in a log and not in
     anything the trigger protocol can reach, because the game never got far
-    enough to poll.
+    enough to poll. Which is also why `previous` exists — the obvious thing to
+    do after a failed launch is launch again, and that rotates the evidence.
     """
-    if lines < 0:
-        raise ValueError(f"lines={lines} is not a number of lines to return")
-
     cfg = _cfg()
-    name = "server.log" if server else "client.log"
-    path = cfg.tml_dir / "tModLoader-Logs" / name
 
-    if not path.is_file():
-        return {"path": str(path), "found": False, "lines": []}
+    try:
+        text = logs_mod.read(cfg.tml_dir, name, previous=previous)
+    except logs_mod.LogMissing as absent:
+        # Absence is reported, not raised: a log that has never been written is
+        # the normal state of a fresh install. A bad NAME is a different thing
+        # and is deliberately NOT caught here — it stays loud, because it is a
+        # caller mistake rather than a fact about the install.
+        return {
+            "name": name,
+            "previous": previous,
+            "found": False,
+            "lines": [],
+            "note": str(absent),
+        }
 
-    text = path.read_text(errors="replace").splitlines()
-    if contains:
-        needle = contains.lower()
-        text = [ln for ln in text if needle in ln.lower()]
+    return {
+        "name": name,
+        "previous": previous,
+        "found": True,
+        "lines": logs_mod.tail(text, contains=contains, lines=lines),
+    }
 
-    # `text[-lines:]` looks like a tail and is one for every value but zero:
-    # -0 is 0, so `text[-0:]` is the WHOLE log. Asking for no lines returned
-    # every line there had ever been, as a successful answer of the right
-    # shape - an agent spending its context on a log it did not ask for has
-    # nothing to notice.
-    kept = text[-lines:] if lines else []
 
-    return {"path": str(path), "found": True, "lines": kept}
+@mcp.tool(
+    title="List the logs this install has",
+    annotations=_READ_ONLY,
+    structured_output=True,
+)
+def log_files() -> dict[str, Any]:
+    """Which logs exist right now, and how many earlier runs are archived.
+
+    Read off disk rather than listed as a constant: which logs exist depends on
+    what was run, and a server-only session writes no `client.log` at all.
+    """
+    cfg = _cfg()
+    return {
+        "logs": logs_mod.available(cfg.tml_dir),
+        "archived_runs": len(logs_mod.archives(cfg.tml_dir)),
+    }
 
 
 @mcp.tool(

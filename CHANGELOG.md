@@ -13,6 +13,20 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ### Changed
 
+- **`logs` can reach every log, and the run that already rotated away.** It read
+  `client.log` or `server.log` and nothing else, of six log files — `Launch.log`
+  and the `environment-*.log` pair are where a run that dies BEFORE the game
+  starts writes, which is the failure `logs` is reached for. Worse, tModLoader
+  zips the previous run's logs into `Old/` when a new run starts: after a failed
+  launch and a retry, the failure is in an archive and the live log belongs to
+  the retry, so the tool answered about the wrong run with a log of the right
+  name. `logs(name=..., previous=...)` addresses both. Verified on the real
+  install: the live `client.log` opens at 01:10:32 and the newest of 20 archives
+  is the run before it. **Breaking:** the `server: bool` parameter is replaced by
+  `name`. (#17)
+- New `log_files` tool — which logs this install actually has, and how many
+  earlier runs are archived. Read off disk, since a server-only session writes
+  no `client.log` at all. (#17)
 - **Artifact filenames are no longer one mod's.** The five names this harness
   and the mod must agree on are derived from the mod's internal name rather than
   spelling `biomancy-` as constants. tModLoader takes that name from the source
