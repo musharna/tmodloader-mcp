@@ -85,12 +85,22 @@ so a request says which corner it wants.
 
 Every path is an environment variable with a default:
 
-| Variable                    | Meaning                                             |
-| --------------------------- | --------------------------------------------------- |
-| `TMODLOADER_DIR`            | tModLoader install                                  |
-| `TMODLOADER_SAVE_DIR`       | Save directory the mod writes artifacts into        |
-| `TMODLOADER_MOD_SOURCE`     | Mod source directory (WSL path)                     |
-| `TMODLOADER_MOD_SOURCE_WIN` | The same directory as Windows sees it, for `-build` |
+| Variable                    | Meaning                                      |
+| --------------------------- | -------------------------------------------- |
+| `TMODLOADER_DIR`            | tModLoader install                           |
+| `TMODLOADER_SAVE_DIR`       | Save directory the mod writes artifacts into |
+| `TMODLOADER_MOD_SOURCE`     | Mod source directory (WSL path)              |
+| `TMODLOADER_MOD_SOURCE_WIN` | Usually leave unset — see below              |
+
+`TMODLOADER_MOD_SOURCE_WIN` is the mod source as Windows sees it, which `-build`
+needs because tModLoader compiles inside a Windows process with no `/mnt/c`. It
+is **derived** from `TMODLOADER_MOD_SOURCE`, so setting that one is enough for a
+source on a drive mount. Set it yourself only if your mod source lives outside
+`/mnt/<drive>`, where there is no drive letter to translate to and the server
+will ask for it by name.
+
+The two describe one directory. If you set both to different places the server
+refuses to start and says so, rather than driving one and building the other.
 
 ## Phase 2 — what would make this yours
 
