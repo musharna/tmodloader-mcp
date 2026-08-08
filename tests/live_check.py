@@ -90,6 +90,13 @@ try:
     try:
         server.trigger("creeep")
         print("  FAIL: bad command was not refused")
+        # Exits rather than reading on, the way the singleplayer check above
+        # does. Printing FAIL and continuing left the script exiting 0 with the
+        # word FAIL in its output: legible to whoever was watching, invisible to
+        # anything that runs this and reads a status code. SystemExit is not an
+        # Exception, so the handler below does not swallow it, and the outer
+        # `finally` still stops the game.
+        sys.exit(1)
     except Exception as e:  # noqa: BLE001 - any refusal beats reaching disk
         print(f"  OK   refused: {e}")
 finally:
