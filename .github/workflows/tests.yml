@@ -24,6 +24,25 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # The suite takes three seconds. Without this a hung step - a stalled
+    # download, a future test that waits on something that never comes - runs to
+    # GitHub's six-hour default, and this account's Actions budget is small
+    # enough that one such run is a measurable fraction of the month.
+    timeout-minutes: 10
+
+    strategy:
+      # Both versions report. Cancelling 3.13 because 3.12 failed hides whether
+      # the failure is version-specific, which is the only question a matrix is
+      # here to answer.
+      fail-fast: false
+      matrix:
+        # pyproject says `requires-python = ">=3.12"` and advertises both in its
+        # classifiers, so both are installable and only one was ever run. A
+        # supported version nothing exercises is a claim, not a fact - the same
+        # shape as the README's PNG check that had never existed.
+        python: ["3.12", "3.13"]
+
     steps:
       # v7 is a floating major tag that was verified to exist. setup-uv below
       # is pinned exactly because it publishes NO floating major - it has
@@ -38,10 +57,17 @@ jobs:
       # an undefined name, because that script is not collected by pytest.
       # Ruff is what caught it, so ruff is a gate rather than a suggestion.
       - name: ruff
-        run: uv run ruff check .
+        run: uv run --python ${{ matrix.python }} ruff check .
+
+      # Formatting was enforced by an editor hook and by habit, and by nothing
+      # that would stop a branch. It held only because every commit so far
+      # happened to pass through that hook; a contributor without it, or a
+      # dependabot branch, would have been merged unformatted with CI green.
+      - name: ruff format
+        run: uv run --python ${{ matrix.python }} ruff format --check .
 
       - name: pytest
-        run: uv run pytest -q
+        run: uv run --python ${{ matrix.python }} pytest -q
 
   # The suite drives a Windows game through /mnt/c, so nothing here can test
   # THAT seam - a Linux runner has no tModLoader to launch. What runs is
