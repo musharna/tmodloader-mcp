@@ -17,6 +17,8 @@ anything to be alive.
 from __future__ import annotations
 
 import ast
+import asyncio
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -24,6 +26,15 @@ import pytest
 from tmodloader_mcp import server as server_mod
 
 LIVE_CHECK = Path(__file__).parent / "live_check.py"
+PROTOCOL_CHECK = Path(__file__).parent / "live_protocol_check.py"
+
+#: Every script here that drives a real game and is therefore NOT collected.
+#: A list rather than one constant, because the defect this file exists to
+#: prevent is a script rotting unwatched - and a second unwatched script was
+#: added the moment there was a second way to drive the game. Guards that name
+#: one file stop guarding the moment a sibling appears.
+LIVE_SCRIPTS = [LIVE_CHECK, PROTOCOL_CHECK]
+SCRIPT_IDS = [p.name for p in LIVE_SCRIPTS]
 
 
 def _server_attributes(source: str) -> set[str]:
@@ -197,7 +208,8 @@ def _handlers_catching_everything(source: str) -> list[int]:
     return sorted(caught)
 
 
-def test_no_handler_swallows_the_exits_the_checks_depend_on():
+@pytest.mark.parametrize("script", LIVE_SCRIPTS, ids=SCRIPT_IDS)
+def test_no_handler_swallows_the_exits_the_checks_depend_on(script):
     """Guards the premise the fix above rests on.
 
     Failing a check is spelled `sys.exit(1)`, which raises SystemExit — and
@@ -209,7 +221,7 @@ def test_no_handler_swallows_the_exits_the_checks_depend_on():
     That is a one-word edit away at any time, and it would leave every test here
     passing, because the AST check above only asks whether an exit is WRITTEN.
     """
-    assert _handlers_catching_everything(LIVE_CHECK.read_text()) == []
+    assert _handlers_catching_everything(script.read_text()) == []
 
 
 def test_that_reader_can_actually_see_one():
@@ -224,7 +236,8 @@ def test_that_reader_can_actually_see_one():
     )
 
 
-def test_live_check_is_still_valid_python():
+@pytest.mark.parametrize("script", LIVE_SCRIPTS, ids=SCRIPT_IDS)
+def test_the_live_scripts_are_still_valid_python(script):
     """Cheapest possible smoke test, and it has caught nothing yet.
 
     Kept anyway because the failure it guards - a script that cannot even parse
@@ -232,6 +245,167 @@ def test_live_check_is_still_valid_python():
     output at the end of a five-minute launch.
     """
     try:
-        ast.parse(LIVE_CHECK.read_text())
+        ast.parse(script.read_text())
     except SyntaxError as e:
-        pytest.fail(f"live_check.py does not parse: {e}")
+        pytest.fail(f"{script.name} does not parse: {e}")
+
+
+# ---- the protocol check names its tools as STRINGS -----------------------
+
+
+def _tools_called(source: str) -> set[str]:
+    """Every tool name passed to `session.call_tool(...)` as a literal.
+
+    The protocol script cannot be checked the way `live_check.py` is. It never
+    touches `server.<name>`; it sends `call_tool("diag", {})` down a pipe. So a
+    renamed tool leaves it syntactically perfect, passing every other test here,
+    and wrong - failing only against a live game, which is the same expensive
+    place `creep-drawn` hid for months.
+    """
+    found = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        # The RECEIVER matters, not just the method name. Checking only
+        # `.attr == "call_tool"` matched `other.call_tool("nope")` too - caught
+        # by the over-match control below, which is the entire reason it exists.
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "call_tool"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "session"
+        ):
+            continue
+        if (
+            node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            found.add(node.args[0].value)
+    return found
+
+
+def test_the_tool_reader_finds_what_it_is_looking_for():
+    """POSITIVE CONTROL. An extractor returning nothing blesses every script."""
+    found = _tools_called(
+        'await session.call_tool("diag", {})\nx = session.call_tool("stop", {})\n'
+    )
+
+    assert found == {"diag", "stop"}
+
+
+def test_the_tool_reader_ignores_other_calls_and_computed_names():
+    """The other way it could be useless: over-matching.
+
+    `session.read_resource(...)` and `session.list_tools()` are not tool calls,
+    and a name built at runtime is not a literal this can check - reporting it
+    as missing would be crying wolf about the one case that is legitimately
+    unverifiable here.
+    """
+    found = _tools_called(
+        'session.read_resource("capture://x.png")\n'
+        "session.list_tools()\n"
+        "session.call_tool(name, {})\n"
+        'other.call_tool("nope", {})\n'
+    )
+
+    assert found == set()
+
+
+def test_every_tool_the_protocol_check_calls_is_actually_registered():
+    """THE DRIFT GUARD, in the spelling this script actually uses.
+
+    Compared against the server's OWN registry rather than a list written down
+    here. A copy of the tool names would drift from the server exactly the way
+    the script does, and then agree with it - two wrong things matching is what
+    a copy buys you. This is the same reason `commands` learns from the mod
+    instead of shipping a list of them.
+    """
+    called = _tools_called(PROTOCOL_CHECK.read_text())
+    assert called, (
+        "no call_tool names found - the extractor or the script changed shape"
+    )
+
+    registered = {t.name for t in asyncio.run(server_mod.mcp.list_tools())}
+    unknown = sorted(called - registered)
+
+    assert not unknown, (
+        f"live_protocol_check.py calls {unknown}, which the server does not "
+        f"register. It would fail only against a live game. Registered: "
+        f"{sorted(registered)}"
+    )
+
+
+def test_the_protocol_check_drives_every_tool_that_needs_a_game():
+    """The point of the script, pinned so it cannot quietly shrink.
+
+    These seven are unreachable from `test_mcp_protocol.py` - a fake install
+    cannot launch anything - so this script is the ONLY protocol-level evidence
+    they work. A tool dropped from the journey would leave that with no cover
+    and nothing would say so.
+    """
+    needs_a_game = {
+        "build_mod",
+        "launch",
+        "commands",
+        "trigger",
+        "diag",
+        "shot",
+        "stop",
+    }
+
+    missing = sorted(needs_a_game - _tools_called(PROTOCOL_CHECK.read_text()))
+
+    assert not missing, f"nothing drives {missing} over the protocol any more"
+
+
+# ---- the reporting funnel the whole script depends on --------------------
+
+
+def _protocol_module():
+    """Import the live script by path, without running its journey.
+
+    `tests/` is not a package, so there is no `from . import` to use. Loading it
+    by path also states the truth: it is a script, and importing it is only safe
+    because the run is behind `if __name__ == "__main__"`. It used to launch
+    Terraria at module scope, which is precisely why none of its reporting could
+    be checked by anything cheap.
+    """
+    spec = importlib.util.spec_from_file_location("_lpc", PROTOCOL_CHECK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_passing_check_does_not_print_its_failure_explanation(capsys):
+    """THE ONE THAT WAS ACTUALLY BROKEN, in the new script.
+
+    `detail` is written as the explanation of a failure. Printed on success too,
+    it produced `OK   shot 1 is a PNG: bad magic` - a passing run that reads as
+    a failing one, which is worse than useless in a log somebody skims once.
+    """
+    lpc = _protocol_module()
+
+    lpc.failures.clear()
+    assert lpc.check("it works", True, "THIS MUST NOT APPEAR") is True
+
+    out = capsys.readouterr().out
+    assert "OK" in out
+    assert "THIS MUST NOT APPEAR" not in out
+    assert lpc.failures == [], "a passing check recorded a failure"
+
+
+def test_a_failing_check_prints_its_reason_and_records_it(capsys):
+    """Positive control for the above: suppressing detail everywhere would also
+    pass that test, and would throw away the only thing a failure carries."""
+    lpc = _protocol_module()
+
+    lpc.failures.clear()
+    assert lpc.check("it broke", False, "the reason") is False
+
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "the reason" in out
+    assert lpc.failures == ["it broke: the reason"]
+    lpc.failures.clear()
