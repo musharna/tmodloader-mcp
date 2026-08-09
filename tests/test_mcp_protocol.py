@@ -41,6 +41,7 @@ import sys
 import pytest
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.shared.exceptions import MCPError
 
 from tmodloader_mcp import server as server_mod
 
@@ -336,3 +337,62 @@ def test_read_capture_returns_the_bytes_and_still_refuses_a_path(fake_install):
     # And the refusal, which only means something alongside the control above.
     assert bad.is_error, "a path outside the save directory was served"
     assert "capture name" in "".join(c.text for c in bad.content if hasattr(c, "text"))
+
+
+# ---- the same file, reached the other way --------------------------------
+
+
+@needs_subprocess
+def test_the_capture_resource_is_as_contained_as_the_tool(fake_install):
+    """`capture://` reads the same file through a SECOND surface.
+
+    `captures.py` says why that is the interesting case: "two paths to one file
+    is how one of them ends up with a weaker check". The resource and the tool
+    share `captures.read`, and sharing it is the claim being tested here - a
+    resource that grew its own reader is exactly what this would catch.
+
+    THE REFUSAL THAT DISCRIMINATES IS THE NEIGHBOUR, NOT THE TRAVERSAL. The
+    fixture keeps `fakemod-diag.txt` beside the capture: a file that really
+    exists, really is in the save directory, and really is not a capture. Only
+    the NAME check refuses it, so deleting that check serves it. `..` cannot
+    do the same job here - measured, it never reaches the reader at all, since
+    `capture://../../../etc/passwd` fails to match the URI template and comes
+    back as "Unknown resource". That is a refusal by ROUTING, and a routing
+    refusal would keep passing even if the reader were removed entirely.
+
+    The client also sees only a generic "Error creating resource from template"
+    - the reason stays server-side - so there is no message to assert on. That
+    makes the positive control the load-bearing half rather than a courtesy.
+    """
+    import base64
+
+    async def call(session):
+        templates = await session.list_resource_templates()
+        good = await session.read_resource(f"capture://{FAKE_CAPTURE}")
+
+        refused = []
+        for uri in (
+            "capture://fakemod-diag.txt",  # real file, real directory, not a capture
+            f"capture://{FAKE_CAPTURE}.exe",  # the suffix an unanchored regex accepts
+            "capture://../../../etc/passwd",  # refused by routing - see docstring
+        ):
+            try:
+                await session.read_resource(uri)
+                refused.append((uri, None))
+            except MCPError as denied:
+                refused.append((uri, str(denied)))
+        return templates, good, refused
+
+    templates, good, refused = _run(call, fake_install)
+
+    assert "capture://{name}" in [
+        t.uri_template for t in templates.resource_templates
+    ], "a resource nobody can list is a resource nobody can find"
+
+    # Positive control: the capture itself still comes back, and comes back WHOLE.
+    blob = good.contents[0]
+    assert blob.mime_type == "image/png"
+    assert base64.b64decode(blob.blob) == FAKE_PNG
+
+    served = [uri for uri, denied in refused if denied is None]
+    assert not served, f"the resource served {served}"
