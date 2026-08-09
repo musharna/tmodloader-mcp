@@ -18,11 +18,19 @@ every annotation a string, and `typing.TypedDict` computes __required_keys__ at
 class creation without resolving them, so the optional fields were silently
 promoted to required. Nothing that calls a function can see that.
 
-Only `status` is called here, deliberately: every other read-only tool goes
-through `_cfg()`, which needs a real tModLoader install and would make this a
-test of the machine rather than of the surface. What it does cover is the part
-that broke - the handshake, schema generation, and one round trip whose output
-is validated - and it runs on any runner, with no game.
+Every READ-ONLY tool is driven here. `status` needs nothing; the other three go
+through `_cfg()`, which was the reason they went untested - it wants a
+tModLoader install, and a test that wants one is a test of the machine. But
+`config.load` reads the environment for every path and `config.check` only
+wants a few files to EXIST, so a directory tree with an empty `tModLoader.dll`
+in it satisfies it completely. See `fake_install`. The tools that need a
+running GAME - `build_mod`, `launch`, `trigger`, `commands`, `diag`, `shot`,
+`stop` - are still uncovered at this layer, and a fake install cannot reach
+them.
+
+Built against a fixture rather than skipped without one, because a skipped test
+reads exactly like a passing one in a CI log. This suite has already been
+fooled by that once.
 """
 
 import asyncio
@@ -52,26 +60,100 @@ EXPECTED_TOOLS = {
 }
 
 
-def _server_params() -> StdioServerParameters:
+#: The one capture the fake install holds. Its name has to match
+#: `captures.capture_pattern(mod_name)` or the reader refuses it - which is the
+#: point of the pattern, and makes this constant part of the test rather than
+#: decoration.
+FAKE_CAPTURE = "fakemod-shot-001-full.png"
+
+#: Not a valid PNG. Nothing in this path decodes the image - the server hands
+#: back bytes and the client base64s them - so a decodable file would only be
+#: testing Pillow. What matters is that these EXACT bytes come back.
+FAKE_PNG = b"\x89PNG\r\n\x1a\nnot really a png, and nothing here decodes it"
+
+
+@pytest.fixture
+def fake_install(tmp_path):
+    """A tree that satisfies `config.check` with no tModLoader anywhere in it.
+
+    `check` asks whether a few paths exist and whether one of them holds a file
+    called `tModLoader.dll`. It never opens it. So the whole install can be a
+    directory and an empty file, and the read-only tools - which only list and
+    read the save and log directories - cannot tell the difference.
+
+    THE WINDOWS MOD SOURCE HAS TO BE SET EXPLICITLY. It is normally derived
+    from the WSL path, and derivation only works under `/mnt/<drive>`; a
+    `tmp_path` is not, so `check` would report that it cannot tell what Windows
+    calls this directory. Setting it is what a non-WSL caller does anyway.
+
+    Returns the environment the server subprocess needs.
+    """
+    tml = tmp_path / "tml"
+    (tml / "tModLoader-Logs" / "Old").mkdir(parents=True)
+    (tml / "tModLoader.dll").write_bytes(b"")
+    (tml / "tModLoader-Logs" / "client.log").write_text("first line\nsecond line\n")
+    (tml / "tModLoader-Logs" / "Old" / "run-1.zip").write_bytes(b"PK")
+
+    save = tmp_path / "save"
+    save.mkdir()
+    (save / FAKE_CAPTURE).write_bytes(FAKE_PNG)
+    # Something in the save directory that is NOT a capture, so `captures`
+    # listing exactly one thing means the pattern filtered rather than that
+    # there was only ever one file.
+    (save / "fakemod-diag.txt").write_text("not a capture")
+
+    mod = tmp_path / "modsrc"
+    mod.mkdir()
+    (mod / "build.txt").write_text("displayName = Fake\n")
+
+    return {
+        "TMODLOADER_DIR": str(tml),
+        "TMODLOADER_SAVE_DIR": str(save),
+        "TMODLOADER_MOD_SOURCE": str(mod),
+        "TMODLOADER_MOD_SOURCE_WIN": r"C:\Fake\ModSources\modsrc",
+        "TMODLOADER_MOD_NAME": "Fakemod",
+    }
+
+
+def _server_params(env=None) -> StdioServerParameters:
     # `-m` rather than the console script: the entry point is only on PATH once
     # the package is installed, and this has to run from a source checkout too.
     return StdioServerParameters(
         command=sys.executable,
         args=["-m", "tmodloader_mcp.server"],
+        # Merged over the client's default inherited environment, not replacing
+        # it - the subprocess still needs PATH to find its own interpreter.
+        env=env,
     )
 
 
-async def _talk(call):
+async def _talk(call, env=None):
     async with (
-        stdio_client(_server_params()) as (read, write),
+        stdio_client(_server_params(env)) as (read, write),
         ClientSession(read, write) as session,
     ):
         await session.initialize()
         return await call(session)
 
 
-def _run(call):
-    return asyncio.run(_talk(call))
+def _run(call, env=None):
+    return asyncio.run(_talk(call, env))
+
+
+def _structured(result):
+    """The tool's output as the PROTOCOL validated it.
+
+    `structured_content` is the thing generated from the return annotation, so
+    it is what a schema mistake shows up in. Reading the text block instead
+    would be re-parsing JSON the server already parsed and checked.
+    """
+    assert not result.is_error, "".join(
+        c.text for c in result.content if hasattr(c, "text")
+    )
+    assert result.structured_content is not None, (
+        "tool declared structured_output and returned none"
+    )
+    return result.structured_content
 
 
 needs_subprocess = pytest.mark.skipif(
@@ -154,3 +236,103 @@ def test_output_annotations_are_resolved_types_not_forward_refs():
             "TypedDict cannot see optionality through them - is "
             "`from __future__ import annotations` back at the top of server.py?"
         )
+
+
+# ---- the read-only tools, against an install that is not one --------------
+
+
+@needs_subprocess
+def test_captures_lists_only_this_mod_s_captures(fake_install):
+    """Two things at once: the round trip, and that the filter is the filter.
+
+    The save directory holds diag dumps and heartbeats beside the captures, so
+    a listing that returned everything would look identical to a correct one
+    whenever a capture happened to be the only file there. The fixture puts a
+    non-capture next to it for that reason.
+    """
+
+    async def call(session):
+        return await session.call_tool("captures", {})
+
+    out = _structured(_run(call, fake_install))
+
+    assert out == {"captures": [FAKE_CAPTURE]}
+
+
+@needs_subprocess
+def test_log_files_reads_the_install_rather_than_a_constant(fake_install):
+    """Which logs exist is a fact about disk, and the archive count with it.
+
+    A server-only session writes no `client.log`; the fixture writes one log
+    and archives one run, so a hardcoded answer and a read one differ.
+    """
+
+    async def call(session):
+        return await session.call_tool("log_files", {})
+
+    out = _structured(_run(call, fake_install))
+
+    assert out == {"logs": ["client.log"], "archived_runs": 1}
+
+
+@needs_subprocess
+def test_logs_survives_both_of_the_shapes_it_returns(fake_install):
+    """THE SAME CLASS OF DEFECT THAT BROKE `status`, in the one other tool with
+    a key set that depends on which branch ran.
+
+    `logs` returns `note` when the log is absent and omits it when it is not.
+    That is exactly the shape `status` had - and `status` could not survive the
+    round trip - so asking for a log that exists and one that does not, over the
+    protocol, is what tells the two cases apart. Absence being NORMAL here is
+    the whole reason the second call is not an error.
+    """
+
+    async def call(session):
+        found = await session.call_tool("logs", {"name": "client.log", "lines": 5})
+        missing = await session.call_tool("logs", {"name": "server.log"})
+        return found, missing
+
+    found, missing = (_structured(r) for r in _run(call, fake_install))
+
+    assert found["found"] is True
+    assert found["lines"] == ["first line", "second line"]
+
+    assert missing["found"] is False
+    assert missing["lines"] == []
+    assert missing["note"], "an absent log has to say so, not just return nothing"
+
+
+@needs_subprocess
+def test_read_capture_returns_the_bytes_and_still_refuses_a_path(fake_install):
+    """The containment, asserted THROUGH the surface, with its own control.
+
+    The refusal half of this test passes against a server that refuses
+    everything - including the capture it is supposed to serve - so a broken
+    reader and a safe one look the same. The positive control is in the same
+    test on purpose: the legitimate name has to come back with the exact bytes
+    in the same run that the traversal is rejected.
+
+    `..` is only one spelling. The module compares RESOLVED parents rather than
+    scanning for it, and the name filter refuses this one before that even
+    matters - which is the layering the docstring in `captures.py` describes.
+    """
+    import base64
+
+    async def call(session):
+        good = await session.call_tool("read_capture", {"name": FAKE_CAPTURE})
+        bad = await session.call_tool("read_capture", {"name": "../../../etc/passwd"})
+        return good, bad
+
+    good, bad = _run(call, fake_install)
+
+    # Positive control: the thing this tool exists to do still works.
+    assert not good.is_error, "".join(
+        c.text for c in good.content if hasattr(c, "text")
+    )
+    images = [c for c in good.content if getattr(c, "type", None) == "image"]
+    assert len(images) == 1, f"expected one image, got {good.content}"
+    assert base64.b64decode(images[0].data) == FAKE_PNG
+
+    # And the refusal, which only means something alongside the control above.
+    assert bad.is_error, "a path outside the save directory was served"
+    assert "capture name" in "".join(c.text for c in bad.content if hasattr(c, "text"))
