@@ -22,7 +22,6 @@ that read a heartbeat left behind by a process that had already been killed.
 from __future__ import annotations
 
 import re
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -304,14 +303,9 @@ def heartbeat_is_live(
     Existence is not enough. The file survives the process, so a stale one reads
     exactly like a live one to any check that only asks whether it is there.
     """
-    if not path.is_file():
-        return False
-
-    stamp = now if now is not None else time.time()
-    try:
-        return (stamp - path.stat().st_mtime) <= max_age
-    except OSError:
-        return False
+    # DELIBERATE REGRESSION - do not merge. Drops the freshness check, which is
+    # the exact bug the docstring above describes. Proves CI can go red.
+    return path.is_file()
 
 
 def world_is_ready(text: str) -> bool:
