@@ -174,7 +174,40 @@ def test_status_reports_no_session_without_raising(no_session):
     exists, `diag` fails when one does not — so the cheapest question on the
     surface was the one you had to break something to ask.
     """
-    assert server_mod.status() == {"running": False}
+    assert server_mod.status() == {
+        "running": False,
+        "mode": None,
+        "port": None,
+        "player": None,
+        "started_pids": None,
+    }
+
+
+def test_every_status_key_is_present_whether_or_not_a_game_is_running(monkeypatch):
+    """THE SHAPE IS THE CONTRACT, and it used to change underneath callers.
+
+    These fields were `NotRequired`, so with no game running `status` returned
+    `{"running": False}` and nothing else. As Python that reads fine and every
+    test here passed. Over MCP it does not survive: the tool's output is
+    validated against a schema generated from this TypedDict, and the missing
+    keys came back as four "Field required" errors - so the cheapest read-only
+    question on the surface was broken in the state it exists to report.
+
+    Asserting the KEYS rather than the values, because the values legitimately
+    differ and the shape must not.
+    """
+    keys = set(server_mod.StatusOut.__annotations__)
+
+    monkeypatch.setattr(server_mod, "_session", None)
+    idle = server_mod.status()
+
+    monkeypatch.setattr(server_mod, "_session", FakeSession())
+    live = server_mod.status()
+
+    assert set(idle) == keys, "a stopped session must still fill every field"
+    assert set(live) == keys, "a running session must fill every field"
+    assert idle["running"] is False and live["running"] is True
+    assert idle["started_pids"] is None and live["started_pids"] is not None
 
 
 def test_status_describes_the_session_it_believes_in(session):

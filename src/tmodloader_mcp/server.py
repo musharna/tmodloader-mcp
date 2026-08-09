@@ -5,9 +5,23 @@ game, one save directory, and one trigger file — so serialising calls on the
 event loop is what stops two requests consuming each other's reply.
 """
 
-from __future__ import annotations
+# NO `from __future__ import annotations` HERE, DELIBERATELY.
+#
+# PEP 563 turns every annotation into a string, and `typing.TypedDict`
+# computes __required_keys__ at class creation - from those strings. It does
+# not resolve them, so `NotRequired[str]` is an unrecognised forward ref and
+# the key is silently marked REQUIRED. Every optional field in this file was
+# lost that way, and only the MCP layer noticed: pydantic validates these
+# TypedDicts when a tool returns, so `status` raised four "Field required"
+# errors whenever no game was running - the most common state there is.
+#
+# Invisible to every test here, because a test calls the function and gets a
+# dict back; nothing validates it. Switching to typing_extensions does NOT
+# fix it (measured on 3.13 - still zero optional keys). Removing this import
+# does, and costs nothing: requires-python is >=3.12, where `str | None` and
+# `list[int]` are native syntax.
 
-from typing import Any, NotRequired, TypedDict
+from typing import Any, TypedDict
 
 # mcp 2.x renamed FastMCP to MCPServer and moved it out of mcp.server.fastmcp,
 # which no longer exists. Same class, same decorator, same kwargs.
@@ -85,11 +99,21 @@ class DiagOut(TypedDict):
 
 
 class StatusOut(TypedDict):
+    """Always the same shape; absence is a null, not a missing key.
+
+    NotRequired was the obvious spelling and does not survive the round trip.
+    The MCP layer fills a missing optional key with None when it serializes,
+    then validates against a schema it generated saying that key is an array -
+    so an absent field fails as "None is not of type 'array'" no matter which
+    side is right. A key that is always present and sometimes null is
+    representable in both.
+    """
+
     running: bool
-    mode: NotRequired[str]
-    port: NotRequired[int]
-    player: NotRequired[str]
-    started_pids: NotRequired[list[int]]
+    mode: str | None
+    port: int | None
+    player: str | None
+    started_pids: list[int] | None
 
 
 class ShotOut(TypedDict):
@@ -99,7 +123,8 @@ class ShotOut(TypedDict):
 
 class StopOut(TypedDict):
     killed_pids: list[int]
-    note: NotRequired[str]
+    # Null rather than absent - see StatusOut.
+    note: str | None
 
 
 class CommandOut(TypedDict):
@@ -111,7 +136,8 @@ class CommandOut(TypedDict):
 class CommandsOut(TypedDict):
     responder: bool
     commands: list[CommandOut]
-    note: NotRequired[str]
+    # Null rather than absent - see StatusOut.
+    note: str | None
 
 
 @mcp.tool(
@@ -288,6 +314,7 @@ def commands(server: bool = False) -> CommandsOut:
             CommandOut(name=c.name, takes_argument=c.takes_argument, summary=c.summary)
             for c in published.commands
         ],
+        note=None,
     )
 
 
@@ -429,7 +456,9 @@ def status() -> StatusOut:
     is what verifies against reality.
     """
     if _session is None:
-        return StatusOut(running=False)
+        return StatusOut(
+            running=False, mode=None, port=None, player=None, started_pids=None
+        )
 
     return StatusOut(
         running=True,
@@ -549,7 +578,7 @@ def stop(settle: float = session_mod.KILL_SETTLE) -> StopOut:
     # released only once stop() has confirmed there is nothing left to own.
     killed = session_mod.stop(_cfg(), _session, settle=settle)
     _session = None
-    return StopOut(killed_pids=killed)
+    return StopOut(killed_pids=killed, note=None)
 
 
 def main() -> None:
