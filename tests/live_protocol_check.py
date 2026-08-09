@@ -50,11 +50,10 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 CLIENT_TIMEOUT = 600.0
 
 #: Total wall clock. A hung launch otherwise pins a game process indefinitely.
-signal.signal(
-    signal.SIGALRM,
-    lambda *_: (sys.stderr.write("\nABORT: walltime guard\n"), sys.exit(2)),
-)
-signal.alarm(1200)
+#: Armed in `__main__` rather than here, so importing this module - which
+#: `test_live_check_contract.py` does, to test the reporting funnel without a
+#: game - does not silently arm an alarm inside the test suite.
+WALLTIME = 1200
 
 #: Not 7810/7812 - those are what `live_check.py` and the manual sweeps use, and
 #: a port collision presents as a launch timeout that blames the game.
@@ -304,19 +303,37 @@ async def main() -> None:
         await journey(session)
 
 
-try:
-    asyncio.run(main())
-except Exception:  # noqa: BLE001 - the TYPE is not the contract, the exit code is
-    # Anything that escapes `journey` has already skipped the `stop` in its
-    # `finally`, so what matters here is that the run reports FAILED rather than
-    # exiting 0 with a traceback scrolled off the top of the output.
-    traceback.print_exc()
-    failures.append("the run itself raised")
+def run() -> int:
+    """The whole run, returning the exit code rather than taking it.
 
-print()
-if failures:
-    print(f"=== {len(failures)} FAILED ===")
-    for f in failures:
-        print(f"  - {f}")
-    sys.exit(1)
-print("=== all checks passed ===")
+    Separated from `__main__` so the reporting funnel above can be imported and
+    tested without a game - see `test_live_check_contract.py`. A module that
+    launches Terraria on import cannot be checked by anything cheap, and the
+    checks it needs most are the cheap ones.
+    """
+    try:
+        asyncio.run(main())
+    except Exception:  # noqa: BLE001 - the TYPE is not the contract, the code is
+        # Anything that escapes `journey` has already skipped the `stop` in its
+        # `finally`, so what matters is that the run reports FAILED rather than
+        # exiting 0 with a traceback scrolled off the top of the output.
+        traceback.print_exc()
+        failures.append("the run itself raised")
+
+    print()
+    if failures:
+        print(f"=== {len(failures)} FAILED ===")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+    print("=== all checks passed ===")
+    return 0
+
+
+if __name__ == "__main__":
+    signal.signal(
+        signal.SIGALRM,
+        lambda *_: (sys.stderr.write("\nABORT: walltime guard\n"), sys.exit(2)),
+    )
+    signal.alarm(WALLTIME)
+    sys.exit(run())
