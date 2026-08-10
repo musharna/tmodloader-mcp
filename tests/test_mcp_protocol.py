@@ -59,6 +59,7 @@ EXPECTED_TOOLS = {
     "logs",
     "log_files",
     "heartbeat",
+    "inventory",
     "stop",
 }
 
@@ -104,6 +105,19 @@ def fake_install(tmp_path):
     # listing exactly one thing means the pattern filtered rather than that
     # there was only ever one file.
     (save / "fakemod-diag.txt").write_text("not a capture")
+
+    # The three directories `inventory` reads, each with the decoy that a
+    # too-loose listing would return: a world backup, a character backup, and a
+    # mod that is enabled without being built here.
+    (save / "Worlds").mkdir()
+    (save / "Worlds" / "FakeWorld.wld").write_bytes(b"")
+    (save / "Worlds" / "FakeWorld.wld.bak").write_bytes(b"")
+    (save / "Players").mkdir()
+    (save / "Players" / "n43n.plr").write_bytes(b"")
+    (save / "Players" / "n43n.plr.bak").write_bytes(b"")
+    (save / "Mods").mkdir()
+    (save / "Mods" / "Fakemod.tmod").write_bytes(b"")
+    (save / "Mods" / "enabled.json").write_text('["Fakemod", "Workshopped"]')
 
     mod = tmp_path / "modsrc"
     mod.mkdir()
@@ -473,3 +487,72 @@ def test_heartbeat_reads_a_real_one_and_types_its_booleans(fake_install):
     # And the side that genuinely has no file still reports absent, so the
     # reader is answering per-side rather than returning one answer twice.
     assert out["server"]["present"] is False
+
+
+@needs_subprocess
+def test_inventory_answers_the_two_preconditions_launch_could_not_check(fake_install):
+    """`launch` demands an existing character and a Windows world path.
+
+    Neither was answerable from this surface, so the only way to learn either
+    was to launch and read the failure — a kick for a wrong character, and a
+    readiness timeout blaming the heartbeat for a wrong world path.
+
+    The decoys matter as much as the entries: the fixture holds a `.wld.bak`
+    beside the world and a `.plr.bak` beside the character, so a listing that
+    returned two of each would be a listing that filtered nothing.
+    """
+
+    async def call(session):
+        return await session.call_tool("inventory", {})
+
+    out = _structured(_run(call, fake_install))
+
+    assert [w["name"] for w in out["worlds"]] == ["FakeWorld"]
+    assert out["players"] == ["n43n"]
+
+
+@needs_subprocess
+def test_inventory_keeps_enabled_and_built_here_apart(fake_install):
+    """A mod can be enabled with no `.tmod` here — a workshop mod is elsewhere.
+
+    `Workshopped` is in `enabled.json` and has no file. Collapsing these into
+    one `installed` flag would report it missing, which is how someone ends up
+    rebuilding a mod that was never the problem. This is also the split that
+    turns `commands`' single `responder: false` into "not built" versus "built
+    and switched off".
+    """
+
+    async def call(session):
+        return await session.call_tool("inventory", {})
+
+    mods = {m["name"]: m for m in _structured(_run(call, fake_install))["mods"]}
+
+    assert mods["Fakemod"] == {
+        "name": "Fakemod",
+        "enabled": True,
+        "built_here": True,
+    }
+    assert mods["Workshopped"] == {
+        "name": "Workshopped",
+        "enabled": True,
+        "built_here": False,
+    }
+
+
+@needs_subprocess
+def test_a_world_path_survives_the_round_trip_as_a_nullable_string(fake_install):
+    """`path_win` is `str | None`, and null is the answer off a drive mount.
+
+    A nullable field is exactly what broke `status` — an optional key the
+    schema generator marked required, invisible to every test that called the
+    function directly. The fixture lives in a `tmp_path`, which is not under
+    `/mnt/<drive>`, so this is the null branch going through validation.
+    """
+
+    async def call(session):
+        return await session.call_tool("inventory", {})
+
+    world = _structured(_run(call, fake_install))["worlds"][0]
+
+    assert "path_win" in world, "the optional key did not survive the round trip"
+    assert world["path_win"] is None
