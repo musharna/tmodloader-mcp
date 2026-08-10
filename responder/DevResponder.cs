@@ -808,7 +808,7 @@ namespace TModLoaderMcp.DevBridge
 			return Path.Combine(Main.SavePath, DevArtifacts.ForSide(name, Main.dedServ));
 		}
 
-		private static void Report(string line) {
+		protected static void Report(string line) {
 			try {
 				File.WriteAllText(PathFor(ResultName), line + "\n");
 			}
