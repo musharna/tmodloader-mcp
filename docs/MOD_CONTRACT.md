@@ -4,10 +4,19 @@ What a mod has to do to be driven by this harness. Everything here is
 observable — it was written from `triggers.py`, `session.py` and the actual
 files a running Biomancy install had on disk, not from an intention.
 
-This exists because the responder currently lives inside one mod's C#. Until it
-is extracted into something you can vendor (Phase 2), this document is the only
-thing standing between "works for Biomancy" and "works for yours". It is also
-the specification that extraction has to satisfy, so it is worth being exact.
+**[`responder/`](../responder/) is the reference implementation of this
+document** — a folder you copy into your mod and subclass. Read this if you are
+writing a responder yourself or want to know why a filename is what it is;
+vendor the folder if you just want your mod driven. They are kept adjacent
+deliberately: a contract with its implementation in the same repository is a
+contract somebody has actually compiled.
+
+This document came first, when the responder lived inside one mod's C# and was
+the only thing standing between "works for Biomancy" and "works for yours". It
+was the specification the extraction had to satisfy, which is why it is exact —
+and it stays, because the folder answers "what do I copy" while this answers
+"what is the protocol", and a vendored implementation is not a substitute for
+being able to read the wire.
 
 ## Where the files live
 
