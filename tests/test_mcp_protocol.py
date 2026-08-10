@@ -237,6 +237,45 @@ def test_status_survives_the_round_trip_with_no_game_running():
     assert parsed["started_pids"] is None
 
 
+@needs_subprocess
+def test_an_unsubstituted_variable_is_named_as_one_through_the_protocol():
+    """REAL EXECUTION for the state a background client actually produces.
+
+    `.mcp.json` passes the two required paths as `${NAME}` so that no checkout
+    carries anybody's disk, and the CLIENT expands them against its own
+    environment. Started by a daemon rather than from a shell, it has nothing to
+    expand and hands the server the text — which was measured, not imagined: two
+    live sessions, same config file, and only the one whose client had the
+    variables got real paths.
+
+    Asserted here rather than only against `check` because every layer between
+    is what made it confusing: the server STARTS, advertises every tool, and
+    fails only when one is called. A unit test on `check` cannot see that the
+    thing a caller meets is a tool error.
+    """
+
+    async def call(session):
+        return await session.call_tool("heartbeat", {})
+
+    result = _run(
+        call,
+        {
+            "TMODLOADER_SAVE_DIR": "${TMODLOADER_SAVE_DIR}",
+            "TMODLOADER_MOD_SOURCE": "${TMODLOADER_MOD_SOURCE}",
+        },
+    )
+
+    assert result.is_error, "a config that never arrived has to be an error"
+    text = "".join(c.text for c in result.content if hasattr(c, "text"))
+
+    assert "TMODLOADER_SAVE_DIR is still the text" in text, text
+    assert "TMODLOADER_MOD_SOURCE is still the text" in text, text
+    # The regression: these are DERIVED from the source that never arrived, and
+    # naming them sent the reader to set two variables that were never wrong.
+    assert "TMODLOADER_MOD_NAME" not in text, text
+    assert "TMODLOADER_MOD_SOURCE_WIN" not in text, text
+
+
 def test_output_annotations_are_resolved_types_not_forward_refs():
     """The defect underneath, named where it lives rather than by symptom.
 

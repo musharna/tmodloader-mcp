@@ -183,6 +183,15 @@ committed config with real paths in it would put back exactly what the required
 variables took out, and it would be one person's paths in everybody's checkout.
 Export them first; `claude mcp list` names any that are missing.
 
+**Export them where the client is launched, not only in an interactive shell.**
+The substitution is the _client's_, against its own environment, so a client
+started by a daemon or a desktop launcher — one that never sourced your
+`.zshrc` — has nothing to substitute and passes `${TMODLOADER_SAVE_DIR}` through
+as text. The server treats a value that is still its own name as absent and says
+so by that name, rather than reporting four problems about the variables derived
+from it. Nothing can be repaired from inside a running session: the value was
+gone before the process started, so fix the environment and restart the client.
+
 A project-scoped `.mcp.json` needs approving once — Claude Code will not run a
 server a repository asked it to run without being told to. Start `claude` in
 this directory and accept the prompt.

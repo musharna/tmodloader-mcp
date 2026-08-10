@@ -50,6 +50,13 @@ REQUIRED_TO_LAUNCH = (*REQUIRED, "TMODLOADER_WORLD_WIN")
 #: out, where `wsl` is a directory rather than a drive letter.
 _DRIVE_MOUNT = re.compile(r"^/mnt/(?P<drive>[A-Za-z])(?=/|$)")
 
+#: A variable reference that nothing ever substituted: `${FOO}` or `$FOO`, whole
+#: and alone. `.mcp.json` passes the two required paths through as `${NAME}` so
+#: that nobody's checkout carries anybody's disk, and the client expands them
+#: against ITS OWN environment — so a client launched without them exports the
+#: placeholder verbatim rather than failing.
+_UNEXPANDED = re.compile(r"^\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)$")
+
 
 def windows_path_for(path: Path) -> str | None:
     """What Windows calls this WSL path, or None if that cannot be worked out.
@@ -125,6 +132,13 @@ class Config:
     #: still constructs. A hand-built one has nothing unset by definition: the
     #: caller supplied the paths directly.
     unset: tuple[str, ...] = ()
+    #: `(name, literal)` for every variable whose value is a reference nobody
+    #: substituted. Kept apart from `unset` because the two need DIFFERENT
+    #: instructions: an unset variable is fixed by exporting it, while a
+    #: placeholder means the export probably already exists and the process that
+    #: launched this server could not see it. Told to export it, the reader does
+    #: exactly what they have already done and gets the same failure back.
+    unexpanded: tuple[tuple[str, str], ...] = ()
 
     @property
     def artifacts(self) -> Artifacts:
@@ -153,16 +167,33 @@ class Config:
         return self.save_dir / (f"{stem}-server{dot}{ext}" if dot else f"{name}-server")
 
 
+def _is_unexpanded(value: str) -> bool:
+    """Whether a value is a variable reference nobody substituted."""
+    return _UNEXPANDED.match(value) is not None
+
+
 def _setting(src, key: str, default: str) -> str:
-    """One environment setting, treating an empty one as absent.
+    """One environment setting, treating an empty or UNSUBSTITUTED one as absent.
 
     `FOO=` is not the same as `FOO` unset, and `os.environ.get(key, default)`
     cannot tell them apart — it returns the empty string, and the default never
     applies. An empty `TMODLOADER_DIR` therefore became `Path("")`, which is
     `Path(".")`, and `check` reported that the WORKING DIRECTORY held no
     tModLoader.dll: a true sentence about a directory nobody meant.
+
+    `FOO=${FOO}` is the same absence wearing a value's clothes, and it is the
+    one this server is actually handed: `.mcp.json` writes `${TMODLOADER_SAVE_DIR}`
+    so that no checkout carries anybody's disk, and a client that was launched
+    without the variable substitutes nothing and passes the text through. Taking
+    it literally is what let a path that never arrived travel on as though it
+    had — see `load`.
+
+    THIS IS THE ONE PLACE EVERY VARIABLE IS READ, which is why the check lives
+    here. Rejecting the placeholder per-variable would leave every variable
+    nobody thought about still carrying it.
     """
-    return src.get(key, "").strip() or default
+    value = src.get(key, "").strip()
+    return default if _is_unexpanded(value) else (value or default)
 
 
 def load(env: dict[str, str] | None = None) -> Config:
@@ -179,8 +210,26 @@ def load(env: dict[str, str] | None = None) -> Config:
     the caller's mod while `build_mod` compiled Biomancy — and reported success,
     because the build HAD succeeded. Two variables naming one directory only
     stay in step if one of them follows the other.
+
+    A VALUE THAT IS STILL `${ITS_OWN_NAME}` COUNTS AS ABSENT, and is recorded
+    separately so `check` can say which absence it is. This is the state a
+    background client actually hands the server: `.mcp.json` deliberately writes
+    the placeholder, the client expands it against its own environment, and one
+    launched without the variable substitutes nothing. Read literally, the text
+    is a non-empty string, so it was configuration as far as everything here
+    could tell — `${TMODLOADER_WORLD_WIN}` would have reached tModLoader as a
+    world to load, and come back as a readiness timeout naming the heartbeat.
     """
     src = os.environ if env is None else env
+
+    # Every TMODLOADER_* name rather than the ones read below: a variable this
+    # module does not know about still tells the reader their substitution is
+    # broken, and that is the fact worth reporting.
+    unexpanded = tuple(
+        (name, value.strip())
+        for name, value in sorted(src.items())
+        if name.startswith("TMODLOADER_") and _is_unexpanded(value.strip())
+    )
 
     tml = Path(_setting(src, "TMODLOADER_DIR", DEFAULT_TML))
     # Not defaulted, and not raised either. An unset variable becomes `Path(".")`
@@ -189,6 +238,9 @@ def load(env: dict[str, str] | None = None) -> Config:
     # distinguishable from someone genuinely configuring the working directory.
     save = Path(_setting(src, "TMODLOADER_SAVE_DIR", "."))
     mod = Path(_setting(src, "TMODLOADER_MOD_SOURCE", "."))
+    # A placeholder is a non-empty string, so it does not land here — which is
+    # what we want: it is absent, but `unexpanded` says so with the instruction
+    # that actually fixes it. The two lists never name the same variable twice.
     unset = tuple(name for name in REQUIRED if not src.get(name, "").strip())
 
     return Config(
@@ -196,6 +248,7 @@ def load(env: dict[str, str] | None = None) -> Config:
         save_dir=save,
         mod_source=mod,
         unset=unset,
+        unexpanded=unexpanded,
         mod_source_win=_setting(src, "TMODLOADER_MOD_SOURCE_WIN", "")
         or windows_path_for(mod),
         # tModLoader's internal name is the source folder's name, so that is the
@@ -224,11 +277,20 @@ def check(cfg: Config) -> list[str]:
     # every downstream check would also fire and complain about the working
     # directory - three true sentences about a directory nobody meant, burying
     # the one that says what to do.
-    if cfg.unset:
+    #
+    # A placeholder is the same disease with a different vector, and it got past
+    # this guard for exactly one reason: `${TMODLOADER_SAVE_DIR}` is not empty,
+    # so it was never `unset`. What the reader got instead was four problems, of
+    # which two named TMODLOADER_MOD_NAME and TMODLOADER_MOD_SOURCE_WIN -
+    # variables they had never set, derived from the one that never arrived.
+    if cfg.unexpanded or cfg.unset:
         return [
-            f"{name} is not set, and has no default because every plausible "
-            "value names somebody's own install"
-            for name in cfg.unset
+            *_unexpanded_problem(cfg),
+            *(
+                f"{name} is not set, and has no default because every plausible "
+                "value names somebody's own install"
+                for name in cfg.unset
+            ),
         ]
 
     if not cfg.tml_dir.is_dir():
@@ -261,6 +323,34 @@ def check(cfg: Config) -> list[str]:
     problems.extend(_windows_source_problems(cfg))
 
     return problems
+
+
+def _unexpanded_problem(cfg: Config) -> list[str]:
+    """The unsubstituted variables as ONE problem, or none.
+
+    One entry however many variables there are, because the remedy is a single
+    action and repeating it per variable rebuilds the wall of text this whole
+    early return exists to avoid. The names still all appear: which ones failed
+    to substitute is the part that differs, and the paragraph after it is not.
+    """
+    if not cfg.unexpanded:
+        return []
+
+    named = ", ".join(
+        f"{name} is still the text {text}" for name, text in cfg.unexpanded
+    )
+    return [
+        (
+            f"{named}. Whatever started this server never substituted the "
+            "reference, and nothing here can recover the value - it was gone "
+            "before the process began. `.mcp.json` writes ${...} deliberately, "
+            "so that no checkout carries anybody's disk, and the MCP CLIENT is "
+            "what expands it, against its own environment. Export these where "
+            "the client is launched rather than only in an interactive shell - "
+            "a client started by a daemon or a desktop launcher inherits "
+            "neither - and then restart the client."
+        )
+    ]
 
 
 def _windows_source_problems(cfg: Config) -> list[str]:
