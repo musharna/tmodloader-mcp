@@ -24,6 +24,20 @@ proof of vendorability that a source scan alone cannot give.
   — without one, `dotnet` takes the highest SDK on the machine and CI compiles
   with a different toolchain than local runs. Biomancy learned this; do not
   rediscover it.
+- **THERE IS NO `dotnet` IN WSL.** `which dotnet` fails. The only SDK on this
+  machine is the Windows one, and it is the 8.0.423 that Biomancy's `global.json`
+  comment already refers to. Every local invocation in this plan uses:
+
+  ```bash
+  DOTNET="/mnt/c/Program Files/dotnet/dotnet.exe"
+  ```
+
+  Verified this session: `dotnet.exe` restores and builds a WSL-native path
+  through `\\wsl.localhost\Ubuntu\...`, so `responder/` living under `/home` is
+  not an obstacle. Expect UNC paths in its output; that is normal, not a fault.
+  The CI job is unaffected — an ubuntu runner has a real `dotnet` and keeps the
+  bare command.
+
 - `ArtifactHash.cs` does NOT move. Its only caller is `DiagCollector.cs:354`,
   which is Biomancy's.
 - No test may require a running game. `tests/live_check.py` is this repo's home
@@ -158,7 +172,7 @@ compile line contains NOTHING but the vendorable folder.
 - [ ] **Step 4: Run it and watch it fail for the right reason**
 
 ```bash
-dotnet test responder/tests/Responder.Tests.csproj
+"$DOTNET" test responder/tests/Responder.Tests.csproj
 ```
 
 Expected: FAIL — the eight test files do not exist yet, so the build errors with
@@ -186,7 +200,7 @@ change the test bodies.
 - [ ] **Step 6: Run the tests and watch them pass**
 
 ```bash
-dotnet test responder/tests/Responder.Tests.csproj
+"$DOTNET" test responder/tests/Responder.Tests.csproj
 ```
 
 Expected: PASS, all tests. Record the count — Task 2 and Task 5 both compare
@@ -364,7 +378,7 @@ Add `<Compile Include="VendorBoundaryTests.cs" />` to the second `ItemGroup` of
 `responder/tests/Responder.Tests.csproj`.
 
 ```bash
-dotnet test responder/tests/Responder.Tests.csproj --filter VendorBoundaryTests
+"$DOTNET" test responder/tests/Responder.Tests.csproj --filter VendorBoundaryTests
 ```
 
 Expected: FAIL on `TheScanActuallyFindsTheFolder` — `found 7`, because
@@ -381,7 +395,7 @@ sed -i 's/^namespace Biomancy\.Common\.DevBridge$/namespace TModLoaderMcp.DevBri
 - [ ] **Step 4: Run the tests and verify they pass**
 
 ```bash
-dotnet test responder/tests/Responder.Tests.csproj
+"$DOTNET" test responder/tests/Responder.Tests.csproj
 ```
 
 Expected: PASS, all of them, count = Task 1's count + 4.
@@ -580,7 +594,7 @@ namespace TModLoaderMcp.DevBridge.Tests
 Add `<Compile Include="DevResponderContractTests.cs" />` to the csproj.
 
 ```bash
-dotnet test responder/tests/Responder.Tests.csproj --filter DevResponderContractTests
+"$DOTNET" test responder/tests/Responder.Tests.csproj --filter DevResponderContractTests
 ```
 
 Expected: FAIL on `TheSourceIsActuallyRead` — `expected .../responder/DevResponder.cs`,
@@ -681,7 +695,7 @@ Leave the nine Biomancy handlers behind entirely. They belong to Task 5.
 - [ ] **Step 4: Run the tests and verify they pass**
 
 ```bash
-dotnet test responder/tests/Responder.Tests.csproj
+"$DOTNET" test responder/tests/Responder.Tests.csproj
 ```
 
 Expected: PASS. `VendorBoundaryTests.NoFileReferencesAnyModsOwnCode` now also
@@ -783,7 +797,7 @@ here is how the two drift.
 - [ ] **Step 5: Run Biomancy's tests**
 
 ```bash
-cd "$BIOMANCY" && dotnet test tests/BiomancyMod.Tests/BiomancyMod.Tests.csproj
+cd "$BIOMANCY" && "$DOTNET" test tests/BiomancyMod.Tests/BiomancyMod.Tests.csproj
 ```
 
 Expected: PASS. `DiagReportTests` and `ArtifactHashTests` still run; the bridge
@@ -926,7 +940,7 @@ next plan.
 cd /home/mjarnold/tmodloader-mcp
 .venv/bin/python -m pytest -q && .venv/bin/python -m ruff check . && \
   .venv/bin/python -m ruff format --check . && \
-  dotnet test responder/tests/Responder.Tests.csproj
+  "$DOTNET" test responder/tests/Responder.Tests.csproj
 ```
 
 Expected: pytest 294 passed, ruff clean twice, dotnet green.
