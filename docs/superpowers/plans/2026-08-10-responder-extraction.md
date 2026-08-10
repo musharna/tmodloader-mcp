@@ -752,11 +752,59 @@ ls Common/DevBridge Common/DevBridge/vendored
 Expected: `Common/DevBridge/` holds `ArtifactHash.cs` and `vendored/`;
 `vendored/` holds nine files (the eight plus `DevResponder.cs`).
 
-- [ ] **Step 3: Make `DevCapture` a subclass**
+- [ ] **Step 3a: Make `Report` reachable by a subclass**
+
+FOUND BY TASK 4's REVIEW, and it would otherwise have surfaced as ~39 compile
+errors in Step 6. `responder/DevResponder.cs:811` declares
+
+```csharp
+private static void Report(string line) {
+```
+
+and the handlers staying in Biomancy call `Report(...)` **39 times** (measured,
+not estimated: `awk 'NR>=683 && NR<=1224'` over `DevCapture.cs` piped to
+`grep -c "Report("`). A subclass cannot reach a `private` base member, so
+`DevCapture : DevResponder` would fail with that many `CS0122`.
+
+Change it, in `tmodloader-mcp`, to:
+
+```csharp
+protected static void Report(string line) {
+```
+
+This is a FOURTH permitted change to `DevResponder.cs`, beyond Task 4's three,
+and it is not a concession to Biomancy: reporting is how ANY handler answers a
+request, so a vendoring mod's subclass needs it just as much. It belongs to the
+base class's public contract and must appear in `responder/README.md` (Task 7).
+
+`PathFor`, `Names` and `LocalPlayerName` are NOT affected — checked; their only
+left-behind references were inside the `WriteDiag` that Task 4 replaced. Do not
+widen anything else speculatively.
+
+Commit this in `tmodloader-mcp` separately from the Biomancy work, and re-run
+`"$DOTNET" test responder/tests/Responder.Tests.csproj` (expect 137 still
+passing — no test covers this, which is exactly why the review caught it and
+the suite did not).
+
+- [ ] **Step 3b: Make `DevCapture` a subclass**
 
 In `Common/Diagnostics/DevCapture.cs`: add `using TModLoaderMcp.DevBridge;`,
 change the declaration to `public class DevCapture : DevResponder`, and delete
 every member that moved to `DevResponder` in Task 4 — the whole table there.
+
+**Two measurement comments are about to be orphaned. Carry them, do not let
+them die with their method.** Both belonged to methods that no longer exist on
+either side, so deleting their host silently destroys the evidence:
+
+1. `DevCapture.cs:653-670`, the old `WriteDiag` doc. It records a hypothesis
+   that measurement CONTRADICTED — a mid-session client diag still reported
+   `npcs: NONE` while the server reported a mutated Green Slime, so "the
+   snapshot was taken too early" was a guess, and three explanations are still
+   live. Move it onto Biomancy's `CollectDiag()` override.
+2. `DevCapture.cs:115-124`, the old `BuildCommands` doc, which explains the
+   generic/specific split. Its useful half — which verbs are this mod's and why
+   — moves onto the `RegisterCommands` override. The half describing the split
+   itself is now obsolete on this side and may go.
 
 What stays: the nine gameplay handlers (`PlantMutated`, `AskForStrains`,
 `SeedWherePlayerStands`, `RemoveEveryCreepSource`, `PlaceCreepTilePatch`,
