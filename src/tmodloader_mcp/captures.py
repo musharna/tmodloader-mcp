@@ -63,13 +63,19 @@ def available(save_dir: Path, mod_name: str) -> list[str]:
     )
 
 
-def read(save_dir: Path, mod_name: str, name: str) -> bytes:
-    """The bytes of one capture, or `CaptureError` saying why not.
+def contained(save_dir: Path, mod_name: str, name: str) -> Path:
+    """The path this name resolves to, or `CaptureError` saying why not.
 
-    The three refusals are deliberately distinct: "that is not a capture name",
-    "that is not inside the save directory", and "that capture is not there"
-    are different mistakes, and collapsing them into one message makes a typo
-    look like a security refusal.
+    THE ONE CONTAINMENT CHECK, because there is now more than one caller and a
+    second copy is how one of them ends up weaker — which this module's own
+    header says about having two paths to one file. `read` returns bytes and
+    `prune` DELETES, so the dangerous caller is the newer one; giving it its
+    own rules is exactly the mistake to avoid.
+
+    The three refusals stay distinct: "that is not a capture name", "that is
+    not inside the save directory", and "that capture is not there" are
+    different mistakes, and collapsing them makes a typo look like a security
+    refusal.
     """
     if not capture_pattern(mod_name).match(name):
         raise CaptureError(
@@ -93,4 +99,58 @@ def read(save_dir: Path, mod_name: str, name: str) -> bytes:
     if not target.is_file():
         raise CaptureError(f"there is no capture called {name!r} in {root}")
 
-    return target.read_bytes()
+    return target
+
+
+def read(save_dir: Path, mod_name: str, name: str) -> bytes:
+    """The bytes of one capture, or `CaptureError` saying why not."""
+    return contained(save_dir, mod_name, name).read_bytes()
+
+
+def prune(save_dir: Path, mod_name: str, *, keep: int) -> list[str]:
+    """Delete all but the newest `keep` captures, and say which went.
+
+    Captures accumulated forever. `shot` writes one per call and nothing ever
+    removed them, so an agent photographing in a loop grew the user's SAVE
+    DIRECTORY without bound — the folder holding their worlds and characters,
+    which is not a cache and not somewhere to leave litter.
+
+    Every deletion goes through `contained`, so a file is removed only when it
+    matches this mod's capture pattern AND resolves to a direct child of the
+    save directory. Listing and deleting through different rules is how a
+    delete ends up looser than the read beside it.
+
+    Ordered by MTIME rather than by the name's index, because the index is this
+    harness's own counter and the file's timestamp is the disk's account of
+    what actually happened. Ties break on name so the result is deterministic.
+
+    `keep=0` is honoured — "remove all of them" is a real request — but there is
+    deliberately no default here. The caller chooses; a module-level default
+    would be this file deciding how much of someone else's directory to throw
+    away.
+    """
+    if keep < 0:
+        raise CaptureError(f"keep must be 0 or more, not {keep}")
+
+    if not save_dir.is_dir():
+        return []
+
+    pattern = capture_pattern(mod_name)
+    found = [entry for entry in save_dir.iterdir() if pattern.match(entry.name)]
+    found.sort(key=lambda p: (p.stat().st_mtime, p.name))
+
+    doomed = found if keep == 0 else found[:-keep]
+
+    # VALIDATED IN FULL BEFORE ANYTHING IS UNLINKED. Checking each file as it is
+    # deleted would leave a half-finished prune behind whenever one of them is
+    # refused - some files gone, an exception raised, and no record of where it
+    # stopped. Deciding first and acting second means a refusal costs nothing.
+    #
+    # `iterdir` yields symlinks, and one named like a capture passes the pattern
+    # while resolving somewhere else entirely. `contained` is what notices.
+    targets = [contained(save_dir, mod_name, path.name) for path in doomed]
+
+    for target in targets:
+        target.unlink()
+
+    return sorted(path.name for path in doomed)
