@@ -11,6 +11,18 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ## [Unreleased]
 
+### Added
+
+- **A `.mcp.json`, so the server can actually be reached.** Seventeen working
+  tools and two prompts, and nothing could call any of them: `claude mcp list`
+  returned no match, there was no project config, and nothing in the user
+  config either. The paths in it are `${TMODLOADER_SAVE_DIR}` and
+  `${TMODLOADER_MOD_SOURCE}` rather than real ones — a committed config holding
+  real paths would put back exactly what #31 removed, and would be one person's
+  install in everybody's checkout. Verified by starting the server through the
+  registered command: 17 tools, 2 prompts, and `inventory` returning this
+  machine's three worlds. (#32)
+
 ### Changed
 
 - **BREAKING: the three defaults that named a person are gone.**
