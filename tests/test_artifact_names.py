@@ -99,8 +99,14 @@ def test_a_name_that_would_not_be_a_mod_name_is_refused(bad, tmp_path):
     source = tmp_path / "Src"
     source.mkdir()
 
+    # SAVE_DIR supplied because `check` reports unset REQUIRED variables alone
+    # and returns - otherwise this would assert on the wrong problem entirely.
     cfg = config.load(
-        {"TMODLOADER_MOD_SOURCE": str(source), "TMODLOADER_MOD_NAME": bad}
+        {
+            "TMODLOADER_MOD_SOURCE": str(source),
+            "TMODLOADER_SAVE_DIR": str(tmp_path),
+            "TMODLOADER_MOD_NAME": bad,
+        }
     )
     problems = config.check(cfg)
 
