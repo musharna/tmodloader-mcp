@@ -1,18 +1,24 @@
 """Where tModLoader, the save directory and the mod source live.
 
-Every path is overridable by environment variable, and most have a default that
-points at this machine's Biomancy install. That is deliberate for phase 1: the
-server has to be useful for the mod it was extracted from before it is useful
-for anybody else's, and a server that refuses to start until five variables are
-exported is a server nobody runs.
+Every path is an environment variable. THE THREE THAT NAMED A PERSON ARE NOW
+REQUIRED — the save directory, the mod source and the world all used to default
+to one developer's install, spelled out with their Windows username and their
+mod's name.
 
-The exception is the mod source's WINDOWS name, which is DERIVED from its WSL
-one rather than defaulted. Two variables naming one directory can disagree, and
-a machine-specific default is what made them disagree quietly: see `load`.
+That was right for phase 1 and is wrong for anything published. A default that
+points somewhere plausible on the author's disk and nowhere on yours does not
+fail: it resolves, `check` reports a missing directory you never mentioned, and
+in the worst case it resolves to something that DOES exist and the server
+drives an install you did not choose. A tool that silently operates on somebody
+else's files is worse than one that asks for a path.
 
-Phase 2 makes MOD_SOURCE required and drops the Biomancy defaults, because a
-public tool that silently drives somebody else's install is worse than one that
-asks.
+What keeps a default is what is not personal: tModLoader's Steam location, and
+the Windows binaries under System32. Those are the same on every machine that
+can run this at all, and requiring them would be ceremony rather than safety.
+
+The mod source's WINDOWS name stays DERIVED rather than defaulted. Two
+variables naming one directory can disagree, and a machine-specific default is
+what made them disagree quietly: see `load`.
 """
 
 from __future__ import annotations
@@ -24,12 +30,14 @@ from pathlib import Path
 
 from .triggers import MOD_NAME, Artifacts, artifacts_for
 
-#: Defaults for the machine this was extracted from.
+#: Steam's own layout, identical on every machine with a default library. Not
+#: personal, so it keeps a default; `TMODLOADER_DIR` overrides it for a library
+#: on another drive.
 DEFAULT_TML = "/mnt/c/Program Files (x86)/Steam/steamapps/common/tModLoader"
-DEFAULT_SAVE = "/mnt/c/Users/a2b32/Documents/My Games/Terraria/tModLoader"
-DEFAULT_MOD_SOURCE = (
-    "/mnt/c/Users/a2b32/Documents/My Games/Terraria/tModLoader/ModSources/Biomancy"
-)
+
+#: The variables with no default, because every plausible value names a person.
+#: Reported together rather than one restart at a time.
+REQUIRED = ("TMODLOADER_SAVE_DIR", "TMODLOADER_MOD_SOURCE")
 
 #: A WSL mount of a Windows drive: `/mnt/c/...`. The lookahead keeps `/mnt/wsl`
 #: out, where `wsl` is a directory rather than a drive letter.
@@ -63,15 +71,6 @@ def windows_path_for(path: Path) -> str | None:
     return f"{match.group('drive').upper()}:\\{rest}"
 
 
-#: The world a session loads, as WINDOWS sees it. tModLoader runs as a Windows
-#: process and cannot resolve a /mnt/c path, so this cannot be derived from
-#: save_dir - passing the WSL path makes the server fail to load a world and the
-#: only symptom is a readiness timeout that names the wrong cause entirely.
-DEFAULT_WORLD_WIN = (
-    r"C:\Users\a2b32\Documents\My Games\Terraria\tModLoader\Worlds"
-    r"\BiomancySelfTest.wld"
-)
-
 DEFAULT_POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 
 DEFAULT_TASKKILL = "/mnt/c/Windows/System32/taskkill.exe"
@@ -98,10 +97,27 @@ class Config:
     #: and rarely needs setting; a checkout whose folder is named something else
     #: is the case `TMODLOADER_MOD_NAME` exists for.
     mod_name: str
-    world_win: str
+    #: The world a session loads, as WINDOWS sees it. tModLoader runs as a
+    #: Windows process and cannot resolve a `/mnt/c` path, so this cannot be
+    #: derived from `save_dir` — passing the WSL spelling makes the server fail
+    #: to load a world, and the only symptom is a readiness timeout naming the
+    #: wrong cause entirely.
+    #:
+    #: None when nobody said which world. `launch` then requires one and lists
+    #: the worlds actually on this disk, which is a better answer than the
+    #: default this used to carry: one developer's self-test world, by name.
+    world_win: str | None
     taskkill: Path
     tasklist: Path
     powershell: Path
+    #: Names of required variables that were not set. Carried on the config
+    #: rather than raised from `load`, so `check` can report every problem in
+    #: one pass — fixing paths one error message at a time is one restart each.
+    #:
+    #: Last, and defaulted, so a Config built by hand (every test fixture here)
+    #: still constructs. A hand-built one has nothing unset by definition: the
+    #: caller supplied the paths directly.
+    unset: tuple[str, ...] = ()
 
     @property
     def artifacts(self) -> Artifacts:
@@ -160,19 +176,29 @@ def load(env: dict[str, str] | None = None) -> Config:
     src = os.environ if env is None else env
 
     tml = Path(_setting(src, "TMODLOADER_DIR", DEFAULT_TML))
-    save = Path(_setting(src, "TMODLOADER_SAVE_DIR", DEFAULT_SAVE))
-    mod = Path(_setting(src, "TMODLOADER_MOD_SOURCE", DEFAULT_MOD_SOURCE))
+    # Not defaulted, and not raised either. An unset variable becomes `Path(".")`
+    # and its NAME is recorded, so `check` can list every missing one at once
+    # instead of stopping at the first. The recorded name is what makes that
+    # distinguishable from someone genuinely configuring the working directory.
+    save = Path(_setting(src, "TMODLOADER_SAVE_DIR", "."))
+    mod = Path(_setting(src, "TMODLOADER_MOD_SOURCE", "."))
+    unset = tuple(name for name in REQUIRED if not src.get(name, "").strip())
 
     return Config(
         tml_dir=tml,
         save_dir=save,
         mod_source=mod,
+        unset=unset,
         mod_source_win=_setting(src, "TMODLOADER_MOD_SOURCE_WIN", "")
         or windows_path_for(mod),
         # tModLoader's internal name is the source folder's name, so that is the
         # default rather than a constant naming one mod.
         mod_name=_setting(src, "TMODLOADER_MOD_NAME", mod.name),
-        world_win=_setting(src, "TMODLOADER_WORLD_WIN", DEFAULT_WORLD_WIN),
+        # None rather than a default world. The one this carried was a specific
+        # developer's self-test world by full path, so on anyone else's machine
+        # it named a file that does not exist and the failure arrived as a
+        # readiness timeout.
+        world_win=_setting(src, "TMODLOADER_WORLD_WIN", "") or None,
         taskkill=Path(_setting(src, "TMODLOADER_TASKKILL", DEFAULT_TASKKILL)),
         tasklist=Path(_setting(src, "TMODLOADER_TASKLIST", DEFAULT_TASKLIST)),
         powershell=Path(_setting(src, "TMODLOADER_POWERSHELL", DEFAULT_POWERSHELL)),
@@ -186,6 +212,17 @@ def check(cfg: Config) -> list[str]:
     Fixing five paths one error message at a time is five restarts.
     """
     problems: list[str] = []
+
+    # First, and returned ALONE. An unset variable resolved to `Path(".")`, so
+    # every downstream check would also fire and complain about the working
+    # directory - three true sentences about a directory nobody meant, burying
+    # the one that says what to do.
+    if cfg.unset:
+        return [
+            f"{name} is not set, and has no default because every plausible "
+            "value names somebody's own install"
+            for name in cfg.unset
+        ]
 
     if not cfg.tml_dir.is_dir():
         problems.append(f"no tModLoader install at {cfg.tml_dir} (set TMODLOADER_DIR)")

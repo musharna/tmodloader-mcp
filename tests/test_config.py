@@ -132,7 +132,10 @@ def test_an_exported_but_empty_variable_falls_back_to_the_default():
     cfg = config.load({"TMODLOADER_DIR": "", "TMODLOADER_SAVE_DIR": "   "})
 
     assert cfg.tml_dir == Path(config.DEFAULT_TML)
-    assert cfg.save_dir == Path(config.DEFAULT_SAVE)
+    # SAVE_DIR has no default any more - every plausible one named a person -
+    # so a whitespace-only value is UNSET rather than falling back. Same rule,
+    # different landing place: the variable is still not treated as configured.
+    assert "TMODLOADER_SAVE_DIR" in cfg.unset
 
 
 def test_a_usable_config_reports_nothing(tmp_path):
@@ -156,3 +159,93 @@ def test_a_usable_config_reports_nothing(tmp_path):
     )
 
     assert config.check(cfg) == []
+
+
+# --- the defaults that named a person ---------------------------------------
+
+
+def test_the_required_variables_have_no_default_at_all():
+    """Unset is reported as unset, not resolved to somewhere plausible.
+
+    A default pointing at the author's disk does not fail on yours — it
+    resolves. Best case `check` complains about a directory you never
+    mentioned; worst case it EXISTS and the server drives an install you did
+    not choose.
+    """
+    cfg = config.load({})
+
+    assert set(cfg.unset) == set(config.REQUIRED)
+    assert "TMODLOADER_SAVE_DIR" in cfg.unset
+    assert "TMODLOADER_MOD_SOURCE" in cfg.unset
+
+
+def test_unset_variables_are_reported_alone():
+    """Otherwise the one message that says what to do is buried.
+
+    An unset variable resolves to `Path(".")`, so every later check fires too
+    and complains about the working directory — several true sentences about a
+    directory nobody meant.
+    """
+    problems = config.check(config.load({}))
+
+    assert len(problems) == len(config.REQUIRED), problems
+    assert all("is not set" in p for p in problems), problems
+    assert not any(str(Path.cwd()) in p for p in problems), problems
+
+
+def test_a_configured_install_still_passes(tmp_path):
+    """POSITIVE CONTROL. Without it a `check` that rejected everything passes."""
+    tml = tmp_path / "tml"
+    tml.mkdir()
+    (tml / "tModLoader.dll").write_bytes(b"")
+    source = tmp_path / "Mymod"
+    source.mkdir()
+    # build.txt is what makes a directory a tModLoader mod source at all.
+    (source / "build.txt").write_text("displayName = Mymod\n")
+
+    cfg = config.load(
+        {
+            "TMODLOADER_DIR": str(tml),
+            "TMODLOADER_SAVE_DIR": str(tmp_path),
+            "TMODLOADER_MOD_SOURCE": str(source),
+            "TMODLOADER_MOD_SOURCE_WIN": r"C:\Mymod",
+        }
+    )
+
+    assert cfg.unset == ()
+    assert config.check(cfg) == []
+
+
+def test_no_world_is_configured_by_default():
+    """It used to be one developer's self-test world, by full path.
+
+    On any other machine that named a file which does not exist, and the
+    failure arrived as a readiness timeout blaming the heartbeat.
+    """
+    assert config.load({}).world_win is None
+
+
+def test_no_default_points_inside_somebody_s_home_directory():
+    """GUARDS THE CLASS, not the three constants that were removed.
+
+    Checking for the specific username that used to be here would pass the
+    moment a different one appeared — and would put that username back into the
+    repository in order to do it. This asserts on the SHAPE instead: a default
+    under `/Users/` or `/home/` is per-account by construction, whoever the
+    account belongs to.
+    """
+    defaults = {
+        name: value
+        for name, value in vars(config).items()
+        if name.startswith("DEFAULT_") and isinstance(value, str)
+    }
+
+    # Positive control: a scan that finds nothing to check proves nothing.
+    assert defaults, "no DEFAULT_* constants found - this test stopped looking"
+
+    personal = {
+        name: value
+        for name, value in defaults.items()
+        if "/Users/" in value or "/home/" in value
+    }
+    assert not personal, f"per-account default(s): {personal}"

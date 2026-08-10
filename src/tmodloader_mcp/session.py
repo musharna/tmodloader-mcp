@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import commands as commands_mod
+from . import inventory
 from .commands import CommandSet
 from .config import Config
 from .diag import Diag
@@ -443,6 +444,22 @@ def launch(
     # Resolved BEFORE the session is built, so the session records the world it
     # actually loads rather than the argument it was handed.
     world_arg = world or cfg.world_win
+    if world_arg is None:
+        # This used to default to one developer's self-test world by full path,
+        # which on any other machine named a file that did not exist - and the
+        # failure surfaced as a readiness timeout, blaming the heartbeat. The
+        # worlds on THIS disk are a better answer than a guess about one.
+        found = inventory.worlds(cfg.save_dir)
+        listing = (
+            "\n".join(f"  {w.name}: {w.path_win}" for w in found)
+            if found
+            else "  (none in this save directory)"
+        )
+        raise SessionError(
+            "no world to load. Pass `world` as a WINDOWS path, or set "
+            f"TMODLOADER_WORLD_WIN. Worlds here:\n{listing}"
+        )
+
     problem = world_problem(world_arg)
     if problem:
         raise SessionError(problem)
