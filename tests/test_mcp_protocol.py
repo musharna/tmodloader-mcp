@@ -60,6 +60,7 @@ EXPECTED_TOOLS = {
     "log_files",
     "heartbeat",
     "inventory",
+    "prune_captures",
     "stop",
 }
 
@@ -556,3 +557,46 @@ def test_a_world_path_survives_the_round_trip_as_a_nullable_string(fake_install)
 
     assert "path_win" in world, "the optional key did not survive the round trip"
     assert world["path_win"] is None
+
+
+@needs_subprocess
+def test_pruning_over_the_protocol_deletes_captures_and_nothing_else(fake_install):
+    """A DESTRUCTIVE tool driven at the layer that actually validates it.
+
+    The fake install's save directory holds one capture, a diag dump, and the
+    `Worlds`/`Players`/`Mods` trees. Asserting only that the capture went would
+    pass on an implementation that emptied the directory, so the survivors are
+    checked in the same test.
+    """
+    save = Path(fake_install["TMODLOADER_SAVE_DIR"])
+
+    async def call(session):
+        return await session.call_tool("prune_captures", {"keep": 0})
+
+    out = _structured(_run(call, fake_install))
+
+    assert out["removed"] == [FAKE_CAPTURE]
+    assert out["remaining"] == []
+    assert not (save / FAKE_CAPTURE).exists()
+    # POSITIVE CONTROL: the neighbours are untouched.
+    assert (save / "fakemod-diag.txt").is_file()
+    assert (save / "Worlds" / "FakeWorld.wld").is_file()
+    assert (save / "Players" / "n43n.plr").is_file()
+
+
+@needs_subprocess
+def test_pruning_refuses_a_negative_keep_over_the_protocol(fake_install):
+    """`found[:-(-1)]` is `found[:1]` — it does not crash, it deletes the wrong set.
+
+    The refusal has to survive the round trip as an error rather than an empty
+    success, and the capture has to still be there afterwards.
+    """
+    save = Path(fake_install["TMODLOADER_SAVE_DIR"])
+
+    async def call(session):
+        return await session.call_tool("prune_captures", {"keep": -1})
+
+    result = _run(call, fake_install)
+
+    assert result.is_error
+    assert (save / FAKE_CAPTURE).is_file(), "a refused prune deleted something"

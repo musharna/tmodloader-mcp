@@ -167,6 +167,11 @@ class InventoryOut(TypedDict):
     mods: list[ModOut]
 
 
+class PruneOut(TypedDict):
+    removed: list[str]
+    remaining: list[str]
+
+
 class ShotOut(TypedDict):
     path: str
     region: str
@@ -470,6 +475,45 @@ def read_capture(name: str) -> Image:
     """
     cfg = _cfg()
     return Image(data=captures_mod.read(cfg.save_dir, cfg.mod_name, name), format="png")
+
+
+@mcp.tool(
+    title="Delete old captures",
+    annotations=_DESTRUCTIVE,
+    structured_output=True,
+)
+def prune_captures(keep: int) -> PruneOut:
+    """Delete all but the newest `keep` captures, and say which went.
+
+    Captures accumulated forever. `shot` writes one per call and nothing ever
+    removed them, so an agent photographing in a loop grew the SAVE DIRECTORY
+    without bound — the folder holding the worlds and characters, which is not
+    a cache and not somewhere to leave litter.
+
+    Args:
+        keep: How many of the newest captures to keep. REQUIRED and
+            deliberately without a default, the same way `shot` requires a
+            region: this deletes files, and a destructive tool that runs with
+            no arguments is one that gets called by accident. `keep=0` removes
+            all of them, which is a real request and has to be spelled out.
+
+    Only files matching THIS mod's capture pattern are touched, and each is
+    re-checked to resolve to a direct child of the save directory — the same
+    containment `read_capture` uses, because a delete that listed and removed
+    through different rules would be looser than the read beside it. The whole
+    set is validated before anything is unlinked, so a refusal costs nothing
+    rather than leaving a half-finished prune.
+
+    Newest is decided by MTIME, not by the index in the filename: the index is
+    this harness's counter and the timestamp is the disk's account of what
+    happened.
+    """
+    cfg = _cfg()
+    removed = captures_mod.prune(cfg.save_dir, cfg.mod_name, keep=keep)
+    return PruneOut(
+        removed=removed,
+        remaining=captures_mod.available(cfg.save_dir, cfg.mod_name),
+    )
 
 
 @mcp.resource(
