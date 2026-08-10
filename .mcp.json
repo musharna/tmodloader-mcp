@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "tmodloader": {
+      "command": "uv",
+      "args": ["run", "tmodloader-mcp"],
+      "env": {
+        "TMODLOADER_SAVE_DIR": "${TMODLOADER_SAVE_DIR}",
+        "TMODLOADER_MOD_SOURCE": "${TMODLOADER_MOD_SOURCE}"
+      }
+    }
+  }
+}
