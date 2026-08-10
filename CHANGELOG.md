@@ -2,14 +2,37 @@
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-**Nothing has been released yet.** There are no tags, and the `0.1.0` in
-`pyproject.toml` has never been published, so every entry below sits under
-Unreleased — including the ones that would be breaking changes if anyone were
-depending on them. This file was backfilled at #12 from the merged history
-rather than kept from the start, so the entries are grouped by what they do
-rather than dated individually; the PR numbers are the audit trail.
+This file was backfilled at #12 from the merged history rather than kept from
+the start, so entries within a release are grouped by what they do rather than
+dated individually; the PR numbers are the audit trail. Everything up to 0.1.0
+predates any tag, so the "breaking" notes below describe changes nobody could
+have been depending on — they are recorded because the reasoning is worth
+keeping, not because they broke a released API.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-08-09
+
+First tagged release. The surface is 17 tools, 2 prompts and 1 resource,
+covered by 280 tests.
+
+**What is verified, and how.** Everything reachable without a running game is
+driven over the PROTOCOL in CI on Python 3.12 and 3.13 — not by calling the
+tool functions, which is a different question with a different answer, and the
+one that let `status` stay broken through 197 green tests. The 8 tools that
+need tModLoader actually running (`build_mod`, `launch`, `trigger`, `commands`,
+`diag`, `shot`, `restart`, `stop`) are covered by `tests/live_protocol_check.py`,
+run by hand on a machine with the game.
+
+**What that leaves.** The live check has not been re-run since `restart` was
+added and the configuration became required, so the game-facing half of this
+release rests on unit and contract coverage plus the earlier live runs. Said
+here rather than left to be assumed: an unstated gap is worse than a stated
+one.
+
+**Still not yours.** The mod-side responder lives inside Biomancy rather than
+in a package your mod can vendor, so `trigger` validates against Biomancy's
+command set. See Phase 2 in the README.
 
 ### Fixed
 
