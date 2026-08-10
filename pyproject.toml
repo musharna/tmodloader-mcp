@@ -1,6 +1,6 @@
 [project]
 name = "tmodloader-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Drive a running tModLoader instance: launch it, ask it questions, photograph it, and read its state back."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -46,6 +46,13 @@ packages = ["src/tmodloader_mcp"]
 include = [
     "src/tmodloader_mcp",
     "tests",
+    # The mod-side half. Without these an sdist ships a README telling you to
+    # copy a folder the sdist does not contain, and MOD_CONTRACT.md - the thing
+    # responder/README.md sends you to for the diag grammar - is not there
+    # either. `tests/` is excluded from the copy but shipped here, because it is
+    # the proof that the folder carries no mod's code.
+    "responder",
+    "docs",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
