@@ -683,3 +683,103 @@ def test_restart_without_a_session_refuses_instead_of_launching_something(fake_i
     assert result.is_error
     text = "".join(c.text for c in result.content if hasattr(c, "text"))
     assert "launch" in text.lower(), f"the refusal does not say what to do: {text}"
+
+
+# ---- prompts: the surface that had none ------------------------------------
+
+EXPECTED_PROMPTS = {"diagnose_silence", "start_a_session"}
+
+
+@needs_subprocess
+def test_the_prompts_are_advertised(fake_install):
+    """A prompt is registered by a decorator at import, exactly like a tool.
+
+    Which means it fails the same silent way — a signature the schema generator
+    cannot handle drops out of the listing and the server starts perfectly.
+    """
+
+    async def call(session):
+        return (await session.list_prompts()).prompts
+
+    prompts = _run(call, fake_install)
+    names = {p.name for p in prompts}
+
+    assert names == EXPECTED_PROMPTS, f"got {names}"
+    assert all(p.description for p in prompts), (
+        "a prompt with no description is unpickable from a menu"
+    )
+
+
+@needs_subprocess
+def test_diagnose_silence_reads_this_install_rather_than_reciting_prose(fake_install):
+    """The point of it being a prompt and not a paragraph in the README.
+
+    The fake install has no heartbeat and a mod that is enabled and built, so
+    the rendered text must contain THOSE facts. A static tree would pass a test
+    that only checked for the four headings, which is why this asserts on the
+    readings instead.
+    """
+
+    async def call(session):
+        return await session.get_prompt("diagnose_silence", {})
+
+    result = _run(call, fake_install)
+    text = "".join(
+        m.content.text for m in result.messages if hasattr(m.content, "text")
+    )
+
+    assert "Fakemod" in text, "the prompt does not name the mod under test"
+    assert "not loaded" in text, "the absent heartbeat was not diagnosed"
+    assert "enabled=True" in text and "built_here=True" in text
+    # POSITIVE CONTROL that the tree is still there: readings without the tree
+    # would be a status dump, and the tree is what says which fix to reach for.
+    assert "STALE" in text and "NOT ARMED" in text
+
+
+@needs_subprocess
+def test_start_a_session_lists_the_worlds_and_characters_that_exist(fake_install):
+    """`launch` cannot check its own preconditions; this shows them met."""
+
+    async def call(session):
+        return await session.get_prompt("start_a_session", {})
+
+    result = _run(call, fake_install)
+    text = "".join(
+        m.content.text for m in result.messages if hasattr(m.content, "text")
+    )
+
+    assert "FakeWorld" in text
+    assert "n43n" in text
+    assert "FakeWorld.wld.bak" not in text, "it offered a backup as launchable"
+
+
+@needs_subprocess
+def test_a_prompt_renders_the_failure_instead_of_refusing_to_render(tmp_path):
+    """DIAGNOSTICS ARE READ WHEN THINGS ARE BROKEN.
+
+    Pointed at a directory with no install at all, so `_cfg()` raises. A prompt
+    that propagated that would fail at the one moment it exists for — the
+    unusable configuration IS the diagnosis, and it has to arrive as the answer
+    rather than as a stack trace.
+
+    The exception text has to survive into the output: reporting "something
+    went wrong" would be the swallowing this avoids.
+    """
+    broken = {
+        "TMODLOADER_DIR": str(tmp_path / "nowhere"),
+        "TMODLOADER_SAVE_DIR": str(tmp_path / "nowhere"),
+        "TMODLOADER_MOD_SOURCE": str(tmp_path / "nowhere"),
+        "TMODLOADER_MOD_SOURCE_WIN": r"C:\nowhere",
+        "TMODLOADER_MOD_NAME": "Fakemod",
+    }
+
+    async def call(session):
+        return await session.get_prompt("diagnose_silence", {})
+
+    result = _run(call, broken)
+    text = "".join(
+        m.content.text for m in result.messages if hasattr(m.content, "text")
+    )
+
+    assert "unusable" in text.lower()
+    assert "no tModLoader install" in text, "the actual reason was not reported"
