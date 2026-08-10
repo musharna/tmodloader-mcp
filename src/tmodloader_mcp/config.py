@@ -39,6 +39,13 @@ DEFAULT_TML = "/mnt/c/Program Files (x86)/Steam/steamapps/common/tModLoader"
 #: Reported together rather than one restart at a time.
 REQUIRED = ("TMODLOADER_SAVE_DIR", "TMODLOADER_MOD_SOURCE")
 
+#: What a caller additionally needs to `launch` WITHOUT naming a world. Kept
+#: here rather than written out by each script that needs it: the live checks
+#: both inherit their environment and set none of it, so this list is the thing
+#: most likely to drift out of step with reality, and a copy per script is two
+#: places to forget.
+REQUIRED_TO_LAUNCH = (*REQUIRED, "TMODLOADER_WORLD_WIN")
+
 #: A WSL mount of a Windows drive: `/mnt/c/...`. The lookahead keeps `/mnt/wsl`
 #: out, where `wsl` is a directory rather than a drive letter.
 _DRIVE_MOUNT = re.compile(r"^/mnt/(?P<drive>[A-Za-z])(?=/|$)")
