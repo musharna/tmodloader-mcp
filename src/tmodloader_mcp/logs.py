@@ -26,6 +26,7 @@ precisely the failure `logs` is reached for, and none of them were addressable.
 from __future__ import annotations
 
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 #: Where tModLoader keeps them, relative to the install.
@@ -154,3 +155,72 @@ def tail(text: str, *, contains: str | None = None, lines: int = 80) -> list[str
     # `kept[-lines:]` is a tail for every value but zero: -0 is 0, so it would
     # return the WHOLE log to a caller who asked for none of it.
     return kept[-lines:] if lines else []
+
+
+@dataclass(frozen=True)
+class Since:
+    """New log text, and where to resume.
+
+    Named fields rather than a tuple. `(text, offset, restarted)` reads the same
+    as any other order at the call site, and this codebase has already paid for
+    a positional seam once.
+    """
+
+    text: str
+    next_offset: int
+    restarted: bool
+
+
+def read_since(tml_dir: Path, name: str, *, offset: int) -> Since:
+    """Whatever was appended to a log after `offset` bytes, and the next offset.
+
+    NOT A LIVE TAIL, and cannot be one. Tools here are synchronous and the game
+    session is process-global, so a `launch` blocking for five minutes is not
+    something another call can watch from the side. What this buys is the read
+    BETWEEN calls: ask again later with the offset you were given and get only
+    what is new, instead of re-reading a log that grows all run.
+
+    BYTES, not lines or characters. A line count is not a resume point — lines
+    are appended and the count of what you have already seen is not where the
+    file continues — and a character offset is not a seek position in a file
+    that is decoded with replacements.
+
+    `restarted` is the case that matters. tModLoader ZIPS the previous run's
+    logs and starts fresh, so an offset from a run that has since rotated points
+    past the end of a file that is now shorter. Seeking there would report an
+    empty log forever, which reads exactly like a quiet game. When the file is
+    shorter than the offset the read starts from zero and says so, because "here
+    is the whole thing again" is only correct if the caller is told why.
+    """
+    if offset < 0:
+        raise ValueError(f"offset={offset} is not a position in a file")
+
+    if name != Path(name).name or not name.endswith(".log"):
+        raise LogError(
+            f"{name!r} is not a log filename. Pass a name from `available`, "
+            "such as client.log - never a path."
+        )
+
+    target = directory(tml_dir) / name
+    if not target.is_file():
+        raise LogMissing(
+            f"there is no {name!r} in {directory(tml_dir)}. Present: "
+            f"{available(tml_dir)}"
+        )
+
+    size = target.stat().st_size
+    restarted = offset > size
+    start = 0 if restarted else offset
+
+    with target.open("rb") as handle:
+        handle.seek(start)
+        chunk = handle.read()
+
+    # Decoded with replacement rather than strictly: a byte offset can land in
+    # the middle of a multi-byte character, and one mangled glyph at a chunk
+    # boundary is a far better outcome than refusing to return the log.
+    return Since(
+        text=chunk.decode("utf-8", errors="replace"),
+        next_offset=start + len(chunk),
+        restarted=restarted,
+    )

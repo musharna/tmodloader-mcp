@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tmodloader_mcp import logs
 from tmodloader_mcp import server as server_mod
 
 
@@ -128,3 +129,108 @@ def test_a_missing_log_is_reported_as_missing(tmp_path, monkeypatch):
     result = server_mod.logs()
     assert result["found"] is False
     assert result["lines"] == []
+
+
+# --- Incremental reads. Offsets, and the rotation that invalidates them. -----
+
+
+def _logdir(tmp_path):
+    d = tmp_path / logs.LOG_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def test_reading_from_zero_returns_everything_and_a_resume_point(tmp_path):
+    (_logdir(tmp_path) / "client.log").write_text("one\ntwo\n")
+
+    got = logs.read_since(tmp_path, "client.log", offset=0)
+
+    assert got.text == "one\ntwo\n"
+    assert got.next_offset == 8
+    assert got.restarted is False
+
+
+def test_reading_again_returns_only_what_was_appended(tmp_path):
+    """The whole point: a log that grows all run, read once each time."""
+    path = _logdir(tmp_path) / "client.log"
+    path.write_text("one\ntwo\n")
+
+    first = logs.read_since(tmp_path, "client.log", offset=0)
+    with path.open("a") as handle:
+        handle.write("three\n")
+    second = logs.read_since(tmp_path, "client.log", offset=first.next_offset)
+
+    assert second.text == "three\n"
+    assert second.restarted is False
+
+
+def test_nothing_new_is_an_empty_string_at_the_same_offset(tmp_path):
+    path = _logdir(tmp_path) / "client.log"
+    path.write_text("one\n")
+
+    first = logs.read_since(tmp_path, "client.log", offset=0)
+    again = logs.read_since(tmp_path, "client.log", offset=first.next_offset)
+
+    assert again.text == ""
+    assert again.next_offset == first.next_offset
+    assert again.restarted is False
+
+
+def test_a_rotated_log_is_re_read_from_the_start_and_says_so(tmp_path):
+    """THE CASE THAT MATTERS. tModLoader zips the old run and starts fresh.
+
+    An offset from the previous run points past the end of a file that is now
+    shorter. Seeking there returns nothing, forever — which reads exactly like a
+    quiet game rather than like a log that restarted underneath you.
+    """
+    path = _logdir(tmp_path) / "client.log"
+    path.write_text("a long first run with plenty of output\n")
+    first = logs.read_since(tmp_path, "client.log", offset=0)
+
+    # The retry: same name, much shorter.
+    path.write_text("new run\n")
+    second = logs.read_since(tmp_path, "client.log", offset=first.next_offset)
+
+    assert second.restarted is True
+    assert second.text == "new run\n"
+    assert second.next_offset == 8
+
+
+def test_offsets_are_bytes_so_a_resume_point_survives_wide_characters(tmp_path):
+    """A character offset is not a seek position. The log holds mod names."""
+    path = _logdir(tmp_path) / "client.log"
+    path.write_text("piña 🌱\n", encoding="utf-8")
+
+    first = logs.read_since(tmp_path, "client.log", offset=0)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("after\n")
+    second = logs.read_since(tmp_path, "client.log", offset=first.next_offset)
+
+    assert first.next_offset == len("piña 🌱\n".encode())
+    assert second.text == "after\n", "a character offset would have desynced here"
+
+
+def test_a_negative_offset_is_refused(tmp_path):
+    (_logdir(tmp_path) / "client.log").write_text("one\n")
+
+    with pytest.raises(ValueError, match="not a position"):
+        logs.read_since(tmp_path, "client.log", offset=-1)
+
+
+def test_read_since_refuses_a_path_the_same_way_read_does(tmp_path):
+    """Same guard, because a second reader is a second chance to be looser."""
+    _logdir(tmp_path)
+
+    with pytest.raises(logs.LogError):
+        logs.read_since(tmp_path, "../../etc/passwd", offset=0)
+
+    with pytest.raises(logs.LogError):
+        logs.read_since(tmp_path, "notalog.txt", offset=0)
+
+
+def test_read_since_on_a_missing_log_is_LogMissing_not_LogError(tmp_path):
+    """A log that has never been written is the normal state of a fresh install."""
+    _logdir(tmp_path)
+
+    with pytest.raises(logs.LogMissing):
+        logs.read_since(tmp_path, "client.log", offset=0)
