@@ -469,3 +469,41 @@ def test_a_live_script_takes_its_variable_list_from_the_package(script):
     assert "REQUIRED_TO_LAUNCH" in script.read_text(), (
         f"{script.name} spells out its own variable list instead of importing one"
     )
+
+
+def test_the_protocol_check_hands_its_environment_to_the_server():
+    """A GUARD ONLY WORKS WHERE ITS PREDICATE OBSERVES ITS REFERENT.
+
+    The server is a child process. `stdio_client` builds its environment as
+    `get_default_environment() | (server.env or {})` — a deliberately minimal
+    set carrying PATH and little else — so a `StdioServerParameters` with no
+    `env` gives the server none of the configuration.
+
+    That happened, and the preflight added one commit earlier did not catch it:
+    the preflight read the PARENT's environment, which was correct and complete
+    the whole time. Every tool answered "TMODLOADER_SAVE_DIR is not set" while
+    the variable was exported in the shell that started it.
+
+    Checked structurally rather than by running the script, because reproducing
+    it needs a game. The keyword either appears in the constructor call or the
+    child gets a bare environment; there is no third option.
+    """
+    tree = ast.parse(PROTOCOL_CHECK.read_text())
+
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "StdioServerParameters"
+    ]
+
+    # Positive control: if the constructor is not found at all, an assertion
+    # about its keywords proves nothing.
+    assert calls, "no StdioServerParameters call found - this test stopped looking"
+
+    for call in calls:
+        assert any(kw.arg == "env" for kw in call.keywords), (
+            "the server subprocess is spawned without an env, so it inherits "
+            "get_default_environment() and none of the configuration"
+        )

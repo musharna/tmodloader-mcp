@@ -129,7 +129,15 @@ async def journey(session: ClientSession) -> None:
     idle = structured(await session.call_tool("status", {}), "status idle")
     if idle is not None:
         check("not running", idle.get("running") is False, str(idle))
-        check("every key present", len(idle) == 5, str(sorted(idle)))
+        # Compared against the RETURN TYPE, not a number written here. This was
+        # `== 5` and went stale the moment `status` grew `world` - the same
+        # copy-of-a-fact-this-file-does-not-own that the tool count was.
+        expected_keys = set(server_mod.StatusOut.__annotations__)
+        check(
+            f"every key present ({len(expected_keys)})",
+            set(idle) == expected_keys,
+            f"missing {expected_keys - set(idle)}, extra {set(idle) - expected_keys}",
+        )
 
     print(">>> build_mod")
     built = structured(await session.call_tool("build_mod", {}), "build_mod")
@@ -372,7 +380,21 @@ def preflight() -> list[str]:
 
 async def main() -> None:
     params = StdioServerParameters(
-        command=sys.executable, args=["-m", "tmodloader_mcp.server"]
+        command=sys.executable,
+        args=["-m", "tmodloader_mcp.server"],
+        # THE SERVER IS A CHILD PROCESS AND DOES NOT INHERIT THIS SHELL.
+        #
+        # `stdio_client` builds the child's environment as
+        # `get_default_environment() | (server.env or {})` - a deliberately
+        # MINIMAL set that carries PATH and little else. Passing nothing here
+        # meant the configuration was present in the parent, absent in the
+        # process that needed it, and every tool answered "TMODLOADER_SAVE_DIR
+        # is not set" while the variable was exported the whole time.
+        #
+        # The preflight did not catch it and could not: it read THIS process's
+        # environment, which was correct. A guard only works where its
+        # predicate observes the thing it is guarding.
+        env=dict(os.environ),
     )
     async with (
         stdio_client(params) as (read, write),

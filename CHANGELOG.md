@@ -37,11 +37,12 @@ need tModLoader actually running (`build_mod`, `launch`, `trigger`, `commands`,
 `diag`, `shot`, `restart`, `stop`) are covered by `tests/live_protocol_check.py`,
 run by hand on a machine with the game.
 
-**What that leaves.** The live check has not been re-run since `restart` was
-added and the configuration became required, so the game-facing half of this
-release rests on unit and contract coverage plus the earlier live runs. Said
-here rather than left to be assumed: an unstated gap is worse than a stated
-one.
+**What that leaves — since closed.** At the time of tagging the live check had
+not been re-run since `restart` landed and the configuration became required.
+It has now been run against 0.1.0's code and passes end to end, including
+`restart` keeping the session's world across a relaunch and the mod answering
+again afterwards. It found no defect in the released package; it found two in
+the live script itself, fixed in #36 after the tag.
 
 **Still not yours.** The mod-side responder lives inside Biomancy rather than
 in a package your mod can vendor, so `trigger` validates against Biomancy's
