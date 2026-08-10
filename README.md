@@ -7,10 +7,12 @@ Game engines have grown MCP servers — Unity, Unreal, Godot and Defold all have
 one, so an assistant can see a real scene instead of guessing from a prompt.
 tModLoader has not had one. This is that.
 
-> **Status: alpha, phase 1.** The paths default to one specific Biomancy
-> install, and the mod-side half is not yet extracted into a package other mods
-> can depend on. It is genuinely useful for that mod today and not yet useful
-> for yours. See [Phase 2](#phase-2--what-would-make-this-yours).
+> **Status: alpha.** No path defaults to anybody's install any more — the two
+> that named a person are required, and the world is asked for rather than
+> guessed. What is still not yours is the mod-side half: the responder lives
+> inside Biomancy rather than in a package your mod can depend on, so `trigger`
+> validates against Biomancy's command set. See
+> [Phase 2](#phase-2--what-would-make-this-yours).
 
 ## Why an MCP server rather than a shell script
 
@@ -104,15 +106,33 @@ so a request says which corner it wants.
 
 ## Configuration
 
-Every path is an environment variable with a default:
+Every path is an environment variable. **Two are required**, because every
+plausible default for them names somebody's own install:
 
-| Variable                    | Meaning                                      |
-| --------------------------- | -------------------------------------------- |
-| `TMODLOADER_DIR`            | tModLoader install                           |
-| `TMODLOADER_SAVE_DIR`       | Save directory the mod writes artifacts into |
-| `TMODLOADER_MOD_SOURCE`     | Mod source directory (WSL path)              |
-| `TMODLOADER_MOD_SOURCE_WIN` | Usually leave unset — see below              |
-| `TMODLOADER_MOD_NAME`       | Usually leave unset — see below              |
+| Variable                    | Meaning                                         |
+| --------------------------- | ----------------------------------------------- |
+| `TMODLOADER_SAVE_DIR`       | **Required.** Where the mod writes artifacts    |
+| `TMODLOADER_MOD_SOURCE`     | **Required.** Mod source directory (WSL path)   |
+| `TMODLOADER_DIR`            | tModLoader install; defaults to Steam's layout  |
+| `TMODLOADER_WORLD_WIN`      | Default world, as Windows spells it — see below |
+| `TMODLOADER_MOD_SOURCE_WIN` | Usually leave unset — see below                 |
+| `TMODLOADER_MOD_NAME`       | Usually leave unset — see below                 |
+
+```sh
+export TMODLOADER_SAVE_DIR="/mnt/c/Users/<you>/Documents/My Games/Terraria/tModLoader"
+export TMODLOADER_MOD_SOURCE="$TMODLOADER_SAVE_DIR/ModSources/<YourMod>"
+```
+
+The required two have no default rather than a plausible one on purpose. A
+default pointing at the author's disk does not fail on yours — it resolves, and
+in the worst case it resolves to something that exists, so the server drives an
+install you never chose. Both unset variables are reported together, so this
+costs one restart and not two.
+
+`TMODLOADER_WORLD_WIN` is the world `launch` loads when you do not pass one. It
+has no default either; with neither set, `launch` refuses and **lists the worlds
+actually in your save directory**, with the Windows paths it wants. `inventory`
+answers the same question without launching anything.
 
 `TMODLOADER_MOD_NAME` is the mod's **internal** name, which every artifact
 filename is built from: `<modname>-capture.trigger`, `<modname>-diag.txt`,
@@ -141,13 +161,17 @@ refuses to start and says so, rather than driving one and building the other.
 2. Extract the mod-side responder into a source package a mod can vendor, rather
    than requiring Biomancy's copy — and let it publish its own command list, so
    this harness stops carrying one mod's twelve commands as the universe.
-3. Make `TMODLOADER_MOD_SOURCE` required and drop the machine-specific defaults.
+3. ~~Make `TMODLOADER_MOD_SOURCE` required and drop the machine-specific
+   defaults~~ — **done.** The save directory and mod source are required, and
+   the world is asked for rather than defaulted to one developer's self-test
+   world. What keeps a default is what is not personal: Steam's install path
+   and the Windows binaries under System32.
 4. A template mod and documentation.
 
 Until 2 lands this is honestly a tool for one mod that happens to be built to
-generalise: the filenames are yours now, but the responder that answers them
-still lives inside Biomancy, and `trigger` still validates against Biomancy's
-command set.
+generalise: the filenames and the paths are yours now, but the responder that
+answers them still lives inside Biomancy, and `trigger` still validates against
+Biomancy's command set.
 
 ## Licence
 

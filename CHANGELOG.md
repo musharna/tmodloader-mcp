@@ -13,6 +13,31 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ### Changed
 
+- **BREAKING: the three defaults that named a person are gone.**
+  `TMODLOADER_SAVE_DIR` and `TMODLOADER_MOD_SOURCE` are now REQUIRED, and
+  `TMODLOADER_WORLD_WIN` has no default. All three used to point at one
+  developer's install, spelled out with their Windows username and their mod's
+  name. That was right for phase 1 and wrong for anything published: a default
+  aimed at the author's disk does not fail on yours, it RESOLVES — best case
+  `check` complains about a directory you never mentioned, worst case it exists
+  and the server drives an install you did not choose. Unset variables are
+  reported together and ALONE, because an unset one resolves to `Path(".")` and
+  every later check would otherwise fire too, burying the message that says
+  what to do under true sentences about the working directory. (#31)
+- `launch` with no world configured and none passed now LISTS THE WORLDS in the
+  save directory, with the Windows paths it wants. The old default was one
+  developer's self-test world by full path, so on any other machine it named a
+  file that did not exist — and the failure arrived as a readiness timeout
+  blaming the heartbeat, which names the wrong thing entirely. **Breaking:**
+  `Config.world_win` is `str | None`. (#31)
+- What KEEPS a default is what is not personal: tModLoader's Steam location and
+  the Windows binaries under System32 are the same on every machine that can run
+  this at all, and requiring them would be ceremony rather than safety. A test
+  guards the CLASS rather than the removed constants — it fails on any
+  `DEFAULT_*` under `/Users/` or `/home/`, whoever the account belongs to, since
+  checking for the specific username would pass the moment a different one
+  appeared and would put that username back in the repository to do it. (#31)
+
 - **The command list is read from the mod, not kept here.** This harness held
   its own copy of one mod's twelve verbs and its own belief about which of them
   read an argument — facts owned by running C#, in a file the mod could not see.
