@@ -13,6 +13,41 @@ keeping, not because they broke a released API.
 
 ### Fixed
 
+- **`shot` reported success on a file it never opened.** The drop file was
+  waited for, renamed, and its path handed back as a picture — not one byte was
+  read. So anything that landed on that name was promoted into the captures, and
+  the caller found out one round trip later and somewhere else, where the error
+  names their image reader rather than the capture that was never taken.
+
+  The README had recorded this as an absent guarantee rather than quietly
+  implying one, which is what made it a known gap instead of a discovered bug.
+  It is closed now, and it checks BOTH ends rather than the header that old
+  claim described. A file exists from the moment it is created rather than the
+  moment it is finished, so a capture big enough to be worth taking is big
+  enough to be read mid-write — and a truncated PNG has an entirely valid
+  signature. The trailer is what decides.
+
+  The two failures are handled differently on purpose: bytes that are not a PNG
+  will never become one, so they are refused at once rather than costing a
+  minute of timeout before saying the obvious — the mod dropping a refusal on
+  that name is exactly how it happens. A picture still arriving is waited out,
+  because refusing a short file on sight would turn a slow write into a failure.
+  Neither is renamed into your captures, so a refusal cannot leave a corrupt
+  artifact behind for `captures` to list and `read_capture` to serve.
+
+- **The README claimed a coupling that had already been removed.** The status
+  banner and Phase 2 both said `trigger` validates against Biomancy's command
+  set. It does not, and has not since the harness started reading the list the
+  running side publishes: `compose` requires that list and has no fallback,
+  deliberately, because a guess about which commands exist is the thing it
+  replaced and a fallback would be that guess under another name. Half of Phase
+  2 item 2 was therefore already done and recorded as outstanding.
+
+  Corrected in the direction that costs something: a README understating what
+  works sends a reader away from a tool that would have suited them, which is
+  the same class of error as one overstating it, and the only reason it feels
+  safer is that nobody files a bug about it.
+
 - **A path that never arrived was treated as a path.** `.mcp.json` passes the
   two required directories as `${TMODLOADER_SAVE_DIR}` and
   `${TMODLOADER_MOD_SOURCE}` on purpose, so that no checkout carries anybody's
