@@ -34,6 +34,7 @@ from . import commands as commands_mod
 from . import config as config_mod
 from . import diag as diag_mod
 from . import heartbeat as heartbeat_mod
+from . import inventory as inventory_mod
 from . import logs as logs_mod
 from . import session as session_mod
 from .triggers import TriggerError
@@ -143,6 +144,27 @@ class HeartbeatSideOut(TypedDict):
 class HeartbeatOut(TypedDict):
     client: HeartbeatSideOut
     server: HeartbeatSideOut
+
+
+class WorldOut(TypedDict):
+    name: str
+    # Null rather than absent - see StatusOut. Null means this path is not
+    # under /mnt/<drive> and there is no drive letter to translate to, which
+    # `config.windows_path_for` refuses to guess at rather than invent a UNC
+    # spelling nobody has measured against tModLoader.
+    path_win: str | None
+
+
+class ModOut(TypedDict):
+    name: str
+    enabled: bool
+    built_here: bool
+
+
+class InventoryOut(TypedDict):
+    worlds: list[WorldOut]
+    players: list[str]
+    mods: list[ModOut]
 
 
 class ShotOut(TypedDict):
@@ -572,6 +594,48 @@ def log_files() -> dict[str, Any]:
         "logs": logs_mod.available(cfg.tml_dir),
         "archived_runs": len(logs_mod.archives(cfg.tml_dir)),
     }
+
+
+@mcp.tool(
+    title="What this install has",
+    annotations=_READ_ONLY,
+    structured_output=True,
+)
+def inventory() -> InventoryOut:
+    """The worlds, characters and mods on this machine.
+
+    `launch` states two preconditions and could check neither. `player` must
+    already exist — it does not create one, and a duplicate is kicked — and
+    `world` wants a WINDOWS path the caller had to know in advance. Both are
+    facts about directories sitting right there, and until now the only way to
+    learn either was to launch and read the failure: a kick for the wrong
+    character, and a readiness timeout blaming the heartbeat for the wrong
+    world. Each world's `path_win` is the exact string `launch(world=...)`
+    wants.
+
+    The mods answer something else. `commands` reports `responder: false` for
+    three different situations — the mod is not built, or it is built and
+    switched off, or it is on and was compiled without the dev bridge — and
+    `enabled` plus `built_here` separate the first two.
+
+    THOSE TWO ARE NOT ONE FACT. A mod can be enabled and have no `.tmod` here,
+    because a workshop mod is installed from somewhere else entirely; on the
+    install this was written against, `CheatSheet` is exactly that. Collapsing
+    them into `installed` would report it missing and send someone rebuilding a
+    mod that was never the problem.
+    """
+    cfg = _cfg()
+    return InventoryOut(
+        worlds=[
+            WorldOut(name=w.name, path_win=w.path_win)
+            for w in inventory_mod.worlds(cfg.save_dir)
+        ],
+        players=inventory_mod.players(cfg.save_dir),
+        mods=[
+            ModOut(name=m.name, enabled=m.enabled, built_here=m.built_here)
+            for m in inventory_mod.mods(cfg.save_dir)
+        ],
+    )
 
 
 @mcp.tool(
