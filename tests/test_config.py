@@ -216,6 +216,112 @@ def test_a_configured_install_still_passes(tmp_path):
     assert config.check(cfg) == []
 
 
+# --- the variable that arrives as its own name ------------------------------
+
+
+PLACEHOLDER_ENV = {
+    "TMODLOADER_SAVE_DIR": "${TMODLOADER_SAVE_DIR}",
+    "TMODLOADER_MOD_SOURCE": "${TMODLOADER_MOD_SOURCE}",
+}
+
+
+def test_a_placeholder_is_absence_rather_than_a_path():
+    """`${FOO}` is a substitution that did not happen, not a value.
+
+    `.mcp.json` writes the placeholder on purpose, so that no checkout carries
+    anybody's disk, and the CLIENT expands it against its own environment. A
+    client started by a daemon or a desktop launcher inherits no interactive
+    shell, substitutes nothing, and passes the text through — which is how this
+    server is handed `${TMODLOADER_SAVE_DIR}` as though someone had chosen it.
+    """
+    cfg = config.load(PLACEHOLDER_ENV)
+
+    assert cfg.unexpanded == (
+        ("TMODLOADER_MOD_SOURCE", "${TMODLOADER_MOD_SOURCE}"),
+        ("TMODLOADER_SAVE_DIR", "${TMODLOADER_SAVE_DIR}"),
+    )
+    # Not ALSO unset: one absence, reported once, by the list whose message
+    # says the thing that fixes it.
+    assert cfg.unset == ()
+
+
+def test_a_placeholder_does_not_blame_the_variables_it_derives():
+    """REGRESSION. Four problems, two naming variables nobody had set.
+
+    A placeholder is a non-empty string, so it was never `unset` and the guard
+    that exists to report absence ALONE never fired. `mod_name` is derived from
+    the mod source and `mod_source_win` is translated from it, so both inherited
+    the placeholder and complained under their OWN names — sending the reader to
+    set `TMODLOADER_MOD_NAME` and `TMODLOADER_MOD_SOURCE_WIN`, neither of which
+    was wrong and neither of which would have helped.
+    """
+    problems = config.check(config.load(PLACEHOLDER_ENV))
+
+    # One problem, not one per variable: the remedy is a single action, and
+    # repeating it twice rebuilds the wall of text the early return is for.
+    assert len(problems) == 1, problems
+    assert not any("TMODLOADER_MOD_NAME" in p for p in problems), problems
+    assert not any("TMODLOADER_MOD_SOURCE_WIN" in p for p in problems), problems
+    # Both names still appear - which ones failed is the part that differs.
+    assert "TMODLOADER_SAVE_DIR" in problems[0], problems
+    assert "TMODLOADER_MOD_SOURCE" in problems[0], problems
+    # And it must not read as "you forgot to export it", which is what the
+    # reader has already done. The distinguishing instruction is the restart.
+    assert "restart the client" in problems[0], problems
+
+
+def test_a_placeholder_never_reaches_the_game_as_a_world():
+    """The expensive half. The message is cosmetic next to this.
+
+    `world_win` is passed to tModLoader verbatim, and a world that does not
+    exist does not fail loudly — the server never finishes loading and the only
+    symptom is a readiness timeout blaming the heartbeat. Treating the
+    placeholder as absent is what makes `launch` refuse and list the real
+    worlds instead.
+    """
+    cfg = config.load(
+        {**PLACEHOLDER_ENV, "TMODLOADER_WORLD_WIN": "${TMODLOADER_WORLD_WIN}"}
+    )
+
+    assert cfg.world_win is None
+
+
+def test_a_placeholder_falls_back_where_there_is_a_default():
+    """Absent means absent, so the non-personal defaults still apply."""
+    cfg = config.load({**PLACEHOLDER_ENV, "TMODLOADER_DIR": "${TMODLOADER_DIR}"})
+
+    assert cfg.tml_dir == Path(config.DEFAULT_TML)
+
+
+def test_a_real_path_that_merely_contains_a_dollar_is_left_alone(tmp_path):
+    """POSITIVE CONTROL. A rule this broad could eat legitimate directories.
+
+    Only a WHOLE value that is nothing but one reference counts. A directory
+    genuinely named with a `$` in it is a path somebody chose, and refusing it
+    would be this check inventing a problem of its own.
+    """
+    tml = tmp_path / "tml"
+    tml.mkdir()
+    (tml / "tModLoader.dll").write_bytes(b"")
+    source = tmp_path / "Cash$Mod"
+    source.mkdir()
+    (source / "build.txt").write_text("displayName = CashMod\n")
+
+    cfg = config.load(
+        {
+            "TMODLOADER_DIR": str(tml),
+            "TMODLOADER_SAVE_DIR": str(tmp_path),
+            "TMODLOADER_MOD_SOURCE": str(source),
+            "TMODLOADER_MOD_SOURCE_WIN": r"C:\Cash$Mod",
+            "TMODLOADER_MOD_NAME": "CashMod",
+        }
+    )
+
+    assert cfg.unexpanded == ()
+    assert cfg.mod_source == source
+    assert config.check(cfg) == []
+
+
 def test_no_world_is_configured_by_default():
     """It used to be one developer's self-test world, by full path.
 
