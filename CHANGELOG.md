@@ -75,6 +75,28 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ### Added
 
+- **New `inventory` tool — the worlds, characters and mods this install has.**
+  `launch` states two preconditions and could check neither: `player` must
+  already exist (it does not create one, and a duplicate is kicked) and `world`
+  wants a WINDOWS path the caller had to know in advance. Both are facts about
+  directories sitting right there, and the only way to learn either was to
+  launch and read the failure — a kick for the wrong character, a readiness
+  timeout blaming the heartbeat for the wrong world. Each world now reports the
+  exact `path_win` string `launch(world=...)` wants. Same argument that produced
+  `log_files`, applied to the other two directories it covers. (#27)
+- `inventory` reports `enabled` and `built_here` as SEPARATE booleans, which
+  splits `commands`' single `responder: false` into "not built" and "built and
+  switched off". They are not one fact: a mod can be enabled with no `.tmod`
+  here, because a workshop mod is installed from somewhere else — on the
+  install this was written against, `enabled.json` lists `Biomancy` and
+  `CheatSheet` while `Mods/` holds only `Biomancy.tmod`. An `installed` flag
+  would call CheatSheet missing and send someone rebuilding a mod that was
+  never the problem. (#27)
+- `inventory.mods` raises on an `enabled.json` that exists and will not parse,
+  and returns an empty list when there is none. A fresh install has no
+  manifest, which is a state; a manifest something wrote and this cannot read
+  is a fault needing a human. The same line `commands` draws between
+  `responder: false` and an error. (#27)
 - **New `heartbeat` tool — WHICH silence, not just that there was one.**
   `launch` has always read `<mod>-hooks.txt` to decide readiness and kept one
   bit of it. That is the right thing to block on and the wrong thing to report:
