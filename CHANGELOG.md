@@ -11,13 +11,44 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A path that never arrived was treated as a path.** `.mcp.json` passes the
+  two required directories as `${TMODLOADER_SAVE_DIR}` and
+  `${TMODLOADER_MOD_SOURCE}` on purpose, so that no checkout carries anybody's
+  disk — and the MCP _client_ expands them against _its own_ environment. A
+  client started by a daemon or a desktop launcher inherits no interactive
+  shell, substitutes nothing, and hands the server the text. Measured rather
+  than reasoned about: two live sessions, one `.mcp.json`, and only the one
+  whose client had the variables got real paths.
+
+  Read literally that text is a non-empty string, so it was configuration as
+  far as anything here could tell. `check` reported **four** problems, two of
+  them naming `TMODLOADER_MOD_NAME` and `TMODLOADER_MOD_SOURCE_WIN` — variables
+  the reader had never set, derived from the one that never arrived. The
+  message that says what to do was the one thing missing.
+
+  The message was the cheap half. `world_win` took the placeholder the same
+  way, so `${TMODLOADER_WORLD_WIN}` would have reached tModLoader as a world to
+  load and come back as a readiness timeout blaming the heartbeat — the exact
+  class of failure the required-variables work was done to remove, arriving
+  through the variable that was supposed to fix it.
+
+  Fixed where every variable is read rather than per-variable, so a placeholder
+  in one nobody has thought about is absent too: it falls back to the default
+  where there is one, and is reported as its own kind of absence where there is
+  not, with the instruction that differs from "you forgot to export it" — which
+  is what the reader has already done. Covered through the protocol as well as
+  at the unit, because the confusing part is that the server _starts_,
+  advertises every tool, and fails only when one is called.
+
 ### Added
 
 - **`docs/MOD_CONTRACT.md` — the mod-side protocol, written down.** Every
   filename, where it lives, what it contains, and which failures it has to be
   able to express. It existed only as C# inside one mod, which is what made
   "extract the responder" a job nobody could start: there was nothing to
-  extract *to*. Written from `triggers.py`, `session.py` and the artifacts a
+  extract _to_. Written from `triggers.py`, `session.py` and the artifacts a
   running install actually had on disk rather than from intention, and pinned
   by tests in BOTH directions — one fails if the protocol gains a file the
   document does not mention, the other if the document describes a file nothing
