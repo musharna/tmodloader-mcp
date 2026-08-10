@@ -19,18 +19,19 @@ one — a stateless local binary does not need a protocol in front of it.
 
 What earns the surface here is that a running game is not stateless:
 
-| Tool              | What it buys over `bash`                                        |
-| ----------------- | --------------------------------------------------------------- |
-| `launch` / `stop` | Session state across calls                                      |
-| `status`          | Asking whether a session exists without provoking an error      |
-| `diag`            | Structured fields AND the records under them, not text to `sed` |
-| `trigger`         | The write → poll → timeout → clean-up loop, written once        |
-| `shot`            | A capture path per call, and refusals reported as refusals      |
-| `read_capture`    | The picture itself, for an agent not on this machine            |
-| `build_mod`       | Encodes tModLoader's refusal to build while the game is open    |
-| `logs`            | Any log, filtered — including the run that already rotated away |
-| `heartbeat`       | WHICH silence — absent, stale, still loading, or not armed      |
-| `inventory`       | The worlds, characters and mods `launch` needs and cannot check |
+| Tool              | What it buys over `bash`                                         |
+| ----------------- | ---------------------------------------------------------------- |
+| `launch` / `stop` | Session state across calls                                       |
+| `status`          | Asking whether a session exists without provoking an error       |
+| `diag`            | Structured fields AND the records under them, not text to `sed`  |
+| `trigger`         | The write → poll → timeout → clean-up loop, written once         |
+| `shot`            | A capture path per call, and refusals reported as refusals       |
+| `read_capture`    | The picture itself, for an agent not on this machine             |
+| `build_mod`       | Encodes tModLoader's refusal to build while the game is open     |
+| `logs`            | Any log, filtered — including the run that already rotated away  |
+| `heartbeat`       | WHICH silence — absent, stale, still loading, or not armed       |
+| `inventory`       | The worlds, characters and mods `launch` needs and cannot check  |
+| `prune_captures`  | Removing captures without a delete loose enough to reach a world |
 
 Captures are also addressable as `capture://{name}` resources. Both surfaces go
 through one reader that accepts a **name, never a path**, and serves only

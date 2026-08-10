@@ -75,6 +75,24 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ### Added
 
+- **New `prune_captures` tool — captures accumulated forever.** `shot` writes
+  one per call and nothing ever removed them, so an agent photographing in a
+  loop grew the SAVE DIRECTORY without bound: the folder holding the worlds and
+  characters, which is not a cache. `keep` is REQUIRED and has no default, the
+  same way `shot` requires a region — this deletes files, and a destructive
+  tool that runs with no arguments is one that gets called by accident. (#28)
+- `captures.contained()` — the containment check `read` always had, extracted
+  so `prune` uses the identical one. This module's own header says two paths to
+  one file is how one of them ends up weaker, and the newer caller here is the
+  one that DELETES. A capture-shaped symlink pointing out of the save directory
+  passes the name pattern and really is in the directory; only resolving it
+  shows otherwise, and a prune that unlinked whatever `iterdir` returned would
+  not have noticed. (#28)
+- `prune` validates the whole doomed set BEFORE unlinking anything, so a
+  refusal costs nothing instead of leaving some files gone, an exception
+  raised, and no record of where it stopped. Ordering is by MTIME rather than
+  by the index in the filename: the index is this harness's counter, the
+  timestamp is the disk's account of what happened. (#28)
 - **New `inventory` tool — the worlds, characters and mods this install has.**
   `launch` states two preconditions and could check neither: `player` must
   already exist (it does not create one, and a duplicate is kicked) and `world`
