@@ -75,6 +75,19 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ### Added
 
+- **The server had no prompts at all; now it has two.** `diagnose_silence`
+  walks the four reasons the mod might not answer, and `start_a_session` lists
+  the worlds and characters that exist on this machine. Both READ THE INSTALL
+  rather than reciting prose — the diagnostic arrives with the heartbeat, mod
+  list and log inventory already taken, and the session prompt with the actual
+  Windows world paths. The decision tree existed correctly across four separate
+  docstrings and was assembled nowhere, so following it required reading four
+  tools' documentation and knowing to. (#30)
+- Both prompts render a failure INTO the text instead of raising it. A
+  diagnostic is read when things are broken, so an unusable configuration is a
+  likely state rather than an exceptional one — and it is the diagnosis. The
+  exception text is included verbatim rather than summarised, which is the
+  difference between reporting the fault and hiding it. (#30)
 - **`launch` took a world, used it, and forgot it.** `Session` recorded the
   mode, port and player and not the world, so `status` could describe a running
   session while staying silent about the only field saying WHICH WORLD was
