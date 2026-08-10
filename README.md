@@ -152,6 +152,43 @@ will ask for it by name.
 The two describe one directory. If you set both to different places the server
 refuses to start and says so, rather than driving one and building the other.
 
+## Using it from Claude Code
+
+A `.mcp.json` ships with the repository, so a session started in this directory
+finds the server:
+
+```json
+{
+  "mcpServers": {
+    "tmodloader": {
+      "command": "uv",
+      "args": ["run", "tmodloader-mcp"],
+      "env": {
+        "TMODLOADER_SAVE_DIR": "${TMODLOADER_SAVE_DIR}",
+        "TMODLOADER_MOD_SOURCE": "${TMODLOADER_MOD_SOURCE}"
+      }
+    }
+  }
+}
+```
+
+The two paths are **read from your environment rather than written down**. A
+committed config with real paths in it would put back exactly what the required
+variables took out, and it would be one person's paths in everybody's checkout.
+Export them first; `claude mcp list` names any that are missing.
+
+A project-scoped `.mcp.json` needs approving once — Claude Code will not run a
+server a repository asked it to run without being told to. Start `claude` in
+this directory and accept the prompt.
+
+To drive the harness from the directory where you actually develop your mod,
+copy the block into that project's `.mcp.json` and point `--directory` at this
+checkout:
+
+```json
+"args": ["run", "--directory", "/path/to/tmodloader-mcp", "tmodloader-mcp"]
+```
+
 ## Phase 2 — what would make this yours
 
 1. ~~Artifact filenames are one mod's~~ — **done.** Every artifact name is
