@@ -37,6 +37,7 @@ import asyncio
 import json
 import shutil
 import sys
+from pathlib import Path
 
 import pytest
 from mcp.client.session import ClientSession
@@ -57,6 +58,7 @@ EXPECTED_TOOLS = {
     "status",
     "logs",
     "log_files",
+    "heartbeat",
     "stop",
 }
 
@@ -396,3 +398,78 @@ def test_the_capture_resource_is_as_contained_as_the_tool(fake_install):
 
     served = [uri for uri, denied in refused if denied is None]
     assert not served, f"the resource served {served}"
+
+
+@needs_subprocess
+def test_heartbeat_answers_with_no_game_and_no_session(fake_install):
+    """The tool exists FOR the case where nothing else works, so it is tested there.
+
+    THIS TEST EXISTS BECAUSE ADVERTISED IS NOT WORKING. `heartbeat` shipped for
+    a few minutes with its module import stripped by the formatter — added
+    before its first use, removed as unused, and the name only appears inside
+    the function body, so it was a NameError at CALL time and not at import.
+    The registry listed it, the drift guard counted it, 213 of 214 tests passed,
+    and the tool could not run. That is the `status` bug's exact shape: the
+    surface was right and nothing called through it.
+
+    Both sides absent is the single most informative reading this can give — it
+    is the difference between a mod that is slow and one that was never loaded —
+    so it is a value here, not an error.
+    """
+
+    async def call(session):
+        return await session.call_tool("heartbeat", {})
+
+    out = _structured(_run(call, fake_install))
+
+    for side in ("client", "server"):
+        assert out[side]["present"] is False, f"{side} invented a heartbeat"
+        assert out[side]["live"] is False
+        assert out[side]["age_seconds"] is None
+        assert out[side]["fields"] == {}
+        assert "not loaded" in out[side]["diagnosis"]
+
+
+@needs_subprocess
+def test_heartbeat_reads_a_real_one_and_types_its_booleans(fake_install):
+    """POSITIVE CONTROL for the test above, which asserts only absences.
+
+    A reader that returned `present: False` unconditionally — or that crashed
+    and was reported as absent — would pass that test completely. This writes an
+    actual heartbeat into the fake install's save directory and reads it back
+    through the protocol, so the schema validates the mixed-type `fields` dict
+    on the way out.
+
+    The booleans are checked with `is`, not truthiness: they arrived as the
+    strings `"True"`/`"False"` until the parser learned this file's shapes, and
+    `"False"` is truthy, so `assert out["armed"]` passed on a game that was not.
+    """
+    save = Path(fake_install["TMODLOADER_SAVE_DIR"])
+    (save / "fakemod-hooks.txt").write_text(
+        "gameMenu: False\n"
+        "dedServ: False\n"
+        "trigger-exists: False\n"
+        "world-ready: True\n"
+        "capture-ready: True\n"
+        "armed: True\n"
+        "polls: 194\n"
+    )
+
+    async def call(session):
+        return await session.call_tool("heartbeat", {})
+
+    out = _structured(_run(call, fake_install))
+
+    client = out["client"]
+    assert client["present"] is True
+    assert client["live"] is True
+    assert client["side"] == "client", "side comes from dedServ, not the filename"
+    assert client["world_ready"] is True
+    assert client["armed"] is True
+    assert client["fields"]["polls"] == 194
+    assert client["fields"]["gameMenu"] is False
+    assert "can answer" in client["diagnosis"]
+
+    # And the side that genuinely has no file still reports absent, so the
+    # reader is answering per-side rather than returning one answer twice.
+    assert out["server"]["present"] is False
