@@ -941,6 +941,152 @@ def stop(settle: float = session_mod.KILL_SETTLE) -> StopOut:
     return StopOut(killed_pids=killed, note=None)
 
 
+def _reading(label: str, produce) -> str:
+    """One live reading for a prompt, or the reason there isn't one.
+
+    A prompt that diagnoses a broken install is READ WHEN THINGS ARE BROKEN, so
+    the config being unusable is a likely state rather than an exceptional one.
+    The failure is put in the text instead of raised: a diagnostic that refuses
+    to render because something is wrong has failed at the one moment it was
+    for. The exception text is included verbatim rather than summarised, which
+    is the difference between reporting the fault and hiding it.
+    """
+    try:
+        return f"{label}: {produce()}"
+    except Exception as exc:  # noqa: BLE001 - the reason IS the diagnostic
+        return f"{label}: could not be read - {type(exc).__name__}: {exc}"
+
+
+@mcp.prompt(
+    title="Why is the mod not answering?",
+    description="The four silences, with this install's current readings.",
+)
+def diagnose_silence() -> str:
+    """Walk the decision tree with live readings already taken.
+
+    The tree exists across four docstrings — `commands` explains `responder:
+    false`, `heartbeat` names the four silences, `inventory` splits "not built"
+    from "switched off", and `launch` says why a timeout blames the wrong
+    thing. Correct in each place and assembled nowhere, so following it meant
+    reading four tools' documentation and knowing to.
+    """
+    cfg_error = None
+    try:
+        cfg = _cfg()
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        cfg, cfg_error = None, f"{type(exc).__name__}: {exc}"
+
+    if cfg is None:
+        readings = (
+            f"Nothing could be read: the configuration is unusable.\n\n{cfg_error}\n\n"
+            "That IS the diagnosis - fix the paths before looking at the mod."
+        )
+    else:
+        client = heartbeat_mod.read(cfg.artifact(cfg.artifacts.heartbeat, server=False))
+        server = heartbeat_mod.read(cfg.artifact(cfg.artifacts.heartbeat, server=True))
+        readings = "\n".join(
+            [
+                f"mod under test: {cfg.mod_name}",
+                f"client heartbeat: {heartbeat_mod.diagnose(client)}",
+                f"server heartbeat: {heartbeat_mod.diagnose(server)}",
+                _reading(
+                    "mods installed",
+                    lambda: [
+                        f"{m.name} (enabled={m.enabled}, built_here={m.built_here})"
+                        for m in inventory_mod.mods(cfg.save_dir)
+                    ],
+                ),
+                _reading("logs present", lambda: logs_mod.available(cfg.tml_dir)),
+            ]
+        )
+
+    return f"""\
+The mod is not answering. Work out WHICH silence this is before changing
+anything — the four have four different fixes, and three of them are not a
+code change.
+
+CURRENT READINGS
+
+{readings}
+
+THE TREE
+
+1. No heartbeat on disk at all. Nothing ever wrote one, so the responder is
+   not running. Check `inventory`: a mod with `built_here: false` was never
+   compiled here, and one with `enabled: false` is switched off in the mod
+   list. If it is both built and enabled, it was compiled without the dev
+   bridge — the responder is a source-level thing, not a runtime flag.
+
+2. A heartbeat that is STALE. The file outlives the process, so this is a
+   game that ran and is no longer running, and it looks identical to a live
+   one to anything that only checks the file exists. `logs` on the previous
+   run (`previous=true`) is where the crash is, not the current log — a new
+   run zips the old one away.
+
+3. Live, but no world loaded. Nothing is wrong yet; it is still starting.
+   Wait, or raise the `launch` timeout. Do not rebuild.
+
+4. Live, world loaded, bridge NOT ARMED. The mod is running and its trigger
+   responder is not listening. This is the only one of the four that is
+   really a mod-side bug.
+
+WHAT NOT TO CONCLUDE
+
+`commands` reporting `responder: false` does not mean the mod is broken —
+it means no command list was published, which is 1, 2 and 4 all at once. A
+readiness TIMEOUT from `launch` does not mean the machine is slow: it is
+whatever the heartbeat says above, reported as a wait.
+"""
+
+
+@mcp.prompt(
+    title="Start a session on this machine",
+    description="The worlds and characters that actually exist here.",
+)
+def start_a_session() -> str:
+    """`launch` has two preconditions it cannot check. This shows them met.
+
+    Reads the install rather than describing one, because "pass a world path"
+    is advice and a list of the three worlds on this disk is an answer.
+    """
+    try:
+        cfg = _cfg()
+        worlds = inventory_mod.worlds(cfg.save_dir)
+        players = inventory_mod.players(cfg.save_dir)
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        return (
+            "This install cannot be read, so there is nothing to launch yet:\n\n"
+            f"{type(exc).__name__}: {exc}\n\n"
+            "Fix the configured paths first — every one is an environment "
+            "variable, and the error above names the one that is wrong."
+        )
+
+    listing = "\n".join(
+        f"  - {w.name}: {w.path_win or 'NO WINDOWS PATH'}" for w in worlds
+    )
+    return f"""\
+Start a driven session on this machine.
+
+WORLDS HERE (pass `world` as the Windows path, which is what tModLoader needs
+— it runs as a Windows process and cannot resolve a /mnt path):
+
+{listing or "  (none — a world has to be created in the game first)"}
+
+CHARACTERS HERE: {", ".join(players) or "(none — `launch` cannot create one)"}
+
+`player` must be one of those names. `-player` does not create a character,
+and a duplicate name is kicked rather than joined.
+
+THE ONLY MODE IS `server_client`. Singleplayer has no headless entry point and
+an empty dedicated server never ticks, so the mod never polls and never
+answers; both are refused with the measurement rather than attempted.
+
+Then: `build_mod` if the code changed, `launch`, and `commands` to see what
+this mod actually serves. If nothing answers, use the `diagnose_silence`
+prompt rather than guessing — a readiness timeout names the wrong cause.
+"""
+
+
 def main() -> None:
     mcp.run()
 
