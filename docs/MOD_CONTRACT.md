@@ -181,6 +181,29 @@ game, having passed every check available. A back-buffer read cannot contain
 another window by construction rather than by luck — and that guarantee is the
 reason this project exists.
 
+## Known limitation: one client per side
+
+The trigger payload can be **addressed** — `shot@n43n` asks one player by name,
+and the mod is expected to ignore a request aimed at somebody else. That much
+already works, and it is why `trigger` and `diag` take a `target`.
+
+What does not work is two clients at once, and the reason is here in this
+document rather than in the engine. tModLoader will happily start a second
+client: it is launched directly as `dotnet tModLoader.dll -join ...`, not
+through Steam, so nothing stops a second process joining the same server.
+
+The obstacle is that **everything a client writes is namespaced by side, not by
+player**. Two clients would share one `<mod>-hooks.txt`, one
+`<mod>-capture.txt`, one `<mod>-diag.txt` and one `<mod>-shot.png`. Requests
+could be told apart and answers could not: a heartbeat could not say which
+client was alive, and two captures would overwrite one drop box.
+
+Fixing it means extending the naming rule above so a client's artifacts carry
+the player as well as the side — a change to this contract, made on both sides
+at once. It is recorded here because "the client's view is where most sync bugs
+live" is this project's own justification for existing, and two clients seeing
+each other is the case that most deserves testing and currently cannot be.
+
 ## What the harness clears
 
 Before every launch it deletes all six. A heartbeat or a command list left by
