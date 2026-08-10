@@ -32,6 +32,7 @@
     <Compile Include="ShotRegionTests.cs" />
     <Compile Include="CaptureBoundsTests.cs" />
     <Compile Include="CaptureFindTests.cs" />
+    <Compile Include="DevResponderContractTests.cs" />
     <Compile Include="VendorBoundaryTests.cs" />
   </ItemGroup>
 </Project>
