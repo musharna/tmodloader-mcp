@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- THE PROOF. Nothing of any mod's appears on this list. FrameShot is
+         absent because it imports Terraria and XNA, which are not on a build
+         machine; it is covered by the source scan in DevBridgeBoundaryTests
+         instead, and that limit is stated there. -->
+    <Compile Include="../DevArtifacts.cs" />
+    <Compile Include="../DevBridgeGate.cs" />
+    <Compile Include="../DevCommandRegistry.cs" />
+    <Compile Include="../DevCommands.cs" />
+    <Compile Include="../ShotRegion.cs" />
+    <Compile Include="../CaptureBounds.cs" />
+    <Compile Include="../CaptureFind.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="DevCommandsTests.cs" />
+    <Compile Include="DevCommandRegistryTests.cs" />
+    <Compile Include="DevBridgeGateTests.cs" />
+    <Compile Include="DevArtifactsTests.cs" />
+    <Compile Include="DevArtifactNamesTests.cs" />
+    <Compile Include="ShotRegionTests.cs" />
+    <Compile Include="CaptureBoundsTests.cs" />
+    <Compile Include="CaptureFindTests.cs" />
+    <Compile Include="DevResponderContractTests.cs" />
+    <Compile Include="VendorBoundaryTests.cs" />
+  </ItemGroup>
+</Project>

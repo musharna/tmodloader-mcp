@@ -11,6 +11,47 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Added
+
+- **The mod-side half is now yours: `responder/`.** The responder that answers
+  every trigger used to live inside Biomancy, so what this project could offer
+  another mod was a document to implement. It is now a folder you copy into your
+  mod's source tree and subclass — nine `.cs` files, one abstract class, two
+  overrides.
+
+  It is source rather than a package because tModLoader has no dependency
+  mechanism for compile-time C#; a `modReference` links a built `.tmod`, which
+  is a different thing. Vendoring is not a shortcut around packaging here, it is
+  what packaging would look like.
+
+  **This was an extraction, not a rewrite.** The DevBridge layer had already
+  been built to separate the harness protocol from Biomancy's verbs — the parse,
+  the registry, the artifact naming and the capture geometry were generic
+  before anything moved. What was not separable was the dispatch: the generic
+  half and the mod's half were one enum and one switch, so neither could be
+  lifted without the other coming along. `DevCommandRegistry` is what replaced
+  that switch, and it is the reason the base class's three verbs and a mod's own
+  can be published as one ordered list from two different classes.
+
+  **What the compile line proves that a source scan cannot.** Reading the files
+  and finding no `using Biomancy` is an argument. `responder/tests/` compiles
+  them with nothing of any mod's on the compile line, on a CI runner with no
+  tModLoader installed, on every push — so vendorability is checked by the
+  compiler rather than asserted by a reviewer. Two files sit outside that
+  project because they need Terraria, XNA and `ModSystem`, which no build runner
+  has: they are covered by a source-scan contract test and by a live run against
+  a real game, where the extracted responder answered on both the client and the
+  dedicated server with its three verbs leading the published list.
+
+  Biomancy now runs on the vendored copy rather than its own, which is what
+  keeps the claim honest — the reference implementation is a consumer of this
+  folder, not its owner. Its `DevCapture` went from 1442 lines to 678.
+
+  **Not done: per-player artifact naming.** Two developers on one machine share
+  a save directory, so they share every artifact filename. Designed in the same
+  spec and deliberately left to its own change, so that a failure in the
+  extraction had one candidate cause rather than two.
+
 ### Fixed
 
 - **`shot` reported success on a file it never opened.** The drop file was

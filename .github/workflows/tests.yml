@@ -69,6 +69,27 @@ jobs:
       - name: pytest
         run: uv run --python ${{ matrix.python }} pytest -q
 
+  # The C# half. It compiles responder/ with nothing of any mod's on the compile
+  # line, which is the whole vendorability claim - so it runs here rather than
+  # depending on somebody having a game installed. It does NOT build a mod:
+  # `tModLoader.dll -build` needs the engine and a real install, and FrameShot
+  # is excluded from this project for the same reason.
+  responder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # global.json pins 8.0.x. Without it `dotnet` takes the highest SDK on the
+      # runner, which is not the one anybody develops against.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: dotnet test
+        run: dotnet test responder/tests/Responder.Tests.csproj --verbosity normal
+
   # The suite drives a Windows game through /mnt/c, so nothing here can test
   # THAT seam - a Linux runner has no tModLoader to launch. What runs is
   # everything that does not need one, which is all of it: no test touches a

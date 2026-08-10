@@ -1,0 +1,159 @@
+using System;
+
+namespace TModLoaderMcp.DevBridge
+{
+	/// <summary>
+	/// A parsed trigger: what to do, and optionally WHO should do it.
+	///
+	/// The target exists because two clients on one machine share Main.SavePath,
+	/// so they share a trigger file and would race for it - whichever polled
+	/// first would consume a request meant for the other, and the answer would be
+	/// attributed to the wrong player.
+	///
+	/// The obvious fix was a separate save directory per client, and it does not
+	/// work: an alternate save directory never auto-joins. `-join -player &lt;name&gt;
+	/// -skipselect` lands at the main menu under BOTH -savedirectory and
+	/// -tmlsavedirectory, with and without a Worlds folder, and - measured with
+	/// the user's own untouched character as a control - regardless of which
+	/// character is used. So the separation moved in here, where it is testable.
+	/// </summary>
+	public readonly struct DevRequest
+	{
+		public DevRequest(string verb, string target)
+			: this(verb, target, null) {
+		}
+
+		public DevRequest(string verb, string target, string argument) {
+			Verb = verb;
+			Target = target;
+			Argument = argument;
+		}
+
+		/// <summary>
+		/// The command word, lowercased, or null if the payload was malformed.
+		///
+		/// It used to be a DevCommand enum value, which meant PARSE decided what
+		/// was a real command - and it could only decide that because the set was
+		/// closed at compile time. The set now lives in DevCommandRegistry, so
+		/// this is the word as written and whether anything serves it is asked at
+		/// dispatch.
+		/// </summary>
+		public readonly string Verb;
+
+		/// <summary>
+		/// The part after a colon, or null. Which commands read one is the
+		/// registry's business, not the parser's.
+		/// </summary>
+		public readonly string Argument;
+
+		/// <summary>Player this is addressed to, or null for "whoever finds it".</summary>
+		public readonly string Target;
+
+		/// <summary>
+		/// The payload could not be read at all - as distinct from a well-formed
+		/// word nothing serves.
+		///
+		/// One enum value used to mean both, and they are not the same failure.
+		/// "diag@" is a trigger somebody composed wrong; "mutate" against a mod
+		/// that does not serve it is a trigger composed correctly for the wrong
+		/// mod. The second is exactly what a published command list lets a harness
+		/// avoid, so it is worth being able to say which happened.
+		/// </summary>
+		public bool IsMalformed => Verb == null;
+
+		/// <summary>
+		/// Whether this side should act on the request.
+		///
+		/// An untargeted request is for anyone, which keeps every existing script
+		/// working. A targeted one is for exactly one player, and a side with no
+		/// local player at all - a dedicated server - is never that player.
+		/// </summary>
+		public bool IsFor(string localPlayerName) {
+			if (string.IsNullOrEmpty(Target)) {
+				return true;
+			}
+
+			if (string.IsNullOrEmpty(localPlayerName)) {
+				return false;
+			}
+
+			return string.Equals(Target, localPlayerName, StringComparison.OrdinalIgnoreCase);
+		}
+	}
+
+	public static class DevCommands
+	{
+		/// <summary>
+		/// The verb a bare trigger means.
+		///
+		/// An empty or whitespace-only file means capture, because that is what a
+		/// bare `touch` of the trigger meant before commands existed and old
+		/// scripts should keep working.
+		/// </summary>
+		public const string DefaultVerb = "capture";
+
+		/// <summary>
+		/// Split the trigger's contents: "diag", or "diag@somebody", or
+		/// "shot:bottomleft@n43n".
+		///
+		/// This no longer decides whether a command EXISTS - see DevRequest.Verb.
+		/// It decides only whether the payload has a shape that can be delivered,
+		/// and an unrecognised word is still never treated as a default action:
+		/// silently taking a screenshot because someone misspelled "diag" would
+		/// look exactly like the command working.
+		///
+		/// The verb is lowercased; the TARGET keeps its case, because it is a
+		/// player name that gets shown back to a human. Comparison is still
+		/// case-insensitive - see DevRequest.IsFor.
+		/// </summary>
+		public static DevRequest Parse(string raw) {
+			if (raw == null) {
+				return new DevRequest(DefaultVerb, null);
+			}
+
+			// The shell writes with printf and no newline, but a human using echo
+			// gets one, and a Windows editor adds \r. None of those should change
+			// the meaning.
+			string text = raw.Trim();
+
+			if (text.Length == 0) {
+				return new DevRequest(DefaultVerb, null);
+			}
+
+			string target = null;
+			int at = text.IndexOf('@');
+			if (at >= 0) {
+				target = text.Substring(at + 1).Trim();
+				text = text.Substring(0, at).Trim();
+
+				// "diag@" addresses nobody. Treating that as untargeted would send
+				// it to whichever client polled first, which is the exact failure
+				// the target exists to prevent - so it is an error instead.
+				if (target.Length == 0 || text.Length == 0) {
+					return Malformed();
+				}
+			}
+
+			// The argument comes off AFTER the target, so "shot:bottomleft@n43n"
+			// parses as all three. An empty half is an error for the same reason
+			// "diag@" is: "shot:" names no region, and silently capturing some
+			// default would be a wider picture than was asked for.
+			string argument = null;
+			int colon = text.IndexOf(':');
+			if (colon >= 0) {
+				argument = text.Substring(colon + 1).Trim();
+				text = text.Substring(0, colon).Trim();
+
+				if (argument.Length == 0 || text.Length == 0) {
+					return Malformed();
+				}
+			}
+
+			return new DevRequest(text.ToLowerInvariant(), target, argument);
+		}
+
+		private static DevRequest Malformed() {
+			return new DevRequest(null, null);
+		}
+	}
+}

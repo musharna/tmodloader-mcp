@@ -8,11 +8,11 @@ one, so an assistant can see a real scene instead of guessing from a prompt.
 tModLoader has not had one. This is that.
 
 > **Status: alpha.** No path defaults to anybody's install any more — the two
-> that named a person are required, and the world is asked for rather than
-> guessed, and no command list is kept here to be wrong about. What is still not
-> yours is the mod-side half: the responder lives inside Biomancy rather than in
-> a package your mod can depend on, so there is nothing to embed in yours but a
-> document. See [Phase 2](#phase-2--what-would-make-this-yours).
+> that named a person are required, the world is asked for rather than guessed,
+> and no command list is kept here to be wrong about. The mod-side half is now
+> yours too: [`responder/`](responder/) is a folder you copy into your mod and
+> subclass, and CI compiles it with nothing of any mod's on the compile line.
+> See [Phase 2](#phase-2--what-would-make-this-yours).
 
 ## Why an MCP server rather than a shell script
 
@@ -106,16 +106,16 @@ so a request says which corner it wants.
 
 The mod side of that protocol — every filename, what each one contains, and
 which failures it has to be able to express — is written down in
-[`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md). Until the responder is extracted
-into something you can vendor, that document is what stands between "works for
-Biomancy" and "works for yours".
+[`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md), and implemented in
+[`responder/`](responder/). You can read the contract or vendor the folder; the
+folder is the same document with a compiler checking it.
 
 ## Requirements
 
 - Python 3.12+
 - tModLoader installed
-- A mod embedding the trigger-file responder (currently Biomancy's
-  `DevCapture` / `FrameShot` / `DiagReport`)
+- A mod embedding the trigger-file responder — copy [`responder/`](responder/)
+  into your mod's source tree and subclass `DevResponder`
 
 ## Configuration
 
@@ -192,12 +192,23 @@ Export them first; `claude mcp list` names any that are missing.
 
 **Export them where the client is launched, not only in an interactive shell.**
 The substitution is the _client's_, against its own environment, so a client
-started by a daemon or a desktop launcher — one that never sourced your
-`.zshrc` — has nothing to substitute and passes `${TMODLOADER_SAVE_DIR}` through
-as text. The server treats a value that is still its own name as absent and says
-so by that name, rather than reporting four problems about the variables derived
-from it. Nothing can be repaired from inside a running session: the value was
-gone before the process started, so fix the environment and restart the client.
+that never sourced your shell profile has nothing to substitute and passes
+`${TMODLOADER_SAVE_DIR}` through as text. The server treats a value that is
+still its own name as absent and says so by that name, rather than reporting
+four problems about the variables derived from it.
+
+**The usual cause is not a missing export — it is a client older than the
+export.** A process's environment is a copy taken when it starts, and nothing
+outside can add to it afterwards. So a long-lived parent — a daemon, an agent
+host, a desktop session — hands every client it spawns the environment it had
+on the day it started, however long ago that was, and adding the variables to
+your profile today does not reach it. The symptom is a shell where
+`env | grep TMODLOADER` prints all three sitting next to a server that sees
+none of them. Restarting the client is not enough if the thing that spawned the
+client is the stale one; restart that.
+
+Nothing can be repaired from inside a running session: the value was gone before
+the process started.
 
 A project-scoped `.mcp.json` needs approving once — Claude Code will not run a
 server a repository asked it to run without being told to. Start `claude` in
@@ -217,24 +228,32 @@ checkout:
    derived from the mod's internal name, which tModLoader takes from the source
    folder. Nothing needs setting for the usual case; `TMODLOADER_MOD_NAME`
    exists for a checkout whose folder is named something else.
-2. ~~Let the mod publish its own command list~~ — **done.** `compose` takes the
-   list the running side published and has no fallback, deliberately: a guess
-   about which commands exist is exactly what this replaces, and a fallback
-   would be that guess wearing a different name. What remains of this item is
-   the responder itself — extract it into a source package a mod can vendor,
-   rather than requiring Biomancy's copy.
+2. ~~Let the mod publish its own command list, and extract the responder~~ —
+   **done, both halves.** `compose` takes the list the running side published
+   and has no fallback, deliberately: a guess about which commands exist is
+   exactly what this replaces, and a fallback would be that guess wearing a
+   different name. And the responder itself now lives in
+   [`responder/`](responder/) — a folder you copy into your mod and subclass,
+   with its own test project compiling it against nothing of any mod's.
 3. ~~Make `TMODLOADER_MOD_SOURCE` required and drop the machine-specific
    defaults~~ — **done.** The save directory and mod source are required, and
    the world is asked for rather than defaulted to one developer's self-test
    world. What keeps a default is what is not personal: Steam's install path
    and the Windows binaries under System32.
-4. A template mod and documentation.
+4. A template mod. Mostly answered rather than done: `responder/` plus
+   [its README](responder/README.md) is a working mod-side half with the
+   subclass you need spelled out, which is most of what this item was asking
+   for. What is left is a whole compiling mod you can clone and run, and the
+   honest reason it has not been built is that nobody has yet needed one.
+5. Per-player artifact naming. Two developers on one machine share a save
+   directory, so they share every artifact filename. Designed, not built.
 
-Until 2 lands this is honestly a tool for one mod that happens to be built to
-generalise: the filenames, the paths and the command list are yours now — this
-side holds no opinion about any of them — but the responder that answers them
-still lives inside Biomancy, so what you can point this at is a document rather
-than code.
+The last thing that made this a tool for one mod is gone. The filenames, the
+paths and the command list were already yours — this side holds no opinion about
+any of them — and now the responder that answers them is a folder in this
+repository rather than a class inside Biomancy. Biomancy runs on the vendored
+copy, which is what keeps the claim honest: the reference implementation is a
+consumer of this folder, not the owner of it.
 
 ## Licence
 
