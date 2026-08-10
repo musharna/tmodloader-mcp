@@ -13,8 +13,8 @@ packaging would look like here.
 
 **1. Copy the folder** into your mod's source tree. Anywhere tModLoader compiles
 is fine; `Common/DevBridge/vendored/` is where the reference implementation puts
-it. Take the `.cs` files — `tests/` is this repository's proof and is not yours
-to carry.
+it. Take the `.cs` files and `SHA256SUMS` — `tests/` is this repository's proof
+and is not yours to carry.
 
 **2. Subclass `DevResponder`.** It is a `ModSystem`, so tModLoader finds and
 loads it with no registration on your part.
@@ -65,6 +65,36 @@ game that was never going to answer. The deeper reason no compile-time flag can
 work: the `.tmod` a player loads is the same artifact the developer builds,
 identical bytes. What differs is the install around them, and that is what this
 reads.
+
+## Checking your copy
+
+Copy `SHA256SUMS` along with the `.cs` files. It is a fingerprint of the folder
+at the moment you took it, and it answers the two questions a vendored copy
+eventually raises.
+
+**"Has anyone edited my copy?"** — offline, no network:
+
+```sh
+cd path/to/your/vendored/copy && sha256sum -c SHA256SUMS
+```
+
+A mismatch means somebody patched the copy instead of upstream. That patch will
+be destroyed the next time you re-sync, so it wants to go upstream before then.
+
+**"Am I behind upstream?"** — one small file to compare rather than nine
+sources:
+
+```sh
+curl -s https://raw.githubusercontent.com/musharna/tmodloader-mcp/master/responder/SHA256SUMS \
+  | diff - SHA256SUMS && echo "in sync"
+```
+
+Upstream CI keeps `SHA256SUMS` honest: a test regenerates the hashes and fails
+if they disagree with the sources, so the manifest cannot quietly describe an
+older version of the folder than the one sitting beside it.
+
+Re-syncing is a copy, not a merge — these files are meant to be byte-identical
+to upstream, which is the property both checks rest on.
 
 ## Why this was hard to extract, since the shape now looks obvious
 
