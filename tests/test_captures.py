@@ -15,6 +15,8 @@ So the tests that matter are the refusals, and each names what it is refusing.
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -135,3 +137,147 @@ def test_reading_does_not_depend_on_the_save_dir_being_absolute(tmp_path, monkey
     monkeypatch.chdir(tmp_path)
 
     assert captures.read(Path("."), "Biomancy", "biomancy-shot-001-full.png") == PNG
+
+
+# --- Pruning. This DELETES, in the user's save directory. -------------------
+
+
+def _shot(save, index, region="full", mod="biomancy", age=0.0):
+    """A capture on disk with a genuinely older mtime, not a patched clock."""
+    p = save / f"{mod}-shot-{index:03d}-{region}.png"
+    p.write_bytes(b"\x89PNG")
+    if age:
+        stamp = time.time() - age
+        os.utime(p, (stamp, stamp))
+    return p
+
+
+def test_pruning_keeps_the_newest_and_removes_the_rest(tmp_path):
+    for i, age in enumerate([500, 400, 300, 200, 100], start=1):
+        _shot(tmp_path, i, age=age)
+
+    removed = captures.prune(tmp_path, "Biomancy", keep=2)
+
+    assert removed == [
+        "biomancy-shot-001-full.png",
+        "biomancy-shot-002-full.png",
+        "biomancy-shot-003-full.png",
+    ]
+    assert captures.available(tmp_path, "Biomancy") == [
+        "biomancy-shot-004-full.png",
+        "biomancy-shot-005-full.png",
+    ]
+
+
+def test_pruning_orders_by_mtime_not_by_the_index_in_the_name(tmp_path):
+    """The index is OUR counter; the mtime is what the disk saw happen.
+
+    Written so the two orders DISAGREE: the highest-numbered capture is the
+    oldest file. An implementation sorting on the name keeps 003 and deletes
+    the freshest one, which is the opposite of what was asked.
+    """
+    _shot(tmp_path, 1, age=10)
+    _shot(tmp_path, 2, age=20)
+    _shot(tmp_path, 3, age=900)
+
+    removed = captures.prune(tmp_path, "Biomancy", keep=1)
+
+    assert captures.available(tmp_path, "Biomancy") == ["biomancy-shot-001-full.png"]
+    assert "biomancy-shot-003-full.png" in removed
+
+
+def test_pruning_never_touches_anything_that_is_not_a_capture(tmp_path):
+    """THE ONE THAT MATTERS. This runs in a directory holding worlds.
+
+    The save directory is not a cache — it holds the user's worlds, characters,
+    diag dumps and heartbeats, plus any OTHER mod's captures. A prune that
+    globbed loosely, or matched on `.png`, would delete someone's save file and
+    report a tidy number.
+    """
+    (tmp_path / "Worlds").mkdir()
+    (tmp_path / "Worlds" / "Long_Nooch.wld").write_bytes(b"world")
+    (tmp_path / "biomancy-diag.txt").write_text("diag")
+    (tmp_path / "biomancy-hooks.txt").write_text("heartbeat")
+    (tmp_path / "screenshot.png").write_bytes(b"not ours")
+    (tmp_path / "othermod-shot-001-full.png").write_bytes(b"another mod's")
+    _shot(tmp_path, 1, age=100)
+    _shot(tmp_path, 2, age=50)
+
+    removed = captures.prune(tmp_path, "Biomancy", keep=0)
+
+    assert removed == [
+        "biomancy-shot-001-full.png",
+        "biomancy-shot-002-full.png",
+    ]
+    # POSITIVE CONTROL: everything else is still there. Asserting only that the
+    # captures went would pass on an implementation that deleted the lot.
+    assert (tmp_path / "Worlds" / "Long_Nooch.wld").read_bytes() == b"world"
+    assert (tmp_path / "biomancy-diag.txt").is_file()
+    assert (tmp_path / "biomancy-hooks.txt").is_file()
+    assert (tmp_path / "screenshot.png").is_file()
+    assert (tmp_path / "othermod-shot-001-full.png").is_file()
+
+
+def test_keeping_more_than_exist_deletes_nothing(tmp_path):
+    _shot(tmp_path, 1)
+    _shot(tmp_path, 2)
+
+    assert captures.prune(tmp_path, "Biomancy", keep=10) == []
+    assert len(captures.available(tmp_path, "Biomancy")) == 2
+
+
+def test_a_negative_keep_is_refused_rather_than_treated_as_zero(tmp_path):
+    """`found[:-(-1)]` is `found[:1]`, which silently deletes the wrong set.
+
+    Negative slicing makes this a real hazard rather than a theoretical one: it
+    does not crash, it deletes a plausible-looking number of files.
+    """
+    _shot(tmp_path, 1)
+
+    with pytest.raises(captures.CaptureError, match="keep must be 0 or more"):
+        captures.prune(tmp_path, "Biomancy", keep=-1)
+
+    assert captures.available(tmp_path, "Biomancy") == ["biomancy-shot-001-full.png"]
+
+
+def test_pruning_an_absent_directory_is_empty_not_a_crash(tmp_path):
+    assert captures.prune(tmp_path / "nope", "Biomancy", keep=0) == []
+
+
+def test_pruning_serves_one_mod_and_not_its_neighbour(tmp_path):
+    """Two mods share one save directory, which is why the pattern takes a name."""
+    _shot(tmp_path, 1, mod="biomancy")
+    _shot(tmp_path, 1, mod="othermod")
+
+    assert captures.prune(tmp_path, "Othermod", keep=0) == [
+        "othermod-shot-001-full.png"
+    ]
+    assert captures.available(tmp_path, "Biomancy") == ["biomancy-shot-001-full.png"]
+
+
+def test_a_capture_shaped_symlink_out_of_the_directory_stops_the_prune(tmp_path):
+    """The delete path gets the same containment the read path has.
+
+    A symlink named exactly like a capture passes the name pattern and really
+    does sit in the save directory; only resolving it shows it points somewhere
+    else. `read` has refused this since it was written, and a `prune` that
+    called `unlink` on whatever `iterdir` handed back would not.
+
+    Nothing is deleted, because validation runs over the whole set before the
+    first unlink — a refusal halfway through would leave some files gone, an
+    exception raised, and no record of where it stopped.
+    """
+    outside = tmp_path.parent / "not-a-capture.png"
+    outside.write_bytes(b"someone else's file")
+    save = tmp_path / "save"
+    save.mkdir()
+    real = _shot(save, 1, age=100)
+    (save / "biomancy-shot-002-full.png").symlink_to(outside)
+
+    with pytest.raises(captures.CaptureError, match="outside"):
+        captures.prune(save, "Biomancy", keep=0)
+
+    # POSITIVE CONTROL on both sides: the link's target survives, and so does
+    # the legitimate capture that would otherwise have been deleted first.
+    assert outside.read_bytes() == b"someone else's file"
+    assert real.is_file(), "a refusal must not leave a half-finished prune"
