@@ -43,7 +43,15 @@ class Diag:
 
 #: `key: value`, one per line. Values may contain colons (paths do), so the
 #: split is on the FIRST colon only.
-_LINE = re.compile(r"^(?P<key>[a-z0-9][a-z0-9-]*): ?(?P<value>.*)$")
+#:
+#: The key class accepts UPPERCASE because this grammar serves two artifacts,
+#: not one. It was `[a-z0-9][a-z0-9-]*`, which is every key the diag dump has
+#: ever had — and neither `gameMenu` nor `dedServ`, which the heartbeat writes.
+#: Those two matched nothing and were dropped in silence, so the field naming
+#: the side that wrote the file was invisible to everything downstream. A key
+#: pattern is a claim about naming conventions, and this one had learned only
+#: one file's.
+_LINE = re.compile(r"^(?P<key>[A-Za-z0-9][A-Za-z0-9-]*): ?(?P<value>.*)$")
 
 #: Lines the mod emits as "this side has none", which must not be mistaken for
 #: a real value. `NONE` is an empty readout; the N/A forms are a side that is
@@ -67,6 +75,21 @@ _ABSENT = {"NONE", "N/A (never sent to clients)", "N/A (no local player)"}
 #: No redundant leading zero: a count is never written `007`, so a zero-padded
 #: value is an identifier, and `int()` would silently renumber it.
 _COUNTER = re.compile(r"^-?(?:0|[1-9][0-9]*)$")
+
+#: A boolean, recognised by shape for the same reason a counter is.
+#:
+#: The heartbeat is six-elevenths booleans — `armed`, `world-ready`,
+#: `capture-ready`, `trigger-exists`, `gameMenu`, `dedServ` — and every one of
+#: them arrives as C#'s `bool.ToString()`. Left as text they are all TRUTHY,
+#: including `"False"`, so `if hb["armed"]` and `if hb["world-ready"]` both pass
+#: on a game that is neither. That is the `"0"` bug above wearing a different
+#: artifact: the value is right there, the type makes it unreadable, and nothing
+#: fails.
+#:
+#: Matched case-insensitively to agree with `triggers.world_is_ready`, which has
+#: read this same field out of this same file since before there was a parser
+#: for it. Two spellings of one rule is how they drift apart.
+_BOOLEAN = {"true": True, "false": False}
 
 #: Fields that stay text however numeric they look, because they NAME something
 #: rather than count it. `int()` on an identifier is lossy and irreversible: an
@@ -118,6 +141,10 @@ def parse(text: str) -> dict[str, Any]:
 
         if value in _ABSENT:
             out[key] = None
+            continue
+
+        if key not in _TEXT_FIELDS and value.lower() in _BOOLEAN:
+            out[key] = _BOOLEAN[value.lower()]
             continue
 
         if key not in _TEXT_FIELDS and _COUNTER.match(value):
