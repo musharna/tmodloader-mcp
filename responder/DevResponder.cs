@@ -186,9 +186,10 @@ namespace TModLoaderMcp.DevBridge
 		private static string HeartbeatName => Names.Heartbeat;
 
 		/// <summary>
-		/// Mid-session state dump. Same filename SelfTestSystem uses, but in
-		/// Main.SavePath rather than the working directory, so the two drivers
-		/// cannot overwrite each other's answer.
+		/// Mid-session state dump. A mod's own self-test driver may well write a
+		/// file by this name too, so this one lives in Main.SavePath rather than
+		/// the working directory and the two cannot overwrite each other's
+		/// answer.
 		/// </summary>
 		private static string DiagName => Names.Diag;
 
@@ -801,7 +802,7 @@ namespace TModLoaderMcp.DevBridge
 
 		/// <summary>
 		/// Full path to one of this side's artifacts. Every read and write of a
-		/// DevCapture file goes through here, so a side can never be given a name
+		/// responder file goes through here, so a side can never be given a name
 		/// the other side also answers to.
 		/// </summary>
 		private static string PathFor(string name) {

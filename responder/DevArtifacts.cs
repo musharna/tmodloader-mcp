@@ -3,7 +3,7 @@ using System.IO;
 namespace TModLoaderMcp.DevBridge
 {
 	/// <summary>
-	/// Names DevCapture's files per side.
+	/// Names the responder's files per side.
 	///
 	/// A dedicated server and a client running on one machine share a single
 	/// Main.SavePath, so one set of filenames is not a naming preference - it is
