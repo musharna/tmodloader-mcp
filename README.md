@@ -97,6 +97,12 @@ Captures name a **region** and have no default. The frame holds only the game,
 but that still includes a character name, a world name and any chat on screen,
 so a request says which corner it wants.
 
+The mod side of that protocol — every filename, what each one contains, and
+which failures it has to be able to express — is written down in
+[`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md). Until the responder is extracted
+into something you can vendor, that document is what stands between "works for
+Biomancy" and "works for yours".
+
 ## Requirements
 
 - Python 3.12+
