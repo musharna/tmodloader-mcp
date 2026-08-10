@@ -470,6 +470,11 @@ def shot(region: str, target: str | None = None, timeout: float = 60.0) -> ShotO
     This reads what the game rendered, not the screen, so no other window can
     appear in it — by construction rather than by luck. It also sees things the
     in-game capture camera cannot: dust and the interface layer.
+
+    The path comes back only once the bytes behind it are a WHOLE PNG. A file
+    exists from the moment it is created rather than the moment it is finished,
+    so waiting on the name alone would hand back half a picture as readily as a
+    whole one — and anything else that landed on that name as readily as either.
     """
     if _session is None:
         raise RuntimeError("no session — call `launch` first")
