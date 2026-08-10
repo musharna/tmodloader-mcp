@@ -25,8 +25,14 @@ tModLoader install, and a test that wants one is a test of the machine. But
 wants a few files to EXIST, so a directory tree with an empty `tModLoader.dll`
 in it satisfies it completely. See `fake_install`. The tools that need a
 running GAME - `build_mod`, `launch`, `trigger`, `commands`, `diag`, `shot`,
-`stop` - are still uncovered at this layer, and a fake install cannot reach
-them.
+`restart`, `stop` - are still uncovered at this layer, and a fake install
+cannot reach them. `live_protocol_check.py` is the only protocol-level
+evidence those work, and `test_live_check_contract.py` pins the list so it
+cannot quietly shrink.
+
+`restart` is a partial exception: its REFUSAL with no session is reachable
+here, and its result is not. That is worth knowing rather than glossing - the
+shape a returned result could get wrong is exactly the shape `status` did.
 
 Built against a fixture rather than skipped without one, because a skipped test
 reads exactly like a passing one in a CI log. This suite has already been
@@ -61,6 +67,8 @@ EXPECTED_TOOLS = {
     "heartbeat",
     "inventory",
     "prune_captures",
+    "log_since",
+    "restart",
     "stop",
 }
 
@@ -600,3 +608,78 @@ def test_pruning_refuses_a_negative_keep_over_the_protocol(fake_install):
 
     assert result.is_error
     assert (save / FAKE_CAPTURE).is_file(), "a refused prune deleted something"
+
+
+@needs_subprocess
+def test_log_since_returns_only_what_is_new_and_a_resume_point(fake_install):
+    """The whole read, then nothing, then just the appended part.
+
+    Driven over the protocol because `next_offset` is an int the caller feeds
+    straight back in — a field that arrived as a string, or went missing on the
+    way out, would break the loop while every direct call kept working.
+    """
+    log = Path(fake_install["TMODLOADER_DIR"]) / "tModLoader-Logs" / "client.log"
+
+    async def call(session, offset):
+        return await session.call_tool(
+            "log_since", {"name": "client.log", "offset": offset}
+        )
+
+    first = _structured(_run(lambda s: call(s, 0), fake_install))
+    assert first["lines"] == ["first line", "second line"]
+    assert first["restarted"] is False
+    assert first["next_offset"] > 0
+
+    nothing = _structured(_run(lambda s: call(s, first["next_offset"]), fake_install))
+    assert nothing["lines"] == []
+    assert nothing["next_offset"] == first["next_offset"]
+
+    with log.open("a") as handle:
+        handle.write("third line\n")
+
+    more = _structured(_run(lambda s: call(s, first["next_offset"]), fake_install))
+    assert more["lines"] == ["third line"], "it re-read lines it had already given out"
+
+
+@needs_subprocess
+def test_log_since_reports_a_rotated_log_rather_than_going_quiet(fake_install):
+    """tModLoader zips the old run and starts fresh; the old offset is past the end.
+
+    Reading there returns nothing forever, which looks exactly like a quiet
+    game. `restarted` is the difference between "nothing happened" and "the log
+    you were following no longer exists".
+    """
+    log = Path(fake_install["TMODLOADER_DIR"]) / "tModLoader-Logs" / "client.log"
+    log.write_text("a much longer first run than the retry that follows it\n")
+
+    async def call(session, offset):
+        return await session.call_tool(
+            "log_since", {"name": "client.log", "offset": offset}
+        )
+
+    first = _structured(_run(lambda s: call(s, 0), fake_install))
+    log.write_text("retry\n")
+    second = _structured(_run(lambda s: call(s, first["next_offset"]), fake_install))
+
+    assert second["restarted"] is True
+    assert second["lines"] == ["retry"]
+
+
+@needs_subprocess
+def test_restart_without_a_session_refuses_instead_of_launching_something(fake_install):
+    """`restart` reuses a session's settings, so with none there is nothing to reuse.
+
+    Guessing here would be the worst option available: it would start a game on
+    the DEFAULT world and port, which is the substitution this tool exists to
+    prevent. The refusal is the only part of `restart` a fake install can
+    reach — the rest is driven by `live_protocol_check.py`.
+    """
+
+    async def call(session):
+        return await session.call_tool("restart", {})
+
+    result = _run(call, fake_install)
+
+    assert result.is_error
+    text = "".join(c.text for c in result.content if hasattr(c, "text"))
+    assert "launch" in text.lower(), f"the refusal does not say what to do: {text}"

@@ -146,6 +146,11 @@ async def journey(session: ClientSession) -> None:
 
     check("mode echoed", launched.get("mode") == "server_client", str(launched))
     check("port echoed", launched.get("port") == PORT, str(launched))
+    # `launch` used to take a world and forget it, so this was null for every
+    # session. Captured here to compare after the restart, which is the only
+    # way to catch a relaunch quietly substituting the configured default.
+    world_before = launched.get("world")
+    check("world reported", bool(world_before), "launch did not say which world")
     check(
         "pids reported",
         isinstance(launched.get("started_pids"), list)
@@ -283,6 +288,39 @@ async def journey(session: ClientSession) -> None:
         print(">>> an unknown command is refused")
         bad = await session.call_tool("trigger", {"command": "creeep"})
         check("bad command refused", bad.is_error, "it was accepted")
+
+        print(">>> restart - reuses the session's own settings, keeps the world")
+        # build=False deliberately. The compile is already covered by the
+        # `build_mod` call at the top, and skipping it here exercises the
+        # NULLABLE half of the result - `built` and `build_summary` both null -
+        # which is the branch `status` was broken in and the one a fake install
+        # can never reach.
+        again = structured(
+            await session.call_tool("restart", {"build": False}), "restart"
+        )
+        if again is not None:
+            check("restart reported pids", bool(again.get("started_pids")), str(again))
+            check(
+                "the world survived the restart",
+                again.get("world") == world_before,
+                f"was {world_before!r}, now {again.get('world')!r}",
+            )
+            check("port survived", again.get("port") == PORT, str(again.get("port")))
+            check(
+                "build was skipped", again.get("built") is None, str(again.get("built"))
+            )
+            note(
+                f"restarted world={again.get('world')} pids={again.get('started_pids')}"
+            )
+
+        print(">>> the mod still answers after the restart")
+        after = structured(await session.call_tool("diag", {}), "diag after restart")
+        if after is not None:
+            check(
+                "diag answers again",
+                bool(after.get("fields")),
+                "the relaunched session never became answerable",
+            )
 
     finally:
         print(">>> stop")

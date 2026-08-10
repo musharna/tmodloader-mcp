@@ -84,6 +84,39 @@ class LaunchOut(TypedDict):
     mode: str
     port: int
     player: str
+    # The world RESOLVED - the argument if one was given, the configured
+    # default otherwise. Reporting the argument would say `null` for the
+    # commonest case and never name the world that actually loaded.
+    world: str | None
+    started_pids: list[int]
+
+
+class LogSinceOut(TypedDict):
+    lines: list[str]
+    next_offset: int
+    restarted: bool
+
+
+class RestartOut(TypedDict):
+    """Flat on purpose.
+
+    A nested `BuildOut | None` was the obvious shape and is the shape that
+    broke `status`: an optional key the schema generator promotes to required,
+    invisible to anything that calls the function directly. This tool needs a
+    running game, so CI cannot drive it over the protocol and cannot catch that
+    class of mistake here — which is a reason to avoid the risky shape, not to
+    assume it would have been fine.
+    """
+
+    killed_pids: list[int]
+    # Null when no build was asked for, which is different from a build that
+    # ran and failed.
+    built: bool | None
+    build_summary: str | None
+    mode: str
+    port: int
+    player: str
+    world: str | None
     started_pids: list[int]
 
 
@@ -115,6 +148,10 @@ class StatusOut(TypedDict):
     mode: str | None
     port: int | None
     player: str | None
+    # `launch` took a world, used it, and forgot it, so this could report the
+    # mode, port and player of a session while staying silent about the only
+    # field that says WHICH WORLD is loaded.
+    world: str | None
     started_pids: list[int] | None
 
 
@@ -279,6 +316,7 @@ def launch(
         mode=_session.mode,
         port=_session.port,
         player=_session.player,
+        world=_session.world,
         started_pids=sorted(_session.started),
     )
 
@@ -552,7 +590,12 @@ def status() -> StatusOut:
     """
     if _session is None:
         return StatusOut(
-            running=False, mode=None, port=None, player=None, started_pids=None
+            running=False,
+            mode=None,
+            port=None,
+            player=None,
+            world=None,
+            started_pids=None,
         )
 
     return StatusOut(
@@ -560,6 +603,7 @@ def status() -> StatusOut:
         mode=_session.mode,
         port=_session.port,
         player=_session.player,
+        world=_session.world,
         started_pids=sorted(_session.started),
     )
 
@@ -733,6 +777,132 @@ def heartbeat() -> HeartbeatOut:
         )
 
     return HeartbeatOut(client=out["client"], server=out["server"])
+
+
+@mcp.tool(
+    title="Read what a log has gained",
+    annotations=_READ_ONLY,
+    structured_output=True,
+)
+def log_since(name: str, offset: int = 0, contains: str | None = None) -> LogSinceOut:
+    """Only what a log has gained since you last looked.
+
+    Args:
+        name: A log filename from `log_files`.
+        offset: The `next_offset` from your previous call, or 0 to start at the
+            beginning. BYTES, not lines — a line count is not a resume point,
+            because the number of lines you have read is not where the file
+            continues.
+        contains: Case-insensitive filter, applied to the new lines only.
+
+    NOT A LIVE TAIL, and it cannot be one. Tools here are synchronous and a
+    game session is process-global state, so a `launch` blocking for five
+    minutes is not something another call watches from the side. What this
+    buys is the read between calls: `logs` re-reads a file that grows all run,
+    and this returns the new part.
+
+    `restarted` is the field to check. tModLoader ZIPS the previous run's logs
+    and starts fresh, so an offset from a run that has since rotated points
+    past the end of a now-shorter file. Reading there would report an empty log
+    forever, which looks exactly like a quiet game rather than like a log that
+    restarted underneath you. When that happens the read begins again at zero
+    and says so, because handing back the whole file is only correct if the
+    caller is told why.
+    """
+    cfg = _cfg()
+    since = logs_mod.read_since(cfg.tml_dir, name, offset=offset)
+
+    # The cap is however many lines arrived, which is no cap at all - reused
+    # rather than reimplemented so the `contains` filter behaves identically to
+    # `logs`. Truncating here would drop the middle of a burst while still
+    # advancing the offset past it: log lost, with a resume point claiming
+    # otherwise. `or 1` only covers the empty read, where either value returns
+    # nothing.
+    new_lines = since.text.splitlines()
+    return LogSinceOut(
+        lines=logs_mod.tail(since.text, contains=contains, lines=len(new_lines) or 1),
+        next_offset=since.next_offset,
+        restarted=since.restarted,
+    )
+
+
+@mcp.tool(
+    title="Rebuild and relaunch the session",
+    annotations=_MUTATES,
+    structured_output=True,
+)
+def restart(
+    build: bool = True, timeout: float = 300.0, build_timeout: float = 600.0
+) -> RestartOut:
+    """Stop, rebuild, and start again with the session's own settings.
+
+    Args:
+        build: Compile the mod between stopping and starting. On by default,
+            because picking up a code change is the reason this loop exists.
+        timeout: Seconds to wait for readiness on the relaunch.
+        build_timeout: Seconds to allow the compile.
+
+    THE ORDER IS THE POINT. tModLoader REFUSES to build while the game is open
+    and reports it with an error that reads like a compile failure, so
+    stop-then-build-then-launch is not a preference — building first sends you
+    hunting a syntax error that is not there. Three separate calls let a caller
+    get that order wrong; this one cannot.
+
+    The mode, port, player and WORLD come from the running session rather than
+    from arguments or defaults. That last one is why `Session` had to start
+    recording the world it resolved: a relaunch that fell back to the
+    configured default would quietly load a different world than the one being
+    tested, and report success.
+
+    Needs a running session, because a session is where those settings live.
+    With nothing running there is nothing to reuse — call `launch`.
+    """
+    global _session
+
+    if _session is None:
+        raise RuntimeError(
+            "no session to restart — `restart` reuses the running session's "
+            "mode, port, player and world, and there is none. Call `launch`."
+        )
+
+    mode, port, player, world = (
+        _session.mode,
+        _session.port,
+        _session.player,
+        _session.world,
+    )
+    cfg = _cfg()
+
+    killed = session_mod.stop(cfg, _session)
+    _session = None
+
+    built: bool | None = None
+    summary: str | None = None
+    if build:
+        result = build_mod_impl.build(cfg, timeout=build_timeout)
+        built, summary = result.ok, result.summary
+        if not result.ok:
+            # Deliberately NOT relaunching a mod that did not compile. The game
+            # would start, load the previous .tmod, and answer normally - so the
+            # session would look healthy while testing the code you just failed
+            # to build, which is worse than not starting at all.
+            raise RuntimeError(
+                f"build failed, so nothing was relaunched: {result.summary}"
+            )
+
+    _session = session_mod.launch(
+        cfg, mode, port=port, player=player, world=world, timeout=timeout
+    )
+    return RestartOut(
+        killed_pids=killed,
+        built=built,
+        build_summary=summary,
+        mode=_session.mode,
+        port=_session.port,
+        player=_session.player,
+        world=_session.world,
+        started_pids=sorted(_session.started),
+    )
 
 
 @mcp.tool(

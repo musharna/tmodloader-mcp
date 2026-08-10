@@ -352,6 +352,7 @@ def test_the_protocol_check_drives_every_tool_that_needs_a_game():
         "trigger",
         "diag",
         "shot",
+        "restart",
         "stop",
     }
 
