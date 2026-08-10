@@ -32,6 +32,8 @@ What earns the surface here is that a running game is not stateless:
 | `heartbeat`       | WHICH silence — absent, stale, still loading, or not armed       |
 | `inventory`       | The worlds, characters and mods `launch` needs and cannot check  |
 | `prune_captures`  | Removing captures without a delete loose enough to reach a world |
+| `log_since`       | Only what a log gained, and whether it rotated under you        |
+| `restart`         | stop -> build -> launch in the one order that works              |
 
 Captures are also addressable as `capture://{name}` resources. Both surfaces go
 through one reader that accepts a **name, never a path**, and serves only

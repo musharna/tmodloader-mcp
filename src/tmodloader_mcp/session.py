@@ -189,6 +189,17 @@ class Session:
     mode: str
     port: int
     player: str
+    #: The world this session actually loaded, RESOLVED - the caller's argument
+    #: if they gave one, and `cfg.world_win` if they did not. Storing the raw
+    #: argument would record `None` for the commonest case and lose which world
+    #: is running, which is the thing worth knowing.
+    #:
+    #: Kept because `launch` took `world`, used it, and forgot it. `status`
+    #: could therefore report the mode, port and player of a session while
+    #: staying silent about the only field that says WHICH WORLD - and anything
+    #: relaunching from a session's own parameters would quietly substitute the
+    #: configured default for the world that was asked for.
+    world: str | None = None
     started: set[int] = field(default_factory=set)
 
     # ---- artifacts -------------------------------------------------------
@@ -429,18 +440,20 @@ def launch(
             "directory and would consume each other's trigger files."
         )
 
-    session = Session(cfg=cfg, mode=mode, port=port, player=player)
+    # Resolved BEFORE the session is built, so the session records the world it
+    # actually loads rather than the argument it was handed.
+    world_arg = world or cfg.world_win
+    problem = world_problem(world_arg)
+    if problem:
+        raise SessionError(problem)
+
+    session = Session(cfg=cfg, mode=mode, port=port, player=player, world=world_arg)
 
     # Clear stale artifacts BEFORE launching. A heartbeat or reply left by a
     # previous run is what lets a readiness check pass against a dead process.
     for name in cfg.artifacts.all:
         for server in (False, True):
             cfg.artifact(name, server=server).unlink(missing_ok=True)
-
-    world_arg = world or cfg.world_win
-    problem = world_problem(world_arg)
-    if problem:
-        raise SessionError(problem)
 
     server_cmd = [
         str(cfg.dotnet),

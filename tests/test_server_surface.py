@@ -30,6 +30,9 @@ class FakeSession:
         self.mode = "server_client"
         self.port = 7810
         self.player = "n43n"
+        # `launch` resolves this and the session records it; a fake without it
+        # would let `status` drop the world and still pass.
+        self.world = r"C:\Worlds\Fake.wld"
         self.started = {4808, 42224}
         self.calls: list[tuple] = []
 
@@ -179,6 +182,7 @@ def test_status_reports_no_session_without_raising(no_session):
         "mode": None,
         "port": None,
         "player": None,
+        "world": None,
         "started_pids": None,
     }
 

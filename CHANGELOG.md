@@ -75,6 +75,35 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ### Added
 
+- **`launch` took a world, used it, and forgot it.** `Session` recorded the
+  mode, port and player and not the world, so `status` could describe a running
+  session while staying silent about the only field saying WHICH WORLD was
+  loaded — and anything relaunching from a session's own settings would
+  substitute the configured default for the world under test and report
+  success. `Session.world` now holds the RESOLVED world (the argument if given,
+  `cfg.world_win` otherwise; storing the raw argument would record `null` for
+  the commonest case), and both `status` and `launch` report it. **Breaking:**
+  `StatusOut` and `LaunchOut` gain a `world` key. (#29)
+- **New `restart` tool — stop, rebuild, relaunch, in the one order that works.**
+  tModLoader REFUSES to build while the game is open and says so with an error
+  that reads like a compile failure, so building before stopping sends you
+  hunting a syntax error that is not there. Three separate calls let a caller
+  get that order wrong; one cannot. Mode, port, player and world come from the
+  running session rather than from defaults — which is what `Session.world`
+  above had to exist for. A failed build deliberately does NOT relaunch: the
+  game would start, load the previous `.tmod` and answer normally, so the
+  session would look healthy while testing the code that just failed to
+  compile. (#29)
+- **New `log_since` tool — only what a log has gained.** `logs` re-reads a file
+  that grows all run. This takes a byte offset and returns the new part plus
+  the next offset. Bytes rather than lines because a line count is not a resume
+  point, and rather than characters because a character offset is not a seek
+  position in a file decoded with replacements. `restarted` is the field that
+  matters: tModLoader zips the previous run's logs and starts fresh, so an
+  offset from a rotated run points past the end of a now-shorter file, and
+  reading there reports an empty log forever — which looks exactly like a quiet
+  game. It is deliberately NOT a live tail and says so; tools here are
+  synchronous, so nothing watches a 300s `launch` from the side. (#29)
 - **New `prune_captures` tool — captures accumulated forever.** `shot` writes
   one per call and nothing ever removed them, so an agent photographing in a
   loop grew the SAVE DIRECTORY without bound: the folder holding the worlds and
