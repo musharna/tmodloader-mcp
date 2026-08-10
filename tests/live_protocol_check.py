@@ -30,6 +30,7 @@ whole reason the trigger-file protocol exists.
 """
 
 import asyncio
+import os
 import signal
 import sys
 import traceback
@@ -38,6 +39,7 @@ from pathlib import Path
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from tmodloader_mcp import config
 from tmodloader_mcp import server as server_mod
 
 #: The game takes tens of seconds to become answerable and the build can take
@@ -341,6 +343,33 @@ async def journey(session: ClientSession) -> None:
             check("no longer running", done.get("running") is False, str(done))
 
 
+def preflight() -> list[str]:
+    """What has to be exported before this can run, checked before it launches.
+
+    THIS SCRIPT BROKE WHEN THE DEFAULTS WERE REMOVED. It inherits the shell's
+    environment and sets none of it, so once `TMODLOADER_SAVE_DIR` and
+    `TMODLOADER_MOD_SOURCE` became required and the world default was dropped,
+    an unconfigured run died on its first tool call — and `TMODLOADER_WORLD_WIN`
+    would not have failed until `launch`, minutes in, with a game possibly
+    already spawned.
+
+    CI cannot catch this: the live scripts are not collected, by design. So the
+    check has to be here and has to run FIRST, before anything starts a process
+    it would then have to clean up.
+
+    The list comes from `config.REQUIRED_TO_LAUNCH` rather than being written
+    out here. Two live scripts need the same answer, and a copy in each is two
+    places to forget — which is the mistake this repo already made once, when a
+    drift guard was written for one script and a sibling was added a commit
+    later that it did not cover.
+    """
+    return [
+        name
+        for name in config.REQUIRED_TO_LAUNCH
+        if not os.environ.get(name, "").strip()
+    ]
+
+
 async def main() -> None:
     params = StdioServerParameters(
         command=sys.executable, args=["-m", "tmodloader_mcp.server"]
@@ -361,6 +390,15 @@ def run() -> int:
     launches Terraria on import cannot be checked by anything cheap, and the
     checks it needs most are the cheap ones.
     """
+    unset = preflight()
+    if unset:
+        print("=== cannot run: required configuration is not exported ===")
+        for name in unset:
+            print(f"  {name}")
+        print("\nThese have no defaults - every plausible one named somebody's")
+        print("own install. Export them and run this again.")
+        return 2
+
     try:
         asyncio.run(main())
     except Exception:  # noqa: BLE001 - the TYPE is not the contract, the code is

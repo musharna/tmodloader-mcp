@@ -1,10 +1,28 @@
 """Drive the real thing through the same code paths the MCP tools use."""
 
+import os
 import sys
 import traceback
 from pathlib import Path
 
-from tmodloader_mcp import server
+from tmodloader_mcp import config, server
+
+# BEFORE ANYTHING LAUNCHES. This script inherits the shell's environment and
+# sets none of it, so when the machine-specific defaults were removed it began
+# failing on its first call - and the world variable would not have failed
+# until `launch`, minutes in, with a game process possibly already spawned.
+#
+# CI cannot catch this: the live scripts are deliberately not collected. The
+# names come from `config.REQUIRED_TO_LAUNCH` so this and its sibling script
+# cannot drift apart.
+_unset = [n for n in config.REQUIRED_TO_LAUNCH if not os.environ.get(n, "").strip()]
+if _unset:
+    print("=== cannot run: required configuration is not exported ===")
+    for _name in _unset:
+        print(f"  {_name}")
+    print("\nThese have no defaults - every plausible one named somebody's")
+    print("own install. Export them and run this again.")
+    sys.exit(2)
 
 
 def step(name, fn):
