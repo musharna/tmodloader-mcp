@@ -9,10 +9,10 @@ tModLoader has not had one. This is that.
 
 > **Status: alpha.** No path defaults to anybody's install any more — the two
 > that named a person are required, and the world is asked for rather than
-> guessed. What is still not yours is the mod-side half: the responder lives
-> inside Biomancy rather than in a package your mod can depend on, so `trigger`
-> validates against Biomancy's command set. See
-> [Phase 2](#phase-2--what-would-make-this-yours).
+> guessed, and no command list is kept here to be wrong about. What is still not
+> yours is the mod-side half: the responder lives inside Biomancy rather than in
+> a package your mod can depend on, so there is nothing to embed in yours but a
+> document. See [Phase 2](#phase-2--what-would-make-this-yours).
 
 ## Why an MCP server rather than a shell script
 
@@ -27,7 +27,7 @@ What earns the surface here is that a running game is not stateless:
 | `status`          | Asking whether a session exists without provoking an error       |
 | `diag`            | Structured fields AND the records under them, not text to `sed`  |
 | `trigger`         | The write → poll → timeout → clean-up loop, written once         |
-| `shot`            | A capture path per call, and refusals reported as refusals       |
+| `shot`            | A path per call, a whole PNG behind it, refusals as refusals     |
 | `read_capture`    | The picture itself, for an agent not on this machine             |
 | `build_mod`       | Encodes tModLoader's refusal to build while the game is open     |
 | `logs`            | Any log, filtered — including the run that already rotated away  |
@@ -56,11 +56,18 @@ Those glue steps are where the hand-written version actually went wrong: a
 on a killed process's leftover heartbeat, and a capture that reported success
 while the thing it photographed had never drawn.
 
-That row used to promise a PNG header check. There was never one, in any
-version — the file is waited for and renamed, never opened. It is written down
-here rather than quietly corrected because a README is read by people deciding
-what they no longer have to check themselves, which makes an imagined guarantee
-worse than an absent one.
+That row promised a PNG check that did not exist, in any version — the file was
+waited for and renamed, never opened. The claim was written down here as absent
+rather than quietly corrected, because a README is read by people deciding what
+they no longer have to check themselves, which makes an imagined guarantee worse
+than an admitted gap.
+
+**It exists now,** and it checks both ends rather than the header the old claim
+described. A file appears when it is created rather than when it is finished, so
+a capture large enough to be worth taking can be read mid-write — and a truncated
+PNG has an entirely valid signature. So the trailer is what decides: bytes that
+are not a picture are refused at once, and a picture that is still arriving is
+waited for until the timeout. Neither is renamed into your captures.
 
 ## What it cannot do
 
@@ -210,9 +217,12 @@ checkout:
    derived from the mod's internal name, which tModLoader takes from the source
    folder. Nothing needs setting for the usual case; `TMODLOADER_MOD_NAME`
    exists for a checkout whose folder is named something else.
-2. Extract the mod-side responder into a source package a mod can vendor, rather
-   than requiring Biomancy's copy — and let it publish its own command list, so
-   this harness stops carrying one mod's twelve commands as the universe.
+2. ~~Let the mod publish its own command list~~ — **done.** `compose` takes the
+   list the running side published and has no fallback, deliberately: a guess
+   about which commands exist is exactly what this replaces, and a fallback
+   would be that guess wearing a different name. What remains of this item is
+   the responder itself — extract it into a source package a mod can vendor,
+   rather than requiring Biomancy's copy.
 3. ~~Make `TMODLOADER_MOD_SOURCE` required and drop the machine-specific
    defaults~~ — **done.** The save directory and mod source are required, and
    the world is asked for rather than defaulted to one developer's self-test
@@ -221,9 +231,10 @@ checkout:
 4. A template mod and documentation.
 
 Until 2 lands this is honestly a tool for one mod that happens to be built to
-generalise: the filenames and the paths are yours now, but the responder that
-answers them still lives inside Biomancy, and `trigger` still validates against
-Biomancy's command set.
+generalise: the filenames, the paths and the command list are yours now — this
+side holds no opinion about any of them — but the responder that answers them
+still lives inside Biomancy, so what you can point this at is a document rather
+than code.
 
 ## Licence
 

@@ -10,7 +10,9 @@ for as long as the object that generated it.
 
 from __future__ import annotations
 
+import struct
 import time
+import zlib
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,32 @@ from tmodloader_mcp.triggers import (
     TriggerError,
     artifacts_for,
 )
+
+
+def _chunk(kind: bytes, data: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(data))
+        + kind
+        + data
+        + struct.pack(">I", zlib.crc32(kind + data))
+    )
+
+
+def _png(marker: bytes) -> bytes:
+    """A REAL 1x1 PNG, carrying `marker` in a comment so two differ.
+
+    Built rather than faked - signature, IHDR, a zlib-compressed IDAT, and IEND
+    with correct CRCs - because a fixture assembled from whatever the check
+    happens to look at today cannot disagree with the check tomorrow. These
+    bytes open in an image viewer.
+    """
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+        + _chunk(b"tEXt", b"Comment\x00" + marker)
+        + _chunk(b"IDAT", zlib.compress(b"\x00\x00"))
+        + _chunk(b"IEND", b"")
+    )
 
 
 class FakeCfg:
@@ -115,7 +143,9 @@ def test_two_captures_do_not_overwrite_each_other(tmp_path, monkeypatch):
     which is why this survived a live run: the loss is silent, and the returned
     value looks correct in every log.
     """
-    sess = _session_that_captures(tmp_path, monkeypatch, [b"FIRST", b"SECOND"])
+    sess = _session_that_captures(
+        tmp_path, monkeypatch, [_png(b"FIRST"), _png(b"SECOND")]
+    )
 
     first = sess.shot("bottomleft")
     second = sess.shot("bottomright")
@@ -124,8 +154,8 @@ def test_two_captures_do_not_overwrite_each_other(tmp_path, monkeypatch):
         "both captures returned the same path, so the second overwrote the "
         "first and the caller cannot tell"
     )
-    assert first.read_bytes() == b"FIRST", "the first capture was clobbered"
-    assert second.read_bytes() == b"SECOND"
+    assert first.read_bytes() == _png(b"FIRST"), "the first capture was clobbered"
+    assert second.read_bytes() == _png(b"SECOND")
 
 
 def test_a_capture_survives_the_next_one_being_taken(tmp_path, monkeypatch):
@@ -135,12 +165,14 @@ def test_a_capture_survives_the_next_one_being_taken(tmp_path, monkeypatch):
     and reads it afterwards, which is what a caller collecting several regions
     before looking at any of them really does.
     """
-    sess = _session_that_captures(tmp_path, monkeypatch, [b"KEEP", b"LATER"])
+    sess = _session_that_captures(
+        tmp_path, monkeypatch, [_png(b"KEEP"), _png(b"LATER")]
+    )
 
     kept = sess.shot("topleft")
     sess.shot("topright")
 
-    assert kept.read_bytes() == b"KEEP"
+    assert kept.read_bytes() == _png(b"KEEP")
 
 
 def test_a_second_session_does_not_overwrite_the_first_ones_captures(
@@ -160,20 +192,101 @@ def test_a_second_session_does_not_overwrite_the_first_ones_captures(
     The counter was never the right source. A name has to be unique in the
     NAMESPACE it is written into, and that namespace is the save directory.
     """
-    first = _session_that_captures(tmp_path, monkeypatch, [b"SESSION-ONE"])
+    first = _session_that_captures(tmp_path, monkeypatch, [_png(b"SESSION-ONE")])
     kept = first.shot("full")
 
-    second = _session_that_captures(tmp_path, monkeypatch, [b"SESSION-TWO"])
+    second = _session_that_captures(tmp_path, monkeypatch, [_png(b"SESSION-TWO")])
     later = second.shot("full")
 
     assert kept != later, (
         "a fresh session restarted the numbering and reused a name already on "
         "disk from the previous one"
     )
-    assert kept.read_bytes() == b"SESSION-ONE", (
+    assert kept.read_bytes() == _png(b"SESSION-ONE"), (
         "the second session's first capture overwrote the first session's"
     )
-    assert later.read_bytes() == b"SESSION-TWO"
+    assert later.read_bytes() == _png(b"SESSION-TWO")
+
+
+# ---- shot(), and whether what landed is a picture -----------------------
+
+
+def test_a_complete_png_is_accepted(tmp_path, monkeypatch):
+    """THE POSITIVE CONTROL for the two refusals below.
+
+    Asserted in its own test rather than left implied by them, because a check
+    that refuses everything passes every negative test ever written. This is the
+    one that fails if the PNG check is too strict, and it holds the bytes a real
+    capture is made of rather than a marker.
+    """
+    sess = _session_that_captures(tmp_path, monkeypatch, [_png(b"REAL")])
+
+    kept = sess.shot("full")
+
+    assert kept.read_bytes() == _png(b"REAL")
+    assert kept.exists()
+
+
+def test_a_reply_that_is_not_a_png_is_refused(tmp_path, monkeypatch):
+    """`shot` reported success on a file it never opened.
+
+    The drop file was waited for and renamed; not one byte was read. So anything
+    landing on that name was promoted into the capture directory and its path
+    handed back as a picture - and the caller's next move is to open it, one
+    round trip later and somewhere else, where the error names the reader rather
+    than the capture that was never taken.
+
+    The README recorded this as an absent guarantee rather than quietly adding
+    one, which is what makes it a known gap rather than a discovered bug.
+    """
+    sess = _session_that_captures(tmp_path, monkeypatch, [b"REFUSED: no back buffer"])
+
+    with pytest.raises(TriggerError) as caught:
+        sess.shot("full")
+
+    assert "png" in str(caught.value).lower(), (
+        "the failure has to name what was wrong with the file, or it reads as "
+        "the game never answering"
+    )
+
+
+def test_a_png_still_being_written_is_not_returned(tmp_path, monkeypatch):
+    """A file exists when it is CREATED, not when it is finished.
+
+    The same race `_await_text` was written to close, arriving through the one
+    artifact that was never read. A capture large enough to be worth taking is
+    large enough to be caught mid-write, and a truncated PNG has a perfectly
+    valid signature - so a check that looked only at the first eight bytes would
+    promote half a picture and call it a capture.
+
+    Waited for rather than refused on sight: the writer is expected to finish,
+    and refusing the moment the file is short would turn a slow write into a
+    failure. It fails only when the timeout runs out with the file still
+    incomplete.
+    """
+    truncated = _png(b"HALF")[:-8]
+    sess = _session_that_captures(tmp_path, monkeypatch, [truncated])
+
+    with pytest.raises(TriggerError) as caught:
+        sess.shot("full", timeout=1.0)
+
+    assert "png" in str(caught.value).lower()
+
+
+def test_a_refused_capture_is_not_left_in_the_capture_directory(tmp_path, monkeypatch):
+    """A refusal must not still produce a numbered capture.
+
+    Promoting the bad file and then raising would leave `captures` listing it,
+    `read_capture` serving it, and the next capture numbered around it - so the
+    failure would be reported once and the corrupt artifact would outlive it.
+    """
+    sess = _session_that_captures(tmp_path, monkeypatch, [b"not a picture"])
+
+    with pytest.raises(TriggerError):
+        sess.shot("full")
+
+    numbered = list(tmp_path.glob("*-0*-full.png"))
+    assert numbered == [], f"a refused capture was promoted anyway: {numbered}"
 
 
 # ---- launch() ----------------------------------------------------------

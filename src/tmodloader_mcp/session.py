@@ -56,6 +56,15 @@ _PID_QUERY = (
     "ForEach-Object { $_.ProcessId }"
 )
 
+#: The eight bytes every PNG begins with.
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+#: The twelve bytes every PNG ends with - an empty IEND chunk, whose CRC is
+#: therefore a constant. BOTH ends are checked, and the second is the one that
+#: matters: a file caught mid-write already has a perfectly valid signature, so
+#: a check that read only the head would promote half a picture.
+_PNG_TRAILER = b"\x00\x00\x00\x00IEND\xaeB`\x82"
+
 
 def parse_pids(text: str) -> set[int]:
     """Pull pids out of the query's output.
@@ -321,7 +330,7 @@ class Session:
         if not reply.ok:
             raise TriggerError(f"the game refused a shot: {reply.text}")
 
-        self._await_file(drop, timeout=timeout, what="shot PNG")
+        self._await_png(drop, timeout=timeout, what="shot PNG")
 
         # Numbered first so a listing sorts into capture order, and the region
         # kept so a directory of these is readable without a log beside it.
@@ -342,6 +351,53 @@ class Session:
         raise TriggerError(
             f"no {what} within {timeout:.0f}s at {path}. The game may not be "
             f"polling - check that a world is loaded and the mod is enabled."
+        )
+
+    def _await_png(self, path: Path, *, timeout: float, what: str) -> None:
+        """Wait until the file is a WHOLE PNG, not until it exists.
+
+        `shot` used to wait for existence and rename, and never opened the file.
+        So whatever landed on that name was promoted into the capture directory
+        and its path returned as a picture - and the caller found out one round
+        trip later and somewhere else, where the error names their image reader
+        rather than the capture that was never taken. The README recorded the
+        absent guarantee rather than implying one; this is it arriving.
+
+        Both ends are checked, and only the trailer answers the question that
+        matters. A file appears when it is CREATED, so a capture big enough to
+        be worth taking is big enough to be read mid-write - and a truncated PNG
+        has an entirely valid signature. This is the race `_await_text` was
+        written to close, reaching the one artifact nobody was reading.
+
+        Incompleteness is WAITED OUT and a wrong signature is not. A short file
+        is a writer still working, and refusing it on sight would turn a slow
+        write into a failure. Bytes that are not a PNG at all will never become
+        one, so waiting the full timeout on them buys nothing and costs the
+        caller a minute before it says the obvious - the mod dropping a refusal
+        on this name is exactly how that happens.
+        """
+        deadline = time.monotonic() + timeout
+        self._await_file(path, timeout=timeout, what=what)
+
+        while time.monotonic() < deadline:
+            data = path.read_bytes()
+            if data.startswith(_PNG_SIGNATURE):
+                if data.endswith(_PNG_TRAILER):
+                    return
+            elif len(data) >= len(_PNG_SIGNATURE):
+                raise TriggerError(
+                    f"the {what} at {path} is not a PNG - it begins {data[:8]!r}. "
+                    "Something wrote to the capture drop box that was not a "
+                    "picture, so no capture was taken; the bytes are left there "
+                    "to be read rather than renamed into the captures."
+                )
+            time.sleep(0.2)
+
+        raise TriggerError(
+            f"the {what} at {path} was still an incomplete PNG after "
+            f"{timeout:.0f}s - it starts like one and has no end. The write "
+            "never finished, so promoting it would hand back a truncated "
+            "picture that opens as a broken one."
         )
 
     def _await_text(self, path: Path, *, timeout: float, what: str) -> str:
