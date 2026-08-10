@@ -11,6 +11,25 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Removing the defaults broke both live scripts, and nothing could have said
+  so.** They inherit the shell's environment and set none of it, so once the
+  paths became required an unconfigured run died on its first tool call — and
+  `TMODLOADER_WORLD_WIN` would not have failed until `launch`, minutes in, with
+  a game process possibly already spawned and nothing holding its pids. CI
+  cannot catch this: the live scripts are deliberately not collected. Both now
+  preflight before anything starts, naming EVERY missing variable rather than
+  the first. Verified by running both with the configuration stripped: exit 2,
+  all three named, and zero game processes started. (#33)
+- The variable list lives in `config.REQUIRED_TO_LAUNCH` rather than being
+  written out by each script. Two scripts needing one answer is two places to
+  forget, which this repo has already done once — a drift guard written for one
+  live script, and a sibling added a commit later that it did not cover. The
+  contract test now runs BOTH for real with the configuration removed, which
+  works on a bare CI runner because the preflight fires before anything needs
+  an install. (#33)
+
 ### Added
 
 - **A `.mcp.json`, so the server can actually be reached.** Seventeen working
