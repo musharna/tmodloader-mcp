@@ -19,10 +19,14 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib.util
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from tmodloader_mcp import config
 from tmodloader_mcp import server as server_mod
 
 LIVE_CHECK = Path(__file__).parent / "live_check.py"
@@ -410,3 +414,58 @@ def test_a_failing_check_prints_its_reason_and_records_it(capsys):
     assert "the reason" in out
     assert lpc.failures == ["it broke: the reason"]
     lpc.failures.clear()
+
+
+# ---- the preflight, on BOTH scripts ----------------------------------------
+
+
+@pytest.mark.parametrize("script", LIVE_SCRIPTS, ids=SCRIPT_IDS)
+def test_a_live_script_refuses_to_start_without_its_configuration(script):
+    """REAL EXECUTION, and it costs nothing because that is the point.
+
+    Both scripts inherit the shell's environment and set none of it. When the
+    machine-specific defaults were removed they began failing on their first
+    tool call — and `TMODLOADER_WORLD_WIN` would not have failed until `launch`,
+    minutes in, with a game process possibly already spawned and nothing left
+    holding its pids.
+
+    CI cannot catch that any other way: the live scripts are deliberately not
+    collected, so nothing here executes them. This runs each one for real with
+    the configuration stripped, which reaches the preflight and stops there —
+    no game, no install needed, and it works on a bare runner.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in config.REQUIRED_TO_LAUNCH}
+
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+        # A non-zero exit is the EXPECTED result here, so raising on it would
+        # turn the assertion below into something that never runs.
+        check=False,
+    )
+
+    assert result.returncode != 0, (
+        f"{script.name} started with no configuration:\n{result.stdout[-2000:]}"
+    )
+    # Every missing variable is named, not just the first. Fixing them one
+    # error message at a time is one run of the game each.
+    for name in config.REQUIRED_TO_LAUNCH:
+        assert name in result.stdout, (
+            f"{script.name} did not say it needs {name}:\n{result.stdout[-2000:]}"
+        )
+
+
+@pytest.mark.parametrize("script", LIVE_SCRIPTS, ids=SCRIPT_IDS)
+def test_a_live_script_takes_its_variable_list_from_the_package(script):
+    """Guards the CLASS: two scripts, one list, no chance to drift apart.
+
+    A copy in each is two places to forget — which this repo has already done
+    once, writing a drift guard for one script and adding a sibling a commit
+    later that it did not cover.
+    """
+    assert "REQUIRED_TO_LAUNCH" in script.read_text(), (
+        f"{script.name} spells out its own variable list instead of importing one"
+    )
