@@ -11,6 +11,11 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-10
+
+The release where the mod-side half stopped being Biomancy's. 0.1.0 could tell
+another mod what to implement; this one hands it the implementation.
+
 ### Added
 
 - **The mod-side half is now yours: `responder/`.** The responder that answers
