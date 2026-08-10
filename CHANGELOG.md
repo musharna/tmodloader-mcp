@@ -75,6 +75,30 @@ rather than dated individually; the PR numbers are the audit trail.
 
 ### Added
 
+- **New `heartbeat` tool — WHICH silence, not just that there was one.**
+  `launch` has always read `<mod>-hooks.txt` to decide readiness and kept one
+  bit of it. That is the right thing to block on and the wrong thing to report:
+  a failed launch answers `no live heartbeat within 300s`, which names the
+  symptom and none of the four causes. Absent means nothing ever wrote one — the
+  mod is not loaded, not enabled, or built without the dev bridge. Stale means a
+  game ran and died. Live without a world means it is still loading and nothing
+  is wrong yet. Live and ready but not armed means the bridge is not listening.
+  Four different actions, previously delivered as one sentence about a timeout.
+  Reads off disk and needs no session deliberately: a failed `launch` raises
+  without storing one, so a tool that required a session could never answer the
+  question it exists for. Both sides come back together, because "the client is
+  silent and the server is fine" is a different diagnosis from both being
+  silent, and asking one at a time cannot see the difference. (#26)
+- `diag.parse` types booleans and accepts camelCase keys, because the heartbeat
+  shares its grammar and broke both assumptions. The key pattern was
+  `[a-z0-9][a-z0-9-]*` — every diag key ever, and neither `gameMenu` nor
+  `dedServ`, so the field naming the side that wrote the file matched nothing
+  and was dropped in silence. And six of the heartbeat's eleven fields are
+  booleans arriving as C#'s `bool.ToString()`, which left as text are all
+  TRUTHY: `if hb["armed"]` passed on a game that was not. Verified a no-op for
+  the diag dump against the real artifact — 0 camelCase keys, 0 `True`/`False`
+  values — and pinned by a test so a future diag field of either shape fails
+  loudly rather than changing what an existing caller receives. (#26)
 - `read_capture` tool and a `capture://{name}` resource — a capture's PNG comes
   back as image content, so an agent that is not on this machine can finally see
   what it photographed. `shot` still answers with a path and stays cheap: a

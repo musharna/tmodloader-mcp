@@ -33,6 +33,7 @@ from . import captures as captures_mod
 from . import commands as commands_mod
 from . import config as config_mod
 from . import diag as diag_mod
+from . import heartbeat as heartbeat_mod
 from . import logs as logs_mod
 from . import session as session_mod
 from .triggers import TriggerError
@@ -114,6 +115,34 @@ class StatusOut(TypedDict):
     port: int | None
     player: str | None
     started_pids: list[int] | None
+
+
+class HeartbeatSideOut(TypedDict):
+    """One side's heartbeat, with the questions kept apart deliberately.
+
+    `present`, `live`, `world_ready` and `armed` are four booleans rather than
+    one status string because they fail independently and each rules out a
+    different fix. `launch` collapses them into a single readiness bit, which is
+    correct for something that has to block on one — and is why its timeout
+    message can only say that nothing happened.
+    """
+
+    side: str
+    present: bool
+    live: bool
+    # Null rather than absent - see StatusOut. Null also when the file is there
+    # but cannot be stat'd: a fabricated 0.0 would read as the freshest
+    # possible heartbeat, which is the opposite of what it would mean.
+    age_seconds: float | None
+    world_ready: bool
+    armed: bool
+    fields: dict[str, Any]
+    diagnosis: str
+
+
+class HeartbeatOut(TypedDict):
+    client: HeartbeatSideOut
+    server: HeartbeatSideOut
 
 
 class ShotOut(TypedDict):
@@ -543,6 +572,59 @@ def log_files() -> dict[str, Any]:
         "logs": logs_mod.available(cfg.tml_dir),
         "archived_runs": len(logs_mod.archives(cfg.tml_dir)),
     }
+
+
+@mcp.tool(
+    title="Read the mod's heartbeat",
+    annotations=_READ_ONLY,
+    structured_output=True,
+)
+def heartbeat() -> HeartbeatOut:
+    """Why the game is not answering, for both sides at once.
+
+    `launch` already reads this file to decide readiness and keeps one bit of
+    it. When a launch SUCCEEDS that is all anyone needs. When it fails, the
+    discarded detail is the entire answer, and what comes back instead is `no
+    live heartbeat within 300s` — which names the symptom and none of the four
+    causes:
+
+    - **absent** — nothing ever wrote one. The mod is not loaded, is not
+      enabled in this install, or was built without the dev bridge.
+    - **stale** — a game ran and is no longer running. The file outlives the
+      process, so this is indistinguishable from live to anything that only
+      checks whether it exists.
+    - **live, no world** — still loading. Nothing is wrong; wait longer.
+    - **live, world, not armed** — loaded and ticking, bridge not listening.
+
+    Reads OFF DISK and needs no session, deliberately: a failed `launch` raises
+    without storing one, so a tool that required a session could never answer
+    the question it exists for. It is also the only tool here that is useful
+    when nothing else is.
+
+    Both sides are returned together because "the client is silent and the
+    server is fine" is a different diagnosis from both being silent, and asking
+    one at a time cannot see the difference.
+    """
+    cfg = _cfg()
+    out: dict[str, HeartbeatSideOut] = {}
+
+    for name, is_server in (("client", False), ("server", True)):
+        hb = heartbeat_mod.read(cfg.artifact(cfg.artifacts.heartbeat, server=is_server))
+        out[name] = HeartbeatSideOut(
+            # `hb.side` is the mod's own account of itself and can disagree with
+            # the file this was read from. Where they differ the mod is right,
+            # so it is reported rather than the key it was filed under.
+            side=hb.side,
+            present=hb.present,
+            live=hb.live,
+            age_seconds=hb.age,
+            world_ready=hb.world_ready,
+            armed=hb.armed,
+            fields=hb.fields,
+            diagnosis=heartbeat_mod.diagnose(hb),
+        )
+
+    return HeartbeatOut(client=out["client"], server=out["server"])
 
 
 @mcp.tool(

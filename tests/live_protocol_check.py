@@ -38,6 +38,8 @@ from pathlib import Path
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from tmodloader_mcp import server as server_mod
+
 #: The game takes tens of seconds to become answerable and the build can take
 #: longer, so the client must outwait the tools rather than the other way
 #: round. A client timeout firing mid-launch leaves a game running with nothing
@@ -103,7 +105,17 @@ def structured(result, label: str):
 async def journey(session: ClientSession) -> None:
     print(">>> the surface is all there")
     tools = (await session.list_tools()).tools
-    check("12 tools advertised", len(tools) == 12, f"got {len(tools)}")
+    # Compared against the REGISTRY rather than a number written here. The
+    # count was `12` as a literal and went stale the moment a tool was added -
+    # a copy of a fact this script does not own, which is the same bargain
+    # `commands` refused when it stopped keeping its own list of the mod's.
+    expected = {t.name for t in await server_mod.mcp.list_tools()}
+    advertised = {t.name for t in tools}
+    check(
+        f"{len(expected)} tools advertised",
+        advertised == expected,
+        f"missing {expected - advertised}, extra {advertised - expected}",
+    )
 
     print(">>> singleplayer is REFUSED, over the protocol, with a reason")
     refusal = await session.call_tool("launch", {"mode": "singleplayer"})

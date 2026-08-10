@@ -204,3 +204,76 @@ def test_side_is_read_not_inferred(line, expected):
 
 def test_side_of_a_diag_without_one_is_unknown_not_a_guess():
     assert diag.side_of({}) == "unknown"
+
+
+# --- The heartbeat shares this grammar, and broke two assumptions in it -------
+#
+# `<mod>-hooks.txt` is the same `key: value` format, so it reuses this parser
+# rather than growing a second one — two parsers for one grammar is how one of
+# them ends up weaker. But the real file (read off the install 2026-08-09) uses
+# two shapes the diag dump never does, and BOTH failed silently here.
+
+HEARTBEAT_SAMPLE = """\
+hooks-seen: PostUpdateEverything,PostUpdateInput,UpdateUI
+gameMenu: False
+dedServ: False
+savepath: C:\\Users\\a2b32\\Documents\\My Games\\Terraria\\tModLoader
+trigger-exists: False
+world-ready: True
+capture-ready: True
+armed: True
+polls: 194
+written: 20:19:07Z
+"""
+
+
+def test_a_camelcase_key_is_kept_rather_than_dropped():
+    """The key pattern encoded ONE artifact's naming convention.
+
+    `[a-z0-9][a-z0-9-]*` matches every diag key, and neither `gameMenu` nor
+    `dedServ` — so the two fields that say WHICH SIDE wrote the heartbeat, and
+    whether it is sitting on the main menu, matched nothing and were dropped
+    without a word. A parser that silently discards what it does not recognise
+    makes the field invisible to every tool here, which is the same failure as
+    the mod never emitting it.
+    """
+    got = diag.parse(HEARTBEAT_SAMPLE)
+    assert "gameMenu" in got, "camelCase key was dropped by the key pattern"
+    assert "dedServ" in got
+
+
+def test_booleans_are_typed_rather_than_left_as_truthy_strings():
+    """`"False"` IS TRUTHY. Six of the heartbeat's eleven fields are booleans.
+
+    Left as strings, `if hb["armed"]` and `if hb["world-ready"]` are both true
+    on a game that is neither — the exact shape of the `"0"` bug this file was
+    written for, in a different artifact.
+    """
+    got = diag.parse(HEARTBEAT_SAMPLE)
+    assert got["armed"] is True
+    assert got["gameMenu"] is False
+    assert got["trigger-exists"] is False
+    assert got["world-ready"] is True
+
+
+def test_typing_booleans_did_not_change_the_diag_dump():
+    """POSITIVE CONTROL for the two changes above.
+
+    Widening the key pattern and adding a value shape could only be a no-op for
+    diag if the diag dump contains neither — verified against the real
+    `biomancy-diag.txt` on 2026-08-09 (0 camelCase keys, 0 True/False values).
+    This pins that, so a future diag field of either shape fails HERE, loudly,
+    rather than changing what an existing caller receives.
+    """
+    got = diag.parse(SAMPLE)
+    assert got["version"] == "0.8.1"
+    assert got["ambient-motes"] == 346
+    assert got["strains"] is None
+    assert not any(isinstance(v, bool) for v in got.values())
+
+
+def test_a_counter_is_still_a_counter_beside_booleans():
+    """Bool typing must not swallow the ints — `polls` is the liveness counter."""
+    got = diag.parse(HEARTBEAT_SAMPLE)
+    assert got["polls"] == 194
+    assert not isinstance(got["polls"], bool)
