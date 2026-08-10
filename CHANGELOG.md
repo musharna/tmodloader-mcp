@@ -11,6 +11,28 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Added
+
+- **`responder/SHA256SUMS` — a fingerprint that ships with the folder.** The
+  vendored copies in other people's mods are invisible to this repository, so
+  nothing here could tell a mod that its copy had gone stale. This is not
+  hypothetical: 0.2.0 shipped after two comments were edited upstream and had to
+  be re-copied into the reference implementation BY HAND, which is exactly the
+  step that eventually gets forgotten.
+
+  One small file answers both questions a vendored copy raises —
+  `sha256sum -c SHA256SUMS` says whether anybody edited the copy, and diffing it
+  against upstream's says whether the copy is behind, without fetching nine
+  sources to find out.
+
+  Four tests keep the manifest true, because a manifest somebody updated once is
+  worse than none: it would describe an older folder than the one beside it and
+  report "in sync" to a consumer who was not. The coverage check is separate
+  from the content check on purpose — a file ADDED upstream and omitted from the
+  manifest leaves every recorded hash still matching, so a content-only check
+  passes while consumers never learn the file exists. Both mutations were run
+  and seen to fail the right test with the right message.
+
 ## [0.2.0] - 2026-08-10
 
 The release where the mod-side half stopped being Biomancy's. 0.1.0 could tell
