@@ -1,0 +1,7 @@
+{
+  "$comment": "setup-dotnet INSTALLS an SDK; it does not SELECT one. Without this, `dotnet` takes the highest SDK on the machine, so CI would compile net8.0 with the runner's preinstalled SDK 10 while every local run used 8.0.x - two toolchains, one green check. rollForward latestMinor keeps any 8.x usable.",
+  "sdk": {
+    "version": "8.0.0",
+    "rollForward": "latestMinor"
+  }
+}
