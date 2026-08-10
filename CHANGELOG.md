@@ -52,6 +52,17 @@ keeping, not because they broke a released API.
   spec and deliberately left to its own change, so that a failure in the
   extraction had one candidate cause rather than two.
 
+- **`docs/MOD_CONTRACT.md` — the mod-side protocol, written down.** Every
+  filename, where it lives, what it contains, and which failures it has to be
+  able to express. It existed only as C# inside one mod, which is what made
+  "extract the responder" a job nobody could start: there was nothing to
+  extract _to_. Written from `triggers.py`, `session.py` and the artifacts a
+  running install actually had on disk rather than from intention, and pinned
+  by tests in BOTH directions — one fails if the protocol gains a file the
+  document does not mention, the other if the document describes a file nothing
+  writes. Neither is sufficient alone: a spec can name every real artifact and
+  several imagined ones. (#35)
+
 ### Fixed
 
 - **`shot` reported success on a file it never opened.** The drop file was
@@ -117,19 +128,6 @@ keeping, not because they broke a released API.
   is what the reader has already done. Covered through the protocol as well as
   at the unit, because the confusing part is that the server _starts_,
   advertises every tool, and fails only when one is called.
-
-### Added
-
-- **`docs/MOD_CONTRACT.md` — the mod-side protocol, written down.** Every
-  filename, where it lives, what it contains, and which failures it has to be
-  able to express. It existed only as C# inside one mod, which is what made
-  "extract the responder" a job nobody could start: there was nothing to
-  extract _to_. Written from `triggers.py`, `session.py` and the artifacts a
-  running install actually had on disk rather than from intention, and pinned
-  by tests in BOTH directions — one fails if the protocol gains a file the
-  document does not mention, the other if the document describes a file nothing
-  writes. Neither is sufficient alone: a spec can name every real artifact and
-  several imagined ones. (#35)
 
 ## [0.1.0] - 2026-08-09
 
