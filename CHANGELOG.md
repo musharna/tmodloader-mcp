@@ -99,20 +99,29 @@ repository had ever been able to express.
   write, and a `finally` clears it so a throw between write and rename stops
   leaving the payload in the directory the game reads.
 
-### Known
+- **Two sessions can now issue requests at the same time.** The trigger is
+  claimed rather than written: `os.link` is atomic exactly as `os.replace` was
+  and additionally refuses an occupied name, so a second request waits for the
+  slot instead of silently replacing what is in it. Measured before the fix as
+  one capture answering in 1.2s while the other timed out at 120s having never
+  had a request on disk.
 
-- **An untargeted request with two clients up is a coin flip.** The mod's
-  addressing check accepts any client when no `@player` is given, so whichever
-  polls first deletes the shared trigger and answers; run twice in a row, a
-  different client answered each time. Pass a `target` when more than one
-  client is running.
-- **The trigger is one slot, not a queue.** A second request written before
-  the first is read replaces it, and the loser's caller waits out its full
-  timeout with nothing on disk to explain why. Stagger concurrent requests.
-  This is also why the `capture` verb's attribution question is unreachable
-  rather than open — two simultaneous captures are not something the protocol
-  can carry. See
-  [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#what-a-live-two-client-run-found).
+  A blocked claim never deletes the request in its way — that would be the same
+  overwrite under a friendlier name — so a trigger held by a client that will
+  never consume it is reported, naming the pending request and its age.
+
+- **An untargeted request is no longer a coin flip.** Every client request now
+  carries the session's own player. The mod accepts an unaddressed request at
+  any client, so with two clients up the answer went to whichever polled
+  first — a different one on each of two consecutive attempts.
+
+  **Behaviour change:** a client that has not yet loaded a character has an
+  empty name, matches no target, and can no longer be asked anything. Use
+  `heartbeat`, which reads off disk and needs no cooperation from the game.
+
+- **A save directory that cannot support an exclusive claim is refused at
+  startup**, naming the filesystem's reason, rather than falling back to the
+  write that loses requests.
 
 ## [0.2.0] - 2026-08-10
 

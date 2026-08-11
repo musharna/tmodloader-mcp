@@ -442,6 +442,11 @@ class Session:
         #
         # NOT for the dedicated server: it has no local player, so any target
         # matches nothing and it would fall silent for good.
+        #
+        # A client that has not yet loaded a character has an EMPTY name, so
+        # it matches no target either and cannot be asked anything through
+        # this path. `heartbeat` is how that client is reached instead - it
+        # reads off disk and needs no cooperation from the game.
         if not server and target is None:
             target = self.player
 

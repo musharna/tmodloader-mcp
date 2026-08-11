@@ -235,13 +235,21 @@ This is the one artifact that stays a **single shared name even with two
 clients** — see [What deliberately stays shared](#what-deliberately-stays-shared)
 for why an addressed trigger still has to be one file both clients poll.
 
-**One name means one slot: it holds a single request, not a queue.** A second
-request written before the first has been read replaces it, and the one that
-lost is gone with no trace — its caller waits out the full timeout while
-nothing anywhere explains why. Measured with two clients capturing at the same
-instant: one answered in 1.2s, the other timed out at 120s having never had a
-request on disk to find. Stagger concurrent requests, or address the two
-clients from one caller that serialises them.
+**One name means one slot: it holds a single request, not a queue.** So the
+harness CLAIMS it rather than writing it — an exclusive create (`os.link`, or
+`O_CREAT|O_EXCL`) that fails when the name is taken, retried until the slot
+frees or the caller's timeout is spent. Two rules follow, and both are
+load-bearing:
+
+- **A claim that finds the slot occupied must not delete what is there.** That
+  request belongs to another session and deleting it is the overwrite this
+  rule exists to prevent, wearing a friendlier name. Report it instead — naming
+  the pending payload and its age, since neither the caller's own request nor
+  the game is what is wrong.
+- **The claim spends the caller's timeout, not a second budget.** A caller
+  asking for an answer within N seconds did not ask for N waiting to ask plus
+  N waiting to hear, and a claim that consumed the whole budget must fail as a
+  claim rather than reporting a game that was never involved.
 
 ## The reply
 
@@ -362,21 +370,25 @@ and after that a dead one, and neither ever existed. It is also **shared**:
 the second client to boot overwrites it, so N clients produce ONE phantom,
 belonging to whoever started most recently.
 
-**An untargeted request is a coin flip — so address them.** `IsFor` returns
-true for every client when no `@player` is given, so all of them qualify and
-whichever polls first deletes the shared trigger and answers. Run twice in a
-row, it was answered by a different client each time. A caller waiting on its
-own player's answer file therefore times out roughly half the time, with a
-perfectly good answer sitting on disk under somebody else's name. **Pass a
-target whenever more than one client is up.**
+**An untargeted request was a coin flip, and this harness no longer sends one.**
+`IsFor` returns true for every client when no `@player` is given, so all of them
+qualify and whichever polls first deletes the shared trigger and answers. Run
+twice in a row, a different client answered each time. **The mod's behaviour is
+unchanged and is still the rule above** — a client must accept an unaddressed
+request, because another harness may still send one. What changed is on this
+side: every client request now carries the session's own player, so the race is
+unreachable from here. A client that has not yet loaded a character has an empty
+name, matches no target, and is therefore not askable; `heartbeat` answers for
+it instead, off disk, without the game's cooperation.
 
-**Two requests cannot be in flight at once.** The trigger is one file and one
-slot, so a second request written while the first is still unread simply
-replaces it — the loser is lost silently and its caller waits out the full
-timeout. This is what stops the `capture` verb's attribution question from
-being answerable at all: two near-simultaneous captures are not something the
-protocol can carry, so whether it would report the wrong client's picture
-remains **unreachable rather than open**. Stagger concurrent requests.
+**The trigger holds one request, and it is CLAIMED rather than written.** One
+name is one slot, so a second request arriving before the first is read cannot
+also be there. It used to overwrite it: both payloads reached disk intact, the
+second replaced the first, and the loser's caller waited out its full timeout
+with nothing on disk to explain why — measured as one capture answering in 1.2s
+while the other timed out at 120s. A harness must now take the slot with an
+exclusive create that fails when it is occupied, and wait for it to free rather
+than replacing what is there.
 
 Whether the trigger should become a queue is a real question and a separate
 one. [What deliberately stays shared](#what-deliberately-stays-shared) argues
