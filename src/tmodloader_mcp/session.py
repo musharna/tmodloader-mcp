@@ -342,11 +342,11 @@ class Session:
             pending = trigger.read_text().strip()
             age = time.time() - trigger.stat().st_mtime
             held = f"{pending!r}, {age:.0f}s old"
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             held = "a request that vanished while it was being read"
 
         return (
-            f"the trigger at {trigger} still holds {held} after {timeout:.0f}s. "
+            f"the trigger at {trigger} still holds {held} after {timeout:g}s. "
             "Another session's request is pending, and this one will not delete "
             "it - that would be the overwrite this claim exists to prevent. If "
             "the client it names is gone, remove the file by hand."
@@ -369,7 +369,10 @@ class Session:
                     raise TriggerError(self._busy_message(trigger, timeout)) from None
                 time.sleep(min(CLAIM_POLL, remaining))
                 continue
-            return max(0.0, deadline - time.monotonic())
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining < CLAIM_POLL:
+                raise TriggerError(self._busy_message(trigger, timeout))
+            return remaining
 
     def ask(
         self,
