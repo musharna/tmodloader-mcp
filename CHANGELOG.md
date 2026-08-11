@@ -124,6 +124,21 @@ repository had ever been able to express.
   startup**, naming the filesystem's reason, rather than falling back to the
   write that loses requests.
 
+### Known
+
+- **Two simultaneous `capture` requests can collide on one filename.** Once
+  requests could actually be concurrent, a live two-client run produced it: two
+  captures inside the same wall-clock second both answered with the identical
+  path — `PNG: C:\Users\...\Captures\Capture 2026-08-11 18_12_01.png` from both
+  `n43n` and `tst2` — and only one file existed on disk at that timestamp.
+  Terraria's own capture camera names the file, stamped to the second, into a
+  directory the mod does not control; `CaptureFind.PickNew` reports whichever
+  new `.png` it finds, with no way to know which client's request produced it.
+  `shot` does not share this failure — its drop box is a name the mod itself
+  picks and suffixes per player. See
+  [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#two-clients-at-once). This is
+  mod-side (`responder/`) and out of scope for this repository's harness.
+
 ## [0.2.0] - 2026-08-10
 
 The release where the mod-side half stopped being Biomancy's. 0.1.0 could tell

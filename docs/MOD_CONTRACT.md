@@ -394,6 +394,28 @@ while the other timed out at 120s. A harness must now take the slot with an
 exclusive create that fails when it is occupied, and wait for it to free rather
 than replacing what is there.
 
+**`capture` still collides, and this run watched it happen.** With the trigger
+claimed rather than overwritten, two simultaneous captures both answered —
+1.2s and 1.3s, neither timing out — but both `n43n` and `tst2` reported the
+same picture: `PNG: C:\Users\...\Captures\Capture 2026-08-11 18_12_01.png`,
+and only one file existed on disk at that timestamp. `capture` finds its
+result the way [The drop box](#the-drop-box) already says: Terraria's own
+capture camera writes into a directory the mod does not name, so `Begin()`
+lists that directory before queueing `QuickScreenshot()` and `Settle()` lists
+it again once the wait is over; `CaptureFind.PickNew` reports whichever `.png`
+is both new and, if more than one is, largest. Nothing in that comparison
+looks at which client asked — it cannot, because Terraria's camera does not
+tell the mod who it was writing for, only a path. Two clients capturing
+inside the same wall-clock second therefore contend for one filename, since
+that camera stamps its own name to the second: whichever client's poll runs
+after the write sees exactly one new file and reports it as its own, and the
+other client is told about a picture it did not take, with nothing on disk to
+say so. `shot` does not have this failure mode, and the reason is upstream of
+anything a token could fix: its drop box is a name the mod itself picks
+(`AnswerName(Names.Shot)`, suffixed per player — see
+[The drop box](#the-drop-box)), while `capture`'s filename is chosen by
+Terraria before the mod ever sees it, which leaves nothing here to namespace.
+
 Whether the trigger should become a queue is a real question and a separate
 one. [What deliberately stays shared](#what-deliberately-stays-shared) argues
 for one trigger from ADDRESSING — every client must be able to see a request
