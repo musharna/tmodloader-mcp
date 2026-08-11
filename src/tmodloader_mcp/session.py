@@ -37,6 +37,7 @@ from .triggers import (
     artifacts_for,
     compose,
     heartbeat_is_live,
+    parse,
     world_is_ready,
 )
 
@@ -433,6 +434,17 @@ class Session:
         server for a client-only command is refused with the server's list
         rather than a client's.
         """
+        # ADDRESSED BY DEFAULT, because unaddressed means "whoever polls
+        # first". The mod accepts an untargeted request at every client, so
+        # with two clients up the answer went to a race - measured as a
+        # different client answering on each of two consecutive attempts. This
+        # side knows its own player, so leaving that to chance was a choice.
+        #
+        # NOT for the dedicated server: it has no local player, so any target
+        # matches nothing and it would fall silent for good.
+        if not server and target is None:
+            target = self.player
+
         payload = compose(
             command,
             target=target,
@@ -696,6 +708,36 @@ def launch(
     if mode not in {"server", "server_client"}:
         raise SessionError(
             f"unknown mode {mode!r} - expected 'server' or 'server_client'"
+        )
+
+    # EVERY request is now addressed, so a name `parse` cannot read back
+    # intact fails on every call rather than only on targeted ones. Asked
+    # once, here, where the answer names the character instead of arriving as
+    # a refusal on a request the caller thought was simple.
+    #
+    # WHAT THIS ACTUALLY CATCHES: whitespace, not `@` or `:`. `player` is only
+    # ever placed in the TARGET position, the payload's terminal field -
+    # `parse` takes everything after the first `@` as the target VERBATIM and
+    # never re-splits it, so a name holding `@` or `:` reads back unchanged.
+    # Measured against both this module's `parse` and the mod's own
+    # `DevCommands.Parse` (responder/DevCommands.cs), which use the identical
+    # rule - a first hypothesis for this guard checked those two characters
+    # directly and was wrong, because neither one actually breaks anything.
+    # What `parse` DOES change is whitespace: both sides trim the target, so a
+    # name with a leading or trailing space - or one that is empty or
+    # whitespace-only - reads back shorter than it was typed, or as no name at
+    # all. That is indistinguishable from an ordinary name in a log or a
+    # config file, which is exactly why it is worth catching once here rather
+    # than as a silent mystery on every request this session ever sends.
+    heard = parse(f"diag@{player}")
+    if heard is None or heard.target != player:
+        raise SessionError(
+            f"the character name {player!r} is not the name a request will "
+            f"carry: a payload naming it reads back as {heard}, not as typed. "
+            "`parse` trims whitespace from the target, so a name padded with "
+            "spaces - or one that is empty or all whitespace - is addressed "
+            "shorter than it was typed, or to nobody at all, on every request "
+            "this session sends."
         )
 
     existing = _tml_pids(cfg)

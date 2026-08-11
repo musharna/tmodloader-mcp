@@ -642,3 +642,95 @@ def test_a_claim_under_real_process_contention_admits_exactly_one(tmp_path):
         "where every worker failed could not have produced this either"
     )
     assert not list(tmp_path.glob("*.staging")), "a staging file was left behind"
+
+
+def test_an_unaddressed_request_is_addressed_to_this_sessions_player(
+    sess, cfg, monkeypatch
+):
+    """THE COIN FLIP, removed at its source.
+
+    `IsFor` returns true for EVERY client when a payload names no `@player`, so
+    with two clients up whichever polled first deleted the shared trigger and
+    answered. Measured: run twice in a row, a different client answered each
+    time. The harness knows its own session's player, so leaving the payload
+    unaddressed delegated the choice to a race.
+    """
+    _publish(cfg)
+    seen: list[str] = []
+    real = session_mod._claim_atomically
+
+    def spy(path, text):
+        seen.append(text)
+        return real(path, text)
+
+    monkeypatch.setattr(session_mod, "_claim_atomically", spy)
+    _replies_when_triggered(
+        monkeypatch,
+        cfg.artifact(artifacts_for(cfg.mod_name, SELF).result, server=False),
+        "mine",
+    )
+
+    sess.ask("diag", timeout=1.0)
+
+    assert seen == [f"diag@{SELF}"], f"composed {seen}, not an addressed payload"
+
+
+def test_the_server_side_is_never_addressed(sess, cfg, monkeypatch):
+    """POSITIVE CONTROL, and a real hazard.
+
+    A dedicated server has no local player, so `IsFor` returns FALSE for any
+    non-empty target - addressing it would mean it never answers anything
+    again. It also writes a `-server` suffixed trigger, so it was never
+    contended and has nothing to gain here.
+    """
+    _publish(cfg, server=True)
+    seen: list[str] = []
+    real = session_mod._claim_atomically
+
+    def spy(path, text):
+        seen.append(text)
+        return real(path, text)
+
+    monkeypatch.setattr(session_mod, "_claim_atomically", spy)
+    _replies_when_triggered(
+        monkeypatch, cfg.artifact(cfg.artifacts.result, server=True), "server says"
+    )
+
+    sess.ask("diag", server=True, timeout=1.0)
+
+    assert seen == ["diag"], f"the server was addressed: {seen}"
+
+
+def test_launch_refuses_a_character_name_padded_with_whitespace(monkeypatch):
+    """`parse` TRIMS the target, so a name padded with whitespace is not the
+    name a request will actually carry.
+
+    `@` and `:` were the first hypothesis for what this guard needed to catch,
+    and they were wrong - measured, not assumed: `player` is only ever placed
+    in the payload's TERMINAL field, and `parse` takes everything after the
+    first `@` verbatim with no further splitting, so those two characters
+    survive the round trip intact, in both this module's `parse` and the
+    mod's own `DevCommands.Parse`. What `parse` actually changes is
+    whitespace: a leading or trailing space reads back trimmed, which looks
+    identical to a valid name in any log or config - exactly why catching it
+    once at launch beats failing on every request this session ever sends.
+
+    The positive control is in the same test deliberately: a guard that
+    refused every name would pass the assertion below while making `launch`
+    unusable for anybody.
+    """
+    cfg = FakeCfg(Path("/nonexistent"))
+    monkeypatch.setattr(session_mod, "_tml_pids", lambda c: set())
+
+    # An ordinary name has nothing for `parse` to trim, so the guard must let
+    # it through - what stops `launch` here is `FakeCfg` lacking the rest of a
+    # real `Config` (`world_win` and friends), not the character name.
+    with pytest.raises(AttributeError):
+        session_mod.launch(cfg, "server_client", player=SELF)
+
+    with pytest.raises(session_mod.SessionError) as refused:
+        session_mod.launch(cfg, "server_client", player="n43n ")
+
+    assert "n43n " in str(refused.value), (
+        f"refused without naming the character: {refused.value}"
+    )
