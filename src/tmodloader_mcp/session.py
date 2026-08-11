@@ -30,8 +30,10 @@ from .diag import Diag
 from .diag import parse as parse_diag
 from .diag import sections as diag_sections
 from .triggers import (
+    Artifacts,
     Reply,
     TriggerError,
+    artifacts_for,
     compose,
     heartbeat_is_live,
     world_is_ready,
@@ -217,6 +219,23 @@ class Session:
     def path(self, name: str, *, server: bool) -> Path:
         return self.cfg.artifact(name, server=server)
 
+    @property
+    def artifacts(self) -> Artifacts:
+        """This session's names, carrying its player.
+
+        `cfg.artifacts` has no player and stays the right answer for the
+        dedicated server and for anything reading off disk without a session.
+        """
+        return artifacts_for(self.cfg.mod_name, self.player)
+
+    def _names(self, server: bool) -> Artifacts:
+        """Per-player names for the client, unsuffixed ones for the server.
+
+        The dedicated server has no player. Handing it a token would rename
+        files it writes under names nothing reads.
+        """
+        return self.cfg.artifacts if server else self.artifacts
+
     def commands(self, *, server: bool = False) -> CommandSet:
         """What this side's mod says it serves.
 
@@ -263,7 +282,7 @@ class Session:
         )
 
         trigger = self.path(self.cfg.artifacts.trigger, server=server)
-        result = self.path(self.cfg.artifacts.result, server=server)
+        result = self.path(self._names(server).result, server=server)
 
         result.unlink(missing_ok=True)
         _write_atomically(trigger, payload)
@@ -284,7 +303,7 @@ class Session:
         them said which six, and were parsed and thrown away — so a caller could
         learn that six existed and never what any of them was.
         """
-        dump = self.path(self.cfg.artifacts.diag, server=server)
+        dump = self.path(self._names(server).diag, server=server)
         dump.unlink(missing_ok=True)
 
         reply = self.ask("diag", target=target, server=server, timeout=timeout)
@@ -323,7 +342,7 @@ class Session:
         disguise - the path handed back was unique among the calls that made
         it, which is not the property anybody needed.
         """
-        drop = self.path(self.cfg.artifacts.shot, server=False)
+        drop = self.path(self.artifacts.shot, server=False)
         drop.unlink(missing_ok=True)
 
         reply = self.ask("shot", argument=region, target=target, timeout=timeout)

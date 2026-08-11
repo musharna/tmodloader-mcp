@@ -85,26 +85,44 @@ class Artifacts:
     """
 
     prefix: str
+    #: The client's player token, or None for the dedicated server and for a
+    #: client that has not got a character yet. See MOD_CONTRACT.md: an
+    #: unsuffixed heartbeat is not a legacy name, it MEANS "up, no character".
+    player: str | None = None
+
+    def _named(self, stem: str, ext: str) -> str:
+        """`<prefix>-<stem>[-<player>].<ext>` — token before the extension.
+
+        After, and `biomancy-diag.txt-n43n-003f` stops being a text file to
+        anything that reads extensions.
+        """
+        token = f"-{self.player}" if self.player else ""
+        return f"{self.prefix}-{stem}{token}.{ext}"
 
     @property
     def trigger(self) -> str:
+        # NOT per player, deliberately. The trigger is how one client learns a
+        # request is aimed at somebody else - `DevResponder` leaves a trigger
+        # it is not addressed by exactly where it is, so the intended client
+        # finds it on its own next poll. Per-player triggers would delete the
+        # one part of multi-client that already worked.
         return f"{self.prefix}-capture.trigger"
 
     @property
     def result(self) -> str:
-        return f"{self.prefix}-capture.txt"
+        return self._named("capture", "txt")
 
     @property
     def diag(self) -> str:
-        return f"{self.prefix}-diag.txt"
+        return self._named("diag", "txt")
 
     @property
     def heartbeat(self) -> str:
-        return f"{self.prefix}-hooks.txt"
+        return self._named("hooks", "txt")
 
     @property
     def shot(self) -> str:
-        return f"{self.prefix}-shot.png"
+        return self._named("shot", "png")
 
     @property
     def commands(self) -> str:
@@ -135,9 +153,14 @@ class Artifacts:
         )
 
 
-def artifacts_for(mod_name: str) -> Artifacts:
-    """The artifact names one mod writes and this harness reads."""
-    return Artifacts(prefix=mod_name.lower())
+def artifacts_for(mod_name: str, player: str | None = None) -> Artifacts:
+    """The artifact names one mod writes and this harness reads.
+
+    `player` is a RAW character name; the token rule is applied here so no
+    caller has to remember to apply it, and so a caller cannot pass an
+    already-tokenised name and get it tokenised twice.
+    """
+    return Artifacts(prefix=mod_name.lower(), player=player_token(player))
 
 
 #: How stale a heartbeat may be and still count as a live game, in seconds.

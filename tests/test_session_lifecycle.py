@@ -124,7 +124,12 @@ def _session_that_captures(tmp_path, monkeypatch, payloads):
         # The mod always writes ONE fixed filename. That is the whole bug: it
         # is not a thing this harness gets to choose, so the harness has to
         # stop handing that path back as if it were stable.
-        cfg.artifact(cfg.artifacts.shot, server=False).write_bytes(queue.pop(0))
+        #
+        # The drop box is now PER PLAYER on the client side (`shot` reads
+        # `self.artifacts.shot`, which carries `sess.player`), so the fixture
+        # has to write where the session will actually look - `cfg.artifacts`
+        # has no player and would silently miss it.
+        cfg.artifact(sess.artifacts.shot, server=False).write_bytes(queue.pop(0))
         return Reply(command=command, text="ok")
 
     monkeypatch.setattr(Session, "ask", fake_ask)

@@ -137,3 +137,51 @@ def test_one_mods_capture_is_not_served_to_another(tmp_path):
 
     with pytest.raises(captures.CaptureError):
         captures.read(Path(tmp_path), "MyCoolMod", "biomancy-shot-001-full.png")
+
+
+# ---- answers carry the player, requests do not ---------------------------
+
+
+def test_answers_carry_the_player_and_requests_do_not():
+    a = artifacts_for("Biomancy", player="n43n")
+    # Requests are SHARED and addressed - the trigger is how a client is told
+    # the request is not for it, so per-player triggers would remove the very
+    # mechanism that already works.
+    assert a.trigger == "biomancy-capture.trigger"
+    # The verb set is the mod's and identical for every client.
+    assert a.commands == "biomancy-commands.txt"
+
+    assert a.diag == "biomancy-diag-n43n-003f.txt"
+    assert a.heartbeat == "biomancy-hooks-n43n-003f.txt"
+    assert a.result == "biomancy-capture-n43n-003f.txt"
+    assert a.shot == "biomancy-shot-n43n-003f.png"
+
+
+def test_the_token_goes_before_the_extension_not_after():
+    # A name ending `.txt-n43n-003f` is not a text file to anything that reads
+    # extensions, including the harness's own capture reader.
+    a = artifacts_for("Biomancy", player="n43n")
+    for name in (a.diag, a.heartbeat, a.result):
+        assert name.endswith(".txt")
+    assert a.shot.endswith(".png")
+
+
+def test_no_player_reproduces_todays_names_exactly():
+    # The dedicated server has no player, and a client has none before a
+    # character exists. Both keep the old names, so this is also the proof that
+    # the change is backward compatible where it has to be.
+    a = artifacts_for("Biomancy")
+    assert a.trigger == "biomancy-capture.trigger"
+    assert a.result == "biomancy-capture.txt"
+    assert a.diag == "biomancy-diag.txt"
+    assert a.heartbeat == "biomancy-hooks.txt"
+    assert a.shot == "biomancy-shot.png"
+    assert a.commands == "biomancy-commands.txt"
+
+
+def test_all_covers_every_artifact_including_the_per_player_ones():
+    # `all` is what clears artifacts between runs. A name missing from it is a
+    # stale file that survives a run and reads as this run's answer.
+    a = artifacts_for("Biomancy", player="n43n")
+    assert set(a.all) == {a.trigger, a.result, a.diag, a.heartbeat, a.shot, a.commands}
+    assert len(a.all) == 6
