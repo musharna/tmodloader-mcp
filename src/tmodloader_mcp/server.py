@@ -526,7 +526,7 @@ def read_capture(name: str) -> Image:
 
     Args:
         name: A capture filename from `captures`, e.g.
-            `<mod>-shot-001-topleft.png`. A NAME, never a path — see
+            `<mod>-shot-<token>-001-topleft.png`. A NAME, never a path — see
             `captures.read` for why the containment is structural.
     """
     cfg = _cfg()
@@ -1026,8 +1026,10 @@ def diagnose_silence() -> str:
                 )
         else:
             client_lines = [
-                "client heartbeat: none found - no client, live or stale, has "
-                "ever written one"
+                (
+                    "client heartbeat: none found - no client, live or stale, has "
+                    "ever written one"
+                )
             ]
         server = heartbeat_mod.read(cfg.artifact(cfg.artifacts.heartbeat, server=True))
         readings = "\n".join(
