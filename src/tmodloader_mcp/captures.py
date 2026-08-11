@@ -31,6 +31,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .triggers import PLAYER_TOKEN_GRAMMAR
+
 
 def capture_pattern(mod_name: str) -> re.Pattern[str]:
     """What `shot` writes for ONE mod: its artifact prefix, the player token,
@@ -46,10 +48,14 @@ def capture_pattern(mod_name: str) -> re.Pattern[str]:
     three-digit index and leave the region matching what was meant to be the
     index — the pattern would still match, and would extract the wrong fields.
     The four-hex tail is what makes the boundary findable at all.
+
+    Imports `PLAYER_TOKEN_GRAMMAR` from `triggers` rather than holding its own
+    copy: two hand-written copies of a regex are two regexes, and this one has
+    to stay the SAME grammar `triggers` uses or the boundary against the
+    three-digit index stops being findable.
     """
-    token = r"[a-z0-9][a-z0-9-]*-[0-9a-f]{4}"
     return re.compile(
-        rf"^{re.escape(mod_name.lower())}-shot-{token}-\d{{3}}-[a-z]+\.png$"
+        rf"^{re.escape(mod_name.lower())}-shot-{PLAYER_TOKEN_GRAMMAR}-\d{{3}}-[a-z]+\.png$"
     )
 
 
