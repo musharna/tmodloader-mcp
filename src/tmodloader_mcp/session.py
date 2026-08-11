@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -187,10 +188,30 @@ def _write_atomically(path: Path, text: str) -> None:
     name only ever refers to a finished payload. The staging file is a sibling
     deliberately: a rename is only a rename within one filesystem, and the save
     directory is on /mnt/c while a temp dir would not be.
+
+    THE STAGING NAME IS UNIQUE PER WRITE, and it has to be. It used to be
+    `<path>.staging` - one name, derived from the polled path, which every
+    client shares BY DESIGN. So two requests in flight at once shared one
+    staging file: the last write won its contents, the first rename carried
+    them, and the second rename raised `FileNotFoundError` having already lost
+    its payload. One request silently replaced by another's - a lost update, in
+    the one place this project exists to make unambiguous.
+
+    Found by firing two captures at once, which is a thing this project could
+    not produce until two clients could run at once. Per-write rather than
+    per-session, because two threads driving one session collide identically
+    and a per-player name would fix only the case that happened to be found.
     """
-    staged = path.with_name(f"{path.name}.staging")
-    staged.write_text(text)
-    os.replace(staged, path)
+    staged = path.with_name(f"{path.name}.{uuid.uuid4().hex[:12]}.staging")
+    try:
+        staged.write_text(text)
+        os.replace(staged, path)
+    finally:
+        # A throw between the write and the rename would otherwise leave the
+        # payload behind under a name nothing will ever collect, in the same
+        # directory the game is reading. `missing_ok` because the ordinary path
+        # through here is a successful rename, after which it is already gone.
+        staged.unlink(missing_ok=True)
 
 
 @dataclass
@@ -228,13 +249,28 @@ class Session:
         """
         return artifacts_for(self.cfg.mod_name, self.player)
 
-    def _names(self, server: bool) -> Artifacts:
+    def _names(self, server: bool, player: str | None = None) -> Artifacts:
         """Per-player names for the client, unsuffixed ones for the server.
 
         The dedicated server has no player. Handing it a token would rename
         files it writes under names nothing reads.
+
+        `player` IS THE ADDRESSEE, and defaults to this session's own. That
+        distinction is the whole of a live failure: an answer is written by the
+        client the request NAMED, under ITS token, so the path to wait at is a
+        function of who was addressed rather than of who asked. This used to
+        read `self.player` unconditionally, so `diag(target='somebody else')`
+        waited out its full timeout at a filename that client never touches -
+        while the answer sat on disk beside it, correct and unread. The
+        session's player is only the DEFAULT addressee.
+
+        It worked before answers were per-player, and that is the uncomfortable
+        part: every client wrote one shared reply file, so addressing worked
+        BECAUSE answers were ambiguous. Removing the ambiguity is what broke it.
         """
-        return self.cfg.artifacts if server else self.artifacts
+        if server:
+            return self.cfg.artifacts
+        return artifacts_for(self.cfg.mod_name, player or self.player)
 
     def commands(self, *, server: bool = False) -> CommandSet:
         """What this side's mod says it serves.
@@ -282,7 +318,7 @@ class Session:
         )
 
         trigger = self.path(self.cfg.artifacts.trigger, server=server)
-        result = self.path(self._names(server).result, server=server)
+        result = self.path(self._names(server, target).result, server=server)
 
         result.unlink(missing_ok=True)
         _write_atomically(trigger, payload)
@@ -303,7 +339,7 @@ class Session:
         them said which six, and were parsed and thrown away — so a caller could
         learn that six existed and never what any of them was.
         """
-        dump = self.path(self._names(server).diag, server=server)
+        dump = self.path(self._names(server, target).diag, server=server)
         dump.unlink(missing_ok=True)
 
         reply = self.ask("diag", target=target, server=server, timeout=timeout)
@@ -342,7 +378,7 @@ class Session:
         disguise - the path handed back was unique among the calls that made
         it, which is not the property anybody needed.
         """
-        drop = self.path(self.artifacts.shot, server=False)
+        drop = self.path(self._names(False, target).shot, server=False)
         drop.unlink(missing_ok=True)
 
         reply = self.ask("shot", argument=region, target=target, timeout=timeout)
