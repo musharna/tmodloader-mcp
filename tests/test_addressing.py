@@ -25,7 +25,7 @@ import pytest
 
 from tmodloader_mcp import session as session_mod
 from tmodloader_mcp.session import Session
-from tmodloader_mcp.triggers import Reply, artifacts_for
+from tmodloader_mcp.triggers import Reply, TriggerError, artifacts_for
 
 #: The session's own player, and somebody else entirely. Both are real names
 #: run through the real token rule rather than hand-spelled filenames, so these
@@ -397,4 +397,102 @@ def test_a_claim_never_writes_into_the_polled_path(cfg, monkeypatch):
     assert written[-1].parent == trigger.parent, (
         "staged outside the trigger's directory - a link only works within one "
         "filesystem, and the save directory is on /mnt/c"
+    )
+
+
+def test_a_blocked_claim_waits_for_the_slot_rather_than_failing(sess, cfg, monkeypatch):
+    """Contention is NORMAL and sub-second, not a fault.
+
+    Two developers on one machine will collide routinely, and the slot frees
+    within one of the mod's poll ticks. Failing on contact would turn an
+    invisible wait into a visible error for a condition that resolves itself.
+
+    The slot is freed from inside the sleep, which is where a real consumption
+    would land, and makes the test deterministic instead of racing a thread.
+    """
+    _publish(cfg)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(trigger, "diag@somebody-else")
+
+    def freeing_sleep(_seconds):
+        trigger.unlink(missing_ok=True)
+
+    monkeypatch.setattr(session_mod.time, "sleep", freeing_sleep)
+    _replies_when_triggered(
+        monkeypatch,
+        cfg.artifact(artifacts_for(cfg.mod_name, SELF).result, server=False),
+        "mine",
+    )
+
+    assert sess.ask("diag", timeout=5.0).text == "mine"
+
+
+def test_a_claim_that_never_clears_names_what_is_holding_it(sess, cfg, monkeypatch):
+    """A NEGATIVE RESULT NEEDS A POSITIVE CONTROL, and the control here is the
+    test above: the wait must end, but only when the slot genuinely never frees.
+
+    The message has to name the pending request, because the caller's own
+    request is fine and the game is fine - neither of the things they would
+    otherwise go and check.
+    """
+    _publish(cfg)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(trigger, "shot:full@somebody-else")
+
+    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+
+    with pytest.raises(TriggerError) as refused:
+        sess.ask("diag", timeout=0.2)
+
+    message = str(refused.value)
+    assert "somebody-else" in message, f"does not name what is holding it: {message}"
+    assert trigger.read_text() == "shot:full@somebody-else", (
+        "the blocked claim deleted another session's request, which is the "
+        "overwrite this whole change removes"
+    )
+
+
+def test_the_claim_wait_spends_the_callers_timeout_not_a_second_budget(
+    sess, cfg, monkeypatch
+):
+    """A caller passing timeout=N asked for an ANSWER within N seconds.
+
+    Giving the claim its own N and the reply another N would mean a caller
+    blocked for the whole budget then waits the whole budget again - and the
+    error they finally get names a silent game, when the game was never
+    involved.
+    """
+    _publish(cfg)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(trigger, "diag@somebody-else")
+
+    slept: list[float] = []
+
+    def counting_sleep(seconds):
+        slept.append(seconds)
+        if len(slept) >= 3:
+            trigger.unlink(missing_ok=True)
+
+    monkeypatch.setattr(session_mod.time, "sleep", counting_sleep)
+
+    seen: list[float] = []
+    real_await = Session._await_text
+
+    def spy(self, path, *, timeout, what):
+        seen.append(timeout)
+        return real_await(self, path, timeout=timeout, what=what)
+
+    monkeypatch.setattr(Session, "_await_text", spy)
+    _replies_when_triggered(
+        monkeypatch,
+        cfg.artifact(artifacts_for(cfg.mod_name, SELF).result, server=False),
+        "mine",
+    )
+
+    sess.ask("diag", timeout=5.0)
+
+    assert seen, "the reply was never awaited"
+    assert seen[0] < 5.0, (
+        f"the reply got the full {seen[0]}s after the claim had already spent "
+        "part of the budget - that is two budgets, not one"
     )
