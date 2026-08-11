@@ -331,6 +331,46 @@ class Session:
 
     # ---- driving ---------------------------------------------------------
 
+    def _busy_message(self, trigger: Path, timeout: float) -> str:
+        """Why a claim gave up, naming the request in the way.
+
+        The caller's own request is fine and so is the game, so a timeout that
+        described either would send them to check the two things that are not
+        wrong.
+        """
+        try:
+            pending = trigger.read_text().strip()
+            age = time.time() - trigger.stat().st_mtime
+            held = f"{pending!r}, {age:.0f}s old"
+        except OSError:
+            held = "a request that vanished while it was being read"
+
+        return (
+            f"the trigger at {trigger} still holds {held} after {timeout:.0f}s. "
+            "Another session's request is pending, and this one will not delete "
+            "it - that would be the overwrite this claim exists to prevent. If "
+            "the client it names is gone, remove the file by hand."
+        )
+
+    def _claim(self, trigger: Path, payload: str, *, timeout: float) -> float:
+        """Take the trigger slot, and return what is LEFT of `timeout`.
+
+        Returning the remainder rather than swallowing it is the whole point:
+        the caller asked for an answer within `timeout`, not for `timeout`
+        waiting to ask plus `timeout` waiting to hear.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                _claim_atomically(trigger, payload)
+            except TriggerBusy:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TriggerError(self._busy_message(trigger, timeout)) from None
+                time.sleep(min(CLAIM_POLL, remaining))
+                continue
+            return max(0.0, deadline - time.monotonic())
+
     def ask(
         self,
         command: str,
@@ -364,9 +404,9 @@ class Session:
         result = self.path(self._names(server, target).result, server=server)
 
         result.unlink(missing_ok=True)
-        _claim_atomically(trigger, payload)
+        remaining = self._claim(trigger, payload, timeout=timeout)
 
-        text = self._await_text(result, timeout=timeout, what=f"reply to {payload!r}")
+        text = self._await_text(result, timeout=remaining, what=f"reply to {payload!r}")
         return Reply(command=command, text=text.strip())
 
     def diag(
