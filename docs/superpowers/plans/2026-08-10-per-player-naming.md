@@ -434,7 +434,9 @@ def test_all_covers_every_artifact_including_the_per_player_ones():
     # `all` is what clears artifacts between runs. A name missing from it is a
     # stale file that survives a run and reads as this run's answer.
     a = artifacts_for("Biomancy", player="n43n")
-    assert set(a.all) == {a.trigger, a.result, a.diag, a.heartbeat, a.shot, a.commands}
+    assert set(a.all) == {
+        a.trigger, a.result, a.diag, a.heartbeat, a.shot, a.commands
+    }
     assert len(a.all) == 6
 ```
 
@@ -610,16 +612,12 @@ def test_the_token_cannot_swallow_the_index():
     stand in for the index. The four-hex tail is what makes the boundary
     findable.
     """
-    m = capture_pattern("Biomancy").match(
-        "biomancy-shot-big-bird-44a3-012-topright.png"
-    )
+    m = capture_pattern("Biomancy").match("biomancy-shot-big-bird-44a3-012-topright.png")
     assert m
 
     # The positive control: a name that is NOT a valid token is refused, so
     # the test above cannot be passing because the pattern matches anything.
-    assert not capture_pattern("Biomancy").match(
-        "biomancy-shot-nothex-zzzz-012-topright.png"
-    )
+    assert not capture_pattern("Biomancy").match("biomancy-shot-nothex-zzzz-012-topright.png")
 
 
 def test_an_unanchored_lookalike_is_still_refused():
