@@ -408,7 +408,14 @@ def test_the_claim_probe_leaves_nothing_behind(tmp_path):
 def test_the_claim_probe_is_not_repeated_on_every_call(tmp_path, monkeypatch):
     """`check` runs from `_cfg` on EVERY tool call (server.py:68-73), so an
     uncached probe would put two /mnt/c writes on the hot path to answer a
-    question whose answer cannot change while the server runs."""
+    question whose answer cannot change while the server runs.
+
+    Asserted as "no MORE calls after the first", not a fixed total: a single
+    probe now links twice on purpose (see
+    test_a_save_directory_whose_link_never_refuses_is_reported), so the
+    count that must not grow is whatever the first call cost, not a
+    hardcoded 1.
+    """
     config._claim_support.cache_clear()
     calls: list[tuple] = []
     real = config.os.link
@@ -420,7 +427,141 @@ def test_the_claim_probe_is_not_repeated_on_every_call(tmp_path, monkeypatch):
     monkeypatch.setattr(config.os, "link", counting)
 
     config._claim_support(str(tmp_path))
+    after_first_call = len(calls)
     config._claim_support(str(tmp_path))
     config._claim_support(str(tmp_path))
 
-    assert len(calls) == 1, f"probed {len(calls)} times for one directory"
+    assert after_first_call > 0, "the probe never linked at all"
+    assert len(calls) == after_first_call, (
+        f"probed {len(calls) - after_first_call} more time(s) after the "
+        "first call for one directory"
+    )
+
+
+def test_a_save_directory_whose_link_never_refuses_is_reported(tmp_path, monkeypatch):
+    """A FILESYSTEM WHOSE `os.link` SILENTLY OVERWRITES AN OCCUPIED NAME PASSES
+    A PROBE THAT ONLY CHECKS LINKING EXISTS - precisely the failure mode the
+    harness depends on `link` NOT having: the mod claims the trigger by
+    linking onto it, and the refusal on an occupied name is the entire
+    mechanism stopping two sessions from overwriting each other's requests.
+
+    A permissive fake that always "succeeds" therefore has to be reported
+    unusable, not silent, even though `os.link` never raised.
+    """
+    config._claim_support.cache_clear()
+
+    def permissive(src, dst):
+        Path(dst).write_text("clobbered")
+
+    monkeypatch.setattr(config.os, "link", permissive)
+
+    problem = config._claim_support(str(tmp_path))
+
+    assert problem is not None, (
+        "a filesystem whose os.link does not refuse an occupied name was "
+        "reported as fine"
+    )
+
+
+def test_a_probe_cleanup_failure_does_not_discard_the_diagnosis(tmp_path, monkeypatch):
+    """REPRODUCES A LEFTOVER PROBE FILE FROM A KILLED PROCESS PLUS A SAVE
+    DIRECTORY THAT STOPS BEING WRITABLE MID-PROBE: `write_text` succeeds,
+    `os.link` fails and returns a diagnosis, and then cleanup's OWN `unlink`
+    fails too. The unlink failure must not replace the diagnosis with a raw
+    exception - `_cfg` only turns a `RuntimeError` from `check` into a
+    readable message, so anything else would reach the caller as a traceback
+    instead of "configuration is unusable".
+    """
+    config._claim_support.cache_clear()
+
+    def refuses_link(src, dst):
+        raise OSError(errno.EACCES, "permission denied")
+
+    def refuses_unlink(self, missing_ok=False):
+        raise OSError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(config.os, "link", refuses_link)
+    monkeypatch.setattr(Path, "unlink", refuses_unlink)
+
+    problem = config._claim_support(str(tmp_path))
+
+    assert problem is not None, "the diagnosis was discarded"
+    assert "permission denied" in problem
+
+
+def test_a_write_failure_is_not_cached_as_a_permanent_verdict(tmp_path, monkeypatch):
+    """ENOSPC, OR A MOMENTARY ANTIVIRUS LOCK ON A `/mnt/c` PATH, IS TRANSIENT
+    IN A WAY LINK SUPPORT IS NOT. Caching it would pin "cannot support an
+    exclusive claim" for the life of the process even after the disk has
+    space again, so a write failure must be reported without being
+    memoised: the very next call has to retry rather than replay today's
+    failure.
+    """
+    config._claim_support.cache_clear()
+
+    attempts = 0
+    real_write_text = Path.write_text
+
+    def flaky_write(self, *args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError(errno.ENOSPC, "no space left on device")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", flaky_write)
+
+    with pytest.raises(OSError):
+        config._claim_support(str(tmp_path))
+
+    assert config._claim_support(str(tmp_path)) is None, (
+        "the second call did not retry - a transient write failure was "
+        "cached as a permanent verdict"
+    )
+    assert attempts == 2, f"the write was only attempted {attempts} time(s)"
+
+
+def test_the_claim_probe_is_keyed_per_directory(tmp_path, monkeypatch):
+    """A GLOBAL PROBE-ONCE-EVER MEMO WOULD SATISFY THE EXISTING CACHE TEST BY
+    ACCIDENT: it only ever calls `_claim_support` with one directory, so a
+    cache keyed on nothing (rather than on `save_dir`) would still show
+    `os.link` called exactly once. This proves a SECOND, DIFFERENT directory
+    is probed independently rather than reusing the first directory's
+    verdict.
+    """
+    config._claim_support.cache_clear()
+    other = tmp_path / "other"
+    other.mkdir()
+    calls: list[tuple] = []
+    real = config.os.link
+
+    def counting(src, dst):
+        calls.append((src, dst))
+        return real(src, dst)
+
+    monkeypatch.setattr(config.os, "link", counting)
+
+    config._claim_support(str(tmp_path))
+    after_first_dir = len(calls)
+    config._claim_support(str(other))
+
+    assert len(calls) > after_first_dir, (
+        "a second, different directory was not probed at all - the cache is "
+        "keyed globally rather than per directory"
+    )
+
+
+def test_the_unclaimable_message_names_a_remedy(tmp_path, monkeypatch):
+    """UNLIKE ITS SIBLINGS ("...(set TMODLOADER_DIR)"), the message this
+    reports named only the problem, not what a reader could actually do
+    about it."""
+    config._claim_support.cache_clear()
+
+    def refuses(src, dst):
+        raise OSError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(config.os, "link", refuses)
+
+    problem = config._claim_support(str(tmp_path))
+
+    assert "TMODLOADER_SAVE_DIR" in problem, f"names no remedy: {problem}"

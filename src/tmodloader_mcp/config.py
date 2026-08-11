@@ -23,6 +23,7 @@ what made them disagree quietly: see `load`.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 from dataclasses import dataclass
@@ -266,9 +267,38 @@ def load(env: dict[str, str] | None = None) -> Config:
     )
 
 
+class _ProbeWriteFailed(OSError):
+    """The claim probe could not even WRITE into `save_dir`.
+
+    Deliberately RAISED rather than returned. `_claim_support` is
+    `lru_cache`d, and `lru_cache` only memoises a RETURN - never a raised
+    exception - so raising here is what stops a full disk or a momentary
+    antivirus lock on a `/mnt/c` path from being pinned as a permanent
+    verdict about the directory's LINKING support, which is a different,
+    much more stable, property. `check` catches this and reports it without
+    it ever reaching the cache.
+    """
+
+
+def _cannot_claim(save_dir: str, reason: str) -> str:
+    """The shared "this directory cannot isolate two sessions" message.
+
+    Names the remedy, unlike its first draft: a reader who does not own the
+    directory (a network share, a container mount) needs to be told to point
+    `TMODLOADER_SAVE_DIR` elsewhere, not just informed that something failed.
+    """
+    return (
+        f"{save_dir} cannot support an exclusive claim on the trigger file "
+        f"({reason}). Two sessions sharing this directory would overwrite "
+        "each other's requests, and this refuses rather than shipping that "
+        "silently. Set TMODLOADER_SAVE_DIR to a directory on a filesystem "
+        "that supports exclusive hard links."
+    )
+
+
 @lru_cache(maxsize=8)
 def _claim_support(save_dir: str) -> str | None:
-    """None if `save_dir` can support an exclusive claim, else why not.
+    """None if `save_dir` enforces exclusivity when linking, else why not.
 
     The harness takes the trigger by linking onto it, which is atomic AND
     refuses an occupied name - that refusal is what stops two sessions
@@ -276,8 +306,24 @@ def _claim_support(save_dir: str) -> str | None:
     filesystem, so a directory that cannot provide it cannot provide isolation,
     and this says so rather than falling back to the write that loses requests.
 
-    CACHED PER DIRECTORY, because `check` runs from `_cfg` on every tool call
-    and this writes two files. The answer cannot change while the server runs.
+    PROVES REFUSAL, NOT JUST PRESENCE. A probe that only checked whether
+    `os.link` succeeded once would pass a filesystem whose `link` silently
+    overwrites an occupied name - exactly the failure mode the harness
+    depends on `link` NOT having. So this links onto a fresh name, then
+    links onto that SAME name again and requires the second call to raise
+    `FileExistsError`. A filesystem that allows the second link does not
+    enforce exclusivity and is reported as unusable even though `os.link`
+    "worked" both times.
+
+    CACHED PER DIRECTORY, but the cached verdict is about LINKING ONLY.
+    `check` runs from `_cfg` on every tool call, so an uncached probe would
+    put two `/mnt/c` writes on the hot path for a question whose answer
+    cannot change while the server runs - true of link support, but NOT of
+    a failure to even write the probe file (a full disk, a momentary
+    antivirus lock), which is transient in a way link support is not. That
+    case is raised as `_ProbeWriteFailed` instead of returned, so it is
+    never memoised: the next call tries again rather than replaying today's
+    failure for the rest of the process.
 
     Keyed by `str` rather than `Path` so the cache key is hashable and stable.
     """
@@ -286,23 +332,48 @@ def _claim_support(save_dir: str) -> str | None:
     target = Path(save_dir) / f"{stem}.claim"
     try:
         source.write_text("probe")
-        os.link(source, target)
-    except FileExistsError:
-        # The target already existed, which is the refusal being tested for -
-        # so linking works here. A leftover from a killed process, not a fault.
-        return None
-    except OSError as refused:
-        return (
-            f"{save_dir} cannot support an exclusive claim on the trigger file "
-            f"({refused.strerror}). Two sessions sharing this directory would "
-            "overwrite each other's requests, and this refuses rather than "
-            "shipping that silently."
-        )
-    finally:
-        target.unlink(missing_ok=True)
-        source.unlink(missing_ok=True)
+    except OSError as failed:
+        raise _ProbeWriteFailed(failed.errno, failed.strerror) from failed
 
-    return None
+    try:
+        try:
+            os.link(source, target)
+        except FileExistsError:
+            # The target already existed, which is the refusal being tested
+            # for - so linking works here. A leftover from a killed process,
+            # not a fault.
+            return None
+        except OSError as refused:
+            return _cannot_claim(save_dir, refused.strerror or str(refused))
+
+        # The target now exists because the link above created it. Linking
+        # onto it a SECOND time is the actual property under test: a
+        # filesystem whose `link` refuses only sometimes, or never, would
+        # pass the first link and still be unsafe to depend on.
+        try:
+            os.link(source, target)
+        except FileExistsError:
+            return None
+        except OSError as refused:
+            return _cannot_claim(save_dir, refused.strerror or str(refused))
+        else:
+            return (
+                f"{save_dir} lets `os.link` land on an occupied name instead "
+                "of refusing it. Two sessions sharing this directory would "
+                "overwrite each other's requests, and this refuses rather "
+                "than shipping that silently. Set TMODLOADER_SAVE_DIR to a "
+                "directory on a filesystem that supports exclusive hard "
+                "links."
+            )
+    finally:
+        # Both wrapped rather than left to `missing_ok=True` alone: that only
+        # suppresses "already gone", not a live directory that stopped being
+        # writable mid-probe. A `PermissionError` here must not replace the
+        # diagnosis above with an unhandled exception from `finally`.
+        with contextlib.suppress(OSError):
+            target.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            source.unlink(missing_ok=True)
 
 
 def check(cfg: Config) -> list[str]:
@@ -343,9 +414,21 @@ def check(cfg: Config) -> list[str]:
             f"no save directory at {cfg.save_dir} (set TMODLOADER_SAVE_DIR)"
         )
     else:
-        unclaimable = _claim_support(str(cfg.save_dir))
-        if unclaimable:
-            problems.append(unclaimable)
+        try:
+            unclaimable = _claim_support(str(cfg.save_dir))
+        except _ProbeWriteFailed as failed:
+            # Not memoised - see `_claim_support` - so this is re-tried on
+            # every call rather than repeating today's answer forever.
+            problems.append(
+                f"cannot write into {cfg.save_dir} to test whether it can "
+                "support an exclusive claim on the trigger file "
+                f"({failed.strerror}). This may be transient - a full disk, "
+                "a momentary lock - so it is reported rather than assumed "
+                "permanent; the next call tries again."
+            )
+        else:
+            if unclaimable:
+                problems.append(unclaimable)
 
     if not cfg.mod_source.is_dir():
         problems.append(
