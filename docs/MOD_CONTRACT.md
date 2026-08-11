@@ -189,6 +189,15 @@ A dedicated server never has a player, so it never writes a tokened heartbeat
 at all — only the `-server` suffix from
 [Where the files live](#where-the-files-live) applies to it.
 
+**Read the untokened client heartbeat as a slot, not as a client.** Nothing
+deletes it when its writer moves to a tokened name, and every client that
+boots writes it again on the way through the menu — so with two clients it
+holds ONE record, belonging to whoever started last, frozen at whatever it
+said then. Measured: `polls: 1`, unchanged, still reading `live` for 45
+seconds after the client it came from had been in the world for a minute. Use
+`dedServ`, `polls` and the token to decide what is really running; see
+[What a live two-client run found](#what-a-live-two-client-run-found).
+
 ## `<mod>-capture.trigger` — the request
 
 The **harness** writes this; the mod polls for it, acts, and deletes it. The
@@ -215,6 +224,14 @@ some default action makes a typo look like a success.
 This is the one artifact that stays a **single shared name even with two
 clients** — see [What deliberately stays shared](#what-deliberately-stays-shared)
 for why an addressed trigger still has to be one file both clients poll.
+
+**One name means one slot: it holds a single request, not a queue.** A second
+request written before the first has been read replaces it, and the one that
+lost is gone with no trace — its caller waits out the full timeout while
+nothing anywhere explains why. Measured with two clients capturing at the same
+instant: one answered in 1.2s, the other timed out at 120s having never had a
+request on disk to find. Stagger concurrent requests, or address the two
+clients from one caller that serialises them.
 
 ## The reply
 
@@ -312,36 +329,50 @@ stay shared too, for the reason given in
 these three are the limitation this section used to describe; they were never
 part of the ambiguity that namespacing removes.
 
-### What is still open
+### What a live two-client run found
 
-Per-player naming was checked against `Artifacts` and the responder's own
-sources, not yet against two real clients running at once. Three behaviours
-are **predicted from reading the code, not yet observed**, and a live
-two-client run is expected to settle them:
+Two clients, `n43n` and `tst2`, against one server — the case this whole
+section is about, run for the first time on 2026-08-11. What follows is
+**observed**, and replaces the three predictions that used to stand here.
 
-- **A single client may appear TWICE in `heartbeat`.** Nothing deletes
-  `<mod>-hooks.txt` when a client starts writing its tokened name, and
-  `heartbeat` discovery matches both the tokened and the unsuffixed form — see
-  [The heartbeat](#the-heartbeat). One client could plausibly show up as a
-  live tokened entry AND a plain entry aging past the 45-second staleness
-  window.
-- **An UNTARGETED request may be answerable by either client.** The mod's
-  addressing check accepts any client when a trigger names no `@player`, while
-  a caller waiting on a reply is watching its own session's per-player answer
-  file. Which client actually answers an unaddressed request with two clients
-  running is not yet known.
-- **The `capture` verb may report the wrong client's picture.** It uses
-  Terraria's own capture camera, which writes into a directory the mod does
-  not name, and the mod finds the result by picking the largest NEW `.png`
-  under the shared save directory — see [The drop box](#the-drop-box) for why
-  this is unrelated to `shot`'s per-player drop box. Per-player naming does
-  nothing to fix this and may make it MORE likely to surface, since two
-  clients capturing near-simultaneously is now something this project can
-  actually produce.
+**Addressing works, and each client answers as itself.** A `shot` addressed to
+each in turn produced two distinct files with two distinct tokens and two
+distinct sets of bytes, and neither client consumed the other's request. That
+last part is earned rather than lucky: the responder checks addressing BEFORE
+deleting the trigger, so a client that is not the addressee leaves the file
+where its owner will find it. Keep that ordering if you write your own.
 
-This subsection is written to be replaced, not append to indefinitely: once a
-live run has watched each of these happen or not, that observation belongs
-here in place of the prediction, not beside it.
+**A single client does appear twice, and the second entry is a phantom.** It
+was predicted as a tokened entry beside a plain one decaying past the
+45-second window. What actually happens is worse: the plain entry is a
+_frozen_ main-menu observation — `polls: 1`, `gameMenu: True`,
+`world-ready: False` — abandoned the moment the client got a character. So for
+45 seconds `heartbeat` reports a second client that is "still starting up",
+and after that a dead one, and neither ever existed. It is also **shared**:
+the second client to boot overwrites it, so N clients produce ONE phantom,
+belonging to whoever started most recently.
+
+**An untargeted request is a coin flip — so address them.** `IsFor` returns
+true for every client when no `@player` is given, so all of them qualify and
+whichever polls first deletes the shared trigger and answers. Run twice in a
+row, it was answered by a different client each time. A caller waiting on its
+own player's answer file therefore times out roughly half the time, with a
+perfectly good answer sitting on disk under somebody else's name. **Pass a
+target whenever more than one client is up.**
+
+**Two requests cannot be in flight at once.** The trigger is one file and one
+slot, so a second request written while the first is still unread simply
+replaces it — the loser is lost silently and its caller waits out the full
+timeout. This is what stops the `capture` verb's attribution question from
+being answerable at all: two near-simultaneous captures are not something the
+protocol can carry, so whether it would report the wrong client's picture
+remains **unreachable rather than open**. Stagger concurrent requests.
+
+Whether the trigger should become a queue is a real question and a separate
+one. [What deliberately stays shared](#what-deliberately-stays-shared) argues
+for one trigger from ADDRESSING — every client must be able to see a request
+to know it is not theirs — and that argument is sound and says nothing about
+two requests at the same instant.
 
 ## What the harness clears
 

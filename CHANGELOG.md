@@ -67,6 +67,53 @@ keeping, not because they broke a released API.
   still there. **Breaking:** `HeartbeatOut.client` is gone; callers read
   `HeartbeatOut.clients`, a list.
 
+### Fixed
+
+Both of these were found by running two clients against one server for the
+first time — the case per-player naming exists for, and one no test in this
+repository had ever been able to express.
+
+- **An answer is now awaited where the ADDRESSEE writes it.**
+  `diag(target='tst2')` from a session whose player was `n43n` timed out after
+  60 seconds while `tst2` answered correctly into its own files: the request
+  was addressed and the reply path was not. This was a regression introduced
+  by per-player naming itself, and an uncomfortable one — before it, every
+  client wrote one shared reply file, so addressing worked BECAUSE answers
+  were ambiguous, and removing the ambiguity broke it at the same stroke.
+
+  The wrong coupling lived at three sites — the reply file, the diag dump and
+  the shot drop box each derived their path from the session's player — so
+  correcting only the one that failed would have left `diag` hanging on the
+  dump and `shot` on the drop box. `Session._names` now takes the addressee,
+  defaulting to the session's own player: an answer is written by the client
+  the request named, under its token, so the path is a function of who was
+  addressed rather than of who asked.
+
+- **Two requests in flight no longer share one staging file.** The trigger is
+  written atomically — staged beside the polled path and renamed into place —
+  but the staging name was derived FROM that shared path, so two concurrent
+  writers shared it. The last write won the contents, the first rename carried
+  them, and the second raised `FileNotFoundError` having already lost its
+  payload: one request silently replaced by another's, in the one place this
+  project exists to make unambiguous. The staging name is now unique per
+  write, and a `finally` clears it so a throw between write and rename stops
+  leaving the payload in the directory the game reads.
+
+### Known
+
+- **An untargeted request with two clients up is a coin flip.** The mod's
+  addressing check accepts any client when no `@player` is given, so whichever
+  polls first deletes the shared trigger and answers; run twice in a row, a
+  different client answered each time. Pass a `target` when more than one
+  client is running.
+- **The trigger is one slot, not a queue.** A second request written before
+  the first is read replaces it, and the loser's caller waits out its full
+  timeout with nothing on disk to explain why. Stagger concurrent requests.
+  This is also why the `capture` verb's attribution question is unreachable
+  rather than open — two simultaneous captures are not something the protocol
+  can carry. See
+  [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#what-a-live-two-client-run-found).
+
 ## [0.2.0] - 2026-08-10
 
 The release where the mod-side half stopped being Biomancy's. 0.1.0 could tell
