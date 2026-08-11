@@ -6,6 +6,7 @@ that RESOLVES, passes every check, and drives the wrong thing.
 
 from __future__ import annotations
 
+import errno
 from pathlib import Path
 
 import pytest
@@ -355,3 +356,71 @@ def test_no_default_points_inside_somebody_s_home_directory():
         if "/Users/" in value or "/home/" in value
     }
     assert not personal, f"per-account default(s): {personal}"
+
+
+def test_a_save_directory_that_cannot_claim_is_reported(tmp_path, monkeypatch):
+    """A SILENT FALLBACK WOULD REBUILD THE DEFECT UNDER A NICER NAME.
+
+    The claim's exclusivity is `os.link`'s, and `os.link` is not available on
+    every filesystem. Falling back to `os.replace` there would mean two
+    sessions silently overwriting each other again - and the developer would
+    meet it months later as a lost request rather than today as a message.
+
+    Forced to fail rather than found failing: no filesystem is guaranteed to
+    refuse links on any given machine, so a test that waited to find one would
+    pass everywhere by not running.
+    """
+    config._claim_support.cache_clear()
+
+    def refuses(src, dst):
+        raise OSError(errno.EPERM, "operation not permitted")
+
+    monkeypatch.setattr(config.os, "link", refuses)
+
+    problem = config._claim_support(str(tmp_path))
+
+    assert problem is not None, "an unusable save directory was reported as fine"
+    assert "operation not permitted" in problem, (
+        f"does not say why it cannot claim: {problem}"
+    )
+
+
+def test_a_save_directory_that_can_claim_is_silent(tmp_path):
+    """POSITIVE CONTROL. A probe that reported EVERY directory unusable would
+    satisfy the test above and stop the server starting anywhere at all."""
+    config._claim_support.cache_clear()
+
+    assert config._claim_support(str(tmp_path)) is None
+
+
+def test_the_claim_probe_leaves_nothing_behind(tmp_path):
+    """It writes into the SAVE DIRECTORY - the one holding the user's worlds
+    and characters. Two files per call would accumulate there forever, and
+    `check` runs on every tool call."""
+    config._claim_support.cache_clear()
+    config._claim_support(str(tmp_path))
+
+    assert list(tmp_path.iterdir()) == [], (
+        f"probe litter left in the save directory: {list(tmp_path.iterdir())}"
+    )
+
+
+def test_the_claim_probe_is_not_repeated_on_every_call(tmp_path, monkeypatch):
+    """`check` runs from `_cfg` on EVERY tool call (server.py:68-73), so an
+    uncached probe would put two /mnt/c writes on the hot path to answer a
+    question whose answer cannot change while the server runs."""
+    config._claim_support.cache_clear()
+    calls: list[tuple] = []
+    real = config.os.link
+
+    def counting(src, dst):
+        calls.append((src, dst))
+        return real(src, dst)
+
+    monkeypatch.setattr(config.os, "link", counting)
+
+    config._claim_support(str(tmp_path))
+    config._claim_support(str(tmp_path))
+    config._claim_support(str(tmp_path))
+
+    assert len(calls) == 1, f"probed {len(calls)} times for one directory"

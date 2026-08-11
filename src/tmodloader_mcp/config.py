@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from .triggers import MOD_NAME, Artifacts, artifacts_for
@@ -265,6 +266,45 @@ def load(env: dict[str, str] | None = None) -> Config:
     )
 
 
+@lru_cache(maxsize=8)
+def _claim_support(save_dir: str) -> str | None:
+    """None if `save_dir` can support an exclusive claim, else why not.
+
+    The harness takes the trigger by linking onto it, which is atomic AND
+    refuses an occupied name - that refusal is what stops two sessions
+    overwriting each other's requests. `os.link` is not available on every
+    filesystem, so a directory that cannot provide it cannot provide isolation,
+    and this says so rather than falling back to the write that loses requests.
+
+    CACHED PER DIRECTORY, because `check` runs from `_cfg` on every tool call
+    and this writes two files. The answer cannot change while the server runs.
+
+    Keyed by `str` rather than `Path` so the cache key is hashable and stable.
+    """
+    stem = f".tmodloader-mcp-claimprobe-{os.getpid()}"
+    source = Path(save_dir) / stem
+    target = Path(save_dir) / f"{stem}.claim"
+    try:
+        source.write_text("probe")
+        os.link(source, target)
+    except FileExistsError:
+        # The target already existed, which is the refusal being tested for -
+        # so linking works here. A leftover from a killed process, not a fault.
+        return None
+    except OSError as refused:
+        return (
+            f"{save_dir} cannot support an exclusive claim on the trigger file "
+            f"({refused.strerror}). Two sessions sharing this directory would "
+            "overwrite each other's requests, and this refuses rather than "
+            "shipping that silently."
+        )
+    finally:
+        target.unlink(missing_ok=True)
+        source.unlink(missing_ok=True)
+
+    return None
+
+
 def check(cfg: Config) -> list[str]:
     """Problems that would make this config unusable, or an empty list.
 
@@ -302,6 +342,10 @@ def check(cfg: Config) -> list[str]:
         problems.append(
             f"no save directory at {cfg.save_dir} (set TMODLOADER_SAVE_DIR)"
         )
+    else:
+        unclaimable = _claim_support(str(cfg.save_dir))
+        if unclaimable:
+            problems.append(unclaimable)
 
     if not cfg.mod_source.is_dir():
         problems.append(
