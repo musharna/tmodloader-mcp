@@ -95,9 +95,9 @@ def contained(save_dir: Path, mod_name: str, name: str) -> Path:
     if not capture_pattern(mod_name).match(name):
         raise CaptureError(
             f"{name!r} is not a capture name for {mod_name}. Only files this "
-            f"harness wrote - {mod_name.lower()}-shot-<index>-<region>.png - can "
-            "be read back; the save directory also holds diag dumps, heartbeats, "
-            "the world, and any other mod's captures."
+            f"harness wrote - {mod_name.lower()}-shot-<token>-<index>-<region>.png "
+            "- can be read back; the save directory also holds diag dumps, "
+            "heartbeats, the world, and any other mod's captures."
         )
 
     root = save_dir.resolve()

@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from tmodloader_mcp.triggers import artifacts_for
+from tmodloader_mcp.triggers import artifacts_for, player_token
 
 DOC = Path(__file__).resolve().parent.parent / "docs" / "MOD_CONTRACT.md"
 
@@ -24,18 +24,53 @@ DOC = Path(__file__).resolve().parent.parent / "docs" / "MOD_CONTRACT.md"
 #: three pull requests removing from the code.
 PLACEHOLDER = "<mod>"
 
-#: A documented artifact: the placeholder, a dash, then a filename. Anchored on
-#: the placeholder so the prose phrase "mod-side" cannot match — it did, when
-#: this scanned for a bare `mod-` prefix, and reported the document as
-#: describing a file called `mod-side`.
-_MENTION = re.compile(rf"{re.escape(PLACEHOLDER)}-[A-Za-z0-9.\-]+")
+#: What the document writes where a real player token would go, the same way
+#: PLACEHOLDER stands in for a real mod name. A literal hash is one player's
+#: fact, not the protocol's — the document names the SHAPE.
+TOKEN_PLACEHOLDER = "<token>"
+
+#: A name whose token this test computes from the real `player_token`, then
+#: substitutes back out for TOKEN_PLACEHOLDER below. Any non-empty name would
+#: do; this one is also one of the three vectors the document itself quotes.
+_PROBE_PLAYER = "n43n"
+
+#: A documented artifact: the placeholder, a dash, then a filename. `<` and `>`
+#: are in the class so a per-player mention like `<mod>-diag-<token>.txt` scans
+#: as ONE name rather than stopping at the token placeholder's `<` — a version
+#: of this pattern that excluded them matched only `<mod>-diag-` and reported
+#: every per-player name as an invented file called that.
+#:
+#: Anchored on the placeholder so the prose phrase "mod-side" cannot match — it
+#: did, when this scanned for a bare `mod-` prefix, and reported the document
+#: as describing a file called `mod-side`.
+_MENTION = re.compile(rf"{re.escape(PLACEHOLDER)}-[A-Za-z0-9.\-<>]+")
 
 
 def _expected() -> set[str]:
-    """Every artifact name, spelled the way the document spells it."""
-    return {
+    """Every artifact name, spelled the way the document spells it.
+
+    Two forms per per-player artifact go in: the shared name with no player
+    (from `artifacts_for("mod")`, player=None) and the tokened name (from
+    `artifacts_for("mod", _PROBE_PLAYER)`), with the PROBE's real computed
+    token subbed back out for TOKEN_PLACEHOLDER — so this checks the
+    document's GRAMMAR, not one player's literal hash. `trigger` and
+    `commands` are deliberately absent from the tokened half: the protocol
+    does not namespace them, and a name never computed here cannot silently
+    stop being checked.
+    """
+    shared = {
         name.replace("mod-", f"{PLACEHOLDER}-", 1) for name in artifacts_for("mod").all
     }
+
+    tokened = artifacts_for("mod", _PROBE_PLAYER)
+    token = player_token(_PROBE_PLAYER)
+    assert token, "the probe player name must be non-empty to produce a token"
+    per_player = {
+        name.replace(token, TOKEN_PLACEHOLDER).replace("mod-", f"{PLACEHOLDER}-", 1)
+        for name in (tokened.result, tokened.diag, tokened.heartbeat, tokened.shot)
+    }
+
+    return shared | per_player
 
 
 def test_the_contract_document_exists():
@@ -64,9 +99,17 @@ def test_the_document_does_not_describe_files_that_do_not_exist():
     """
     mentioned = set(_MENTION.findall(DOC.read_text()))
 
-    # The renamed per-capture form is the HARNESS's product, not something the
-    # mod writes, so it is legitimately in the document and not in `Artifacts`.
-    mentioned = {m for m in mentioned if not m.startswith(f"{PLACEHOLDER}-shot-")}
+    # The renamed per-capture form (`<mod>-shot-<token>-<index>-<region>.png`)
+    # is the HARNESS's product, not something the mod writes, so it is
+    # legitimately in the document and not in `Artifacts`. Narrowed to that
+    # exact prefix rather than a blanket "starts with `<mod>-shot-`" — the
+    # broader form would also swallow `<mod>-shot-<token>.png`, the mod's own
+    # pre-rename drop box, which IS in `Artifacts` and belongs in this check.
+    mentioned = {
+        m
+        for m in mentioned
+        if not m.startswith(f"{PLACEHOLDER}-shot-{TOKEN_PLACEHOLDER}-")
+    }
 
     # Positive control: a scan that matches nothing would pass while proving
     # nothing at all. This is the assertion that catches a broken regex.

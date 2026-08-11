@@ -33,6 +33,40 @@ keeping, not because they broke a released API.
   passes while consumers never learn the file exists. Both mutations were run
   and seen to fail the right test with the right message.
 
+- **Per-player artifact naming — a client's ANSWERS carry a token.** Two
+  clients on one machine could already have their REQUESTS told apart (a
+  trigger can be addressed `shot@n43n`), but everything a client wrote back
+  was namespaced by side only, so two clients shared one heartbeat, one diag
+  dump, one capture reply and one shot drop box — see
+  [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#two-clients-at-once) for the
+  diagnosis this replaces.
+
+  A character name is now turned into a token — lowercased, non-alphanumeric
+  runs collapsed to one `-`, trimmed, plus `-` and the first four hex
+  characters of the MD5 of the ORIGINAL name's bytes — matching
+  `[a-z0-9][a-z0-9-]*-[0-9a-f]{4}` (`PLAYER_TOKEN_GRAMMAR` in `triggers.py`).
+  A client's heartbeat, diag reply, capture reply and shot drop box are all
+  suffixed with it once a character exists.
+
+  What deliberately did **not** gain a token: `<mod>-capture.trigger` and
+  `<mod>-commands.txt` stay one shared name each. The trigger's addressing
+  only works because every client polls the SAME file and decides for itself
+  whether a request is its own — a per-player trigger would give each client
+  its own copy and remove the one part of two-client addressing that already
+  worked. The command list describes the channel both clients share, not an
+  answer on it.
+
+### Changed
+
+- **`heartbeat`'s shape can express two clients now, not one.** The single
+  `client` key became a `clients` LIST, and each `HeartbeatSideOut` gained a
+  `player` field. The old shape could not express two clients at once and
+  silently reported whichever had written last — the same shared-file
+  ambiguity per-player naming removes above, wearing a different hat, so
+  shimming the old key would have kept the ambiguity while hiding that it was
+  still there. **Breaking:** `HeartbeatOut.client` is gone; callers read
+  `HeartbeatOut.clients`, a list.
+
 ## [0.2.0] - 2026-08-10
 
 The release where the mod-side half stopped being Biomancy's. 0.1.0 could tell
