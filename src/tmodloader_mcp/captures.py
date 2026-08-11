@@ -33,15 +33,24 @@ from pathlib import Path
 
 
 def capture_pattern(mod_name: str) -> re.Pattern[str]:
-    """What `shot` writes for ONE mod: its artifact prefix, plus the index and
-    region this harness renames the drop box to.
+    """What `shot` writes for ONE mod: its artifact prefix, the player token,
+    then the index and region this harness renames the drop box to.
 
     Anchored at both ends — an unanchored match would accept
     `evil-biomancy-shot-001-full.png.exe`. Built per mod rather than fixed,
     because two mods share one save directory and neither should be served the
     other's captures.
+
+    The token's grammar is PINNED rather than left as `[a-z0-9-]+`. An open
+    token is greedy across dashes and digits alike, so it would swallow the
+    three-digit index and leave the region matching what was meant to be the
+    index — the pattern would still match, and would extract the wrong fields.
+    The four-hex tail is what makes the boundary findable at all.
     """
-    return re.compile(rf"^{re.escape(mod_name.lower())}-shot-\d{{3}}-[a-z]+\.png$")
+    token = r"[a-z0-9][a-z0-9-]*-[0-9a-f]{4}"
+    return re.compile(
+        rf"^{re.escape(mod_name.lower())}-shot-{token}-\d{{3}}-[a-z]+\.png$"
+    )
 
 
 class CaptureError(RuntimeError):

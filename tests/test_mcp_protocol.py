@@ -77,7 +77,7 @@ EXPECTED_TOOLS = {
 #: `captures.capture_pattern(mod_name)` or the reader refuses it - which is the
 #: point of the pattern, and makes this constant part of the test rather than
 #: decoration.
-FAKE_CAPTURE = "fakemod-shot-001-full.png"
+FAKE_CAPTURE = "fakemod-shot-n43n-003f-001-full.png"
 
 #: Not a valid PNG. Nothing in this path decodes the image - the server hands
 #: back bytes and the client base64s them - so a decodable file would only be

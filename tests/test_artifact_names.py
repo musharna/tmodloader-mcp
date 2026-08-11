@@ -124,19 +124,28 @@ def test_capture_reading_follows_the_mod_name(tmp_path):
     """`captures` matched `^biomancy-shot-...` too, so another mod's captures
     were invisible to the reader that exists to serve them."""
     png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
-    (tmp_path / "mycoolmod-shot-001-full.png").write_bytes(png)
+    (tmp_path / "mycoolmod-shot-n43n-003f-001-full.png").write_bytes(png)
 
-    assert captures.available(tmp_path, "MyCoolMod") == ["mycoolmod-shot-001-full.png"]
-    assert captures.read(tmp_path, "MyCoolMod", "mycoolmod-shot-001-full.png") == png
+    assert captures.available(tmp_path, "MyCoolMod") == [
+        "mycoolmod-shot-n43n-003f-001-full.png"
+    ]
+    assert (
+        captures.read(tmp_path, "MyCoolMod", "mycoolmod-shot-n43n-003f-001-full.png")
+        == png
+    )
 
 
 def test_one_mods_capture_is_not_served_to_another(tmp_path):
     """Two mods, one save directory. The containment rule now has a second
     axis, and it is the same rule: serve only what this mod wrote."""
-    (tmp_path / "biomancy-shot-001-full.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "biomancy-shot-n43n-003f-001-full.png").write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+    )
 
     with pytest.raises(captures.CaptureError):
-        captures.read(Path(tmp_path), "MyCoolMod", "biomancy-shot-001-full.png")
+        captures.read(
+            Path(tmp_path), "MyCoolMod", "biomancy-shot-n43n-003f-001-full.png"
+        )
 
 
 # ---- answers carry the player, requests do not ---------------------------
