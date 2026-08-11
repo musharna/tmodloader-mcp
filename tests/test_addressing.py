@@ -17,6 +17,7 @@ Removing the ambiguity is what broke it.
 
 from __future__ import annotations
 
+import multiprocessing
 import struct
 import zlib
 from pathlib import Path
@@ -496,3 +497,120 @@ def test_the_claim_wait_spends_the_callers_timeout_not_a_second_budget(
         f"the reply got the full {seen[0]}s after the claim had already spent "
         "part of the budget - that is two budgets, not one"
     )
+
+
+def test_a_claim_that_succeeds_on_its_last_tick_still_fails_as_a_claim(
+    sess, cfg, monkeypatch
+):
+    """A claim can SUCCEED and still have nothing left to wait with.
+
+    `_claim` used to return whatever was left of `timeout` unconditionally, so
+    a claim that only went through on the final poll returned ~0s of budget
+    for the reply. `_await_text(timeout=0)` then failed on its first check and
+    raised a message about the GAME not polling - which was never asked, and
+    was never what was slow. The budget was spent entirely by contention for
+    the slot, and the failure has to say so.
+
+    The clock is faked rather than raced: `time.monotonic` and `time.sleep`
+    are both replaced with a hand-advanced counter, so the claim succeeds at a
+    deterministic instant with less than one `CLAIM_POLL` of budget left,
+    rather than hoping real wall-clock timing lands there.
+    """
+    _publish(cfg)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(trigger, "diag@somebody-else")
+
+    clock = [0.0]
+    calls = [0]
+
+    def advancing_sleep(seconds):
+        calls[0] += 1
+        clock[0] += seconds
+        if calls[0] >= 2:
+            trigger.unlink(missing_ok=True)
+
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(session_mod.time, "sleep", advancing_sleep)
+
+    with pytest.raises(TriggerError) as refused:
+        sess.ask("diag", timeout=0.25)
+
+    message = str(refused.value)
+    assert "polling" not in message, (
+        f"blamed the game for a budget the claim spent: {message}"
+    )
+    assert "Another session's request is pending" in message, (
+        f"does not stay framed as a claim: {message}"
+    )
+
+
+def _claim_worker(trigger: str, payload: str, result_path: str) -> None:
+    """Multiprocessing target: attempt one real claim, record the outcome.
+
+    Module-level so it can be sent to a child process (`multiprocessing`
+    pickles the target by qualified name), and so it works the same way under
+    both `fork` and `spawn`.
+    """
+    from tmodloader_mcp import session as worker_session_mod
+
+    try:
+        worker_session_mod._claim_atomically(Path(trigger), payload)
+    except worker_session_mod.TriggerBusy:
+        Path(result_path).write_text("busy")
+    else:
+        Path(result_path).write_text("ok")
+
+
+def test_a_claim_under_real_process_contention_admits_exactly_one(tmp_path):
+    """Real kernel-level exclusion, not a mocked clock.
+
+    Every other test in this module fakes `time.sleep` and reasons about
+    `_claim_atomically` from a single process, which never actually exercises
+    the guarantee the whole design rests on: several processes racing
+    `os.link` onto the same name, with the KERNEL - not this codebase -
+    deciding which one wins. This runs several real OS processes against one
+    trigger path and checks that exactly one wins and every other gets
+    `TriggerBusy`.
+
+    `tmp_path` here is a real (if ordinary) filesystem, not the production
+    save directory, which is DrvFs under WSL2 - `os.link`'s atomicity there
+    was separately confirmed to hold when `_claim_atomically` was written.
+
+    The payload left on disk is checked against the recorded winner in the
+    same test, so a harness bug that let every worker report failure (and
+    thus vacuously pass a "not more than one winner" check) could not pass
+    this one: nothing would be on disk to match against.
+    """
+    trigger = tmp_path / "biomancy-capture.trigger"
+    workers = 8
+    procs: list[multiprocessing.Process] = []
+    result_paths: list[Path] = []
+
+    for i in range(workers):
+        result_path = tmp_path / f"result-{i}.txt"
+        result_paths.append(result_path)
+        proc = multiprocessing.Process(
+            target=_claim_worker,
+            args=(str(trigger), f"diag@worker-{i}", str(result_path)),
+        )
+        procs.append(proc)
+
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(timeout=10)
+
+    assert all(not proc.is_alive() for proc in procs), "a worker never finished"
+
+    outcomes = [p.read_text() for p in result_paths]
+    assert outcomes.count("ok") == 1, f"expected exactly one winner, got {outcomes}"
+    assert outcomes.count("busy") == workers - 1, (
+        f"expected every other worker refused, got {outcomes}"
+    )
+
+    winner = outcomes.index("ok")
+    assert trigger.read_text() == f"diag@worker-{winner}", (
+        "the payload on disk does not belong to the recorded winner - a run "
+        "where every worker failed could not have produced this either"
+    )
+    assert not list(tmp_path.glob("*.staging")), "a staging file was left behind"
