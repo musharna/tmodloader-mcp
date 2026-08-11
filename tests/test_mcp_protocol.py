@@ -477,6 +477,12 @@ def test_heartbeat_answers_with_no_game_and_no_session(fake_install):
     Both sides absent is the single most informative reading this can give — it
     is the difference between a mod that is slow and one that was never loaded —
     so it is a value here, not an error.
+
+    No client heartbeat file exists at all here, not even the unsuffixed
+    "up, no character" form - so `clients` is an EMPTY LIST rather than one
+    entry reporting `present: False`. That is the shape of "nothing ever wrote
+    one" now that a client can be zero, one, or several files: an empty list
+    says so directly, where a single always-present entry could not.
     """
 
     async def call(session):
@@ -484,12 +490,12 @@ def test_heartbeat_answers_with_no_game_and_no_session(fake_install):
 
     out = _structured(_run(call, fake_install))
 
-    for side in ("client", "server"):
-        assert out[side]["present"] is False, f"{side} invented a heartbeat"
-        assert out[side]["live"] is False
-        assert out[side]["age_seconds"] is None
-        assert out[side]["fields"] == {}
-        assert "not loaded" in out[side]["diagnosis"]
+    assert out["clients"] == [], "no heartbeat file exists, so no client was invented"
+    assert out["server"]["present"] is False, "server invented a heartbeat"
+    assert out["server"]["live"] is False
+    assert out["server"]["age_seconds"] is None
+    assert out["server"]["fields"] == {}
+    assert "not loaded" in out["server"]["diagnosis"]
 
 
 @needs_subprocess
@@ -522,7 +528,14 @@ def test_heartbeat_reads_a_real_one_and_types_its_booleans(fake_install):
 
     out = _structured(_run(call, fake_install))
 
-    client = out["client"]
+    # The unsuffixed name is a client that is up and has not got a character
+    # yet, so it is found and reported with a NULL player - not dropped, and
+    # not confused with the dedicated server's file.
+    assert len(out["clients"]) == 1, (
+        f"expected exactly one client, got {out['clients']}"
+    )
+    client = out["clients"][0]
+    assert client["player"] is None
     assert client["present"] is True
     assert client["live"] is True
     assert client["side"] == "client", "side comes from dedServ, not the filename"
@@ -773,6 +786,37 @@ def test_diagnose_silence_reads_this_install_rather_than_reciting_prose(fake_ins
     # POSITIVE CONTROL that the tree is still there: readings without the tree
     # would be a status dump, and the tree is what says which fix to reach for.
     assert "STALE" in text and "NOT ARMED" in text
+
+
+@needs_subprocess
+def test_diagnose_silence_finds_a_client_that_has_a_character(fake_install):
+    """A reachable bug surfaced by Task 2's review, fixed here.
+
+    Once a client has a character it writes a PER-PLAYER heartbeat name, so
+    reading only the unsuffixed file reported "client heartbeat: absent" in
+    the one tool whose entire job is explaining why the game is silent. This
+    plants only the per-player name — no unsuffixed file at all — so a
+    diagnosis that still read the old single path would find nothing and
+    report exactly that wrong absence.
+    """
+    save = Path(fake_install["TMODLOADER_SAVE_DIR"])
+    (save / "fakemod-hooks-n43n-003f.txt").write_text(
+        "gameMenu: False\ndedServ: False\nworld-ready: True\narmed: True\npolls: 12\n"
+    )
+
+    async def call(session):
+        return await session.get_prompt("diagnose_silence", {})
+
+    result = _run(call, fake_install)
+    text = "".join(
+        m.content.text for m in result.messages if hasattr(m.content, "text")
+    )
+
+    assert "client heartbeat (n43n-003f): " in text, (
+        "the per-player client was not found - it would read as absent, "
+        f"which is the exact bug this closes. Got:\n{text}"
+    )
+    assert "can answer" in text, "the live, armed client was not diagnosed as such"
 
 
 @needs_subprocess

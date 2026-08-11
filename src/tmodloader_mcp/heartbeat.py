@@ -29,13 +29,48 @@ required one could never answer the question it exists for.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import diag
-from .triggers import HEARTBEAT_MAX_AGE
+from .triggers import HEARTBEAT_MAX_AGE, PLAYER_TOKEN_GRAMMAR
+
+
+def client_files(save_dir: Path, mod_prefix: str) -> list[Path]:
+    """Every CLIENT heartbeat in this directory, sorted by name.
+
+    Two forms are accepted and both are real:
+
+    - `<mod>-hooks-<token>.txt` — a client with a character
+    - `<mod>-hooks.txt` — a client that is up and has not got one yet
+
+    `<mod>-hooks-server.txt` is excluded by construction rather than by a
+    special case: `-server` is not a token, because a token ends in four hex
+    characters and `server` does not. A looser glob would report the dedicated
+    server as a client, which is the diagnosis this tool exists to keep apart.
+    """
+    pattern = re.compile(
+        rf"^{re.escape(mod_prefix)}-hooks(-{PLAYER_TOKEN_GRAMMAR})?\.txt$"
+    )
+    if not save_dir.is_dir():
+        return []
+    return sorted(
+        (e for e in save_dir.iterdir() if pattern.match(e.name)), key=lambda p: p.name
+    )
+
+
+def player_of(filename: str, mod_prefix: str) -> str | None:
+    """The token in a client heartbeat's name, or None for the unsuffixed form.
+
+    Returns the TOKEN, not the character name — the name cannot be recovered,
+    the slug is lossy and the hash is one way. Callers that want a name have
+    the session's; this is for telling two clients apart on disk.
+    """
+    stem = filename[len(mod_prefix) + len("-hooks") : -len(".txt")]
+    return stem.lstrip("-") or None
 
 
 @dataclass(frozen=True)

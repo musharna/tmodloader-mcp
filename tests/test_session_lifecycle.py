@@ -71,6 +71,11 @@ class FakeCfg:
         return self.root / (f"server-{name}" if server else name)
 
 
+def cfg_for(root: Path, mod_name: str = "Biomancy") -> FakeCfg:
+    """A `FakeCfg` rooted at `root`, named for the callers that just want one."""
+    return FakeCfg(root, mod_name)
+
+
 class FakeWindows:
     """A process table a kill can actually change.
 
@@ -295,6 +300,44 @@ def test_a_refused_capture_is_not_left_in_the_capture_directory(tmp_path, monkey
 
 
 # ---- launch() ----------------------------------------------------------
+
+
+def test_launch_clears_a_stale_per_player_reply(tmp_path):
+    """The cleanup comment's own scenario, now reachable.
+
+    A per-player diag left by a dead run is exactly what lets a readiness
+    check pass against a process that is gone.
+    """
+    stale = tmp_path / "biomancy-diag-n43n-003f.txt"
+    stale.write_text("from a previous run\n")
+    fresh = tmp_path / "biomancy-diag.txt"
+    fresh.write_text("also stale\n")
+
+    session_mod._clear_stale_artifacts(cfg_for(tmp_path), player="n43n")
+
+    assert not stale.exists()
+    # Positive control: the unsuffixed form was being cleared before this
+    # change and must still be, so a green result cannot mean "cleared
+    # nothing".
+    assert not fresh.exists()
+
+
+def test_launch_leaves_another_players_stale_files_alone(tmp_path):
+    """The other half of the same fix, stated as its own test.
+
+    `client_files` reports a dead player's leftover heartbeat with an age, so
+    it reads as not-live rather than as a phantom client - but only if this
+    cleanup does not delete files that are not this session's to delete.
+    """
+    someone_elses = tmp_path / "biomancy-diag-big-bird-44a3.txt"
+    someone_elses.write_text("a different player's dead run\n")
+
+    session_mod._clear_stale_artifacts(cfg_for(tmp_path), player="n43n")
+
+    assert someone_elses.exists(), (
+        "a per-player artifact belonging to a DIFFERENT player was deleted - "
+        "it is not this session's to clear"
+    )
 
 
 def _fake_launch_world(monkeypatch, *, existing, after, ready_raises):

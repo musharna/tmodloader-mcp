@@ -455,6 +455,30 @@ class Session:
         )
 
 
+def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
+    """A heartbeat or reply left by a previous run is what lets a readiness
+    check pass against a dead process.
+
+    Clears the unsuffixed names for both sides - `cfg.artifacts` has no
+    player, and is the right answer for the dedicated server, which never has
+    one - AND this session's own per-player names, when `player` is given. A
+    per-player reply from a dead run under the SAME player name would
+    otherwise survive into this one, which is the exact scenario the original
+    comment describes and Task 2's per-player naming made reachable.
+
+    Other players' files are left alone, deliberately: they are not this
+    session's to delete, and `heartbeat.client_files` reports them with an
+    age, so a dead one reads as not-live rather than as a phantom client.
+    """
+    for name in cfg.artifacts.all:
+        for server in (False, True):
+            cfg.artifact(name, server=server).unlink(missing_ok=True)
+
+    if player is not None:
+        for name in artifacts_for(cfg.mod_name, player).all:
+            cfg.artifact(name, server=False).unlink(missing_ok=True)
+
+
 def world_problem(world: str) -> str | None:
     """Why this world argument will not work, or None.
 
@@ -541,11 +565,8 @@ def launch(
 
     session = Session(cfg=cfg, mode=mode, port=port, player=player, world=world_arg)
 
-    # Clear stale artifacts BEFORE launching. A heartbeat or reply left by a
-    # previous run is what lets a readiness check pass against a dead process.
-    for name in cfg.artifacts.all:
-        for server in (False, True):
-            cfg.artifact(name, server=server).unlink(missing_ok=True)
+    # Clear stale artifacts BEFORE launching - see _clear_stale_artifacts.
+    _clear_stale_artifacts(cfg, player=player)
 
     server_cmd = [
         str(cfg.dotnet),
