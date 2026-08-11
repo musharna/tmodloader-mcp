@@ -127,13 +127,13 @@ def _replies_when_triggered(monkeypatch, path: Path, text: str) -> None:
     fixture hangs off the trigger write, which is where a real game's answer
     comes from too.
     """
-    real = session_mod._write_atomically
+    real = session_mod._claim_atomically
 
     def answering(trigger: Path, payload: str) -> None:
         real(trigger, payload)
         path.write_text(text)
 
-    monkeypatch.setattr(session_mod, "_write_atomically", answering)
+    monkeypatch.setattr(session_mod, "_claim_atomically", answering)
 
 
 # ---- site 1: ask(), the reply file -------------------------------------
@@ -248,14 +248,19 @@ def test_an_unaddressed_shot_still_uses_this_sessions_drop_box(sess, cfg, monkey
 
 
 def test_two_requests_in_flight_do_not_share_one_staging_file(cfg, monkeypatch):
-    """THE LOST UPDATE, found by firing two `shot`s at once.
+    """THE LOST UPDATE, found by firing two `shot`s at once - what this guards
+    now that `_claim_atomically` refuses a taken slot instead of overwriting it.
 
-    `_write_atomically` staged at `<trigger>.staging`, and the trigger path is
+    `_claim_atomically` staged at `<trigger>.staging`, and the trigger path is
     shared by every client BY DESIGN — so two sessions writing at once shared
-    one staging file. The last write won its contents, the first rename carried
-    them, and the second rename raised `FileNotFoundError`. One request was
-    silently replaced by the other's payload, which is the failure this whole
-    project exists to prevent, arriving from the other end.
+    one staging file. Under the old `os.replace`, the last write won its
+    contents, the first rename carried them, and the second rename raised
+    `FileNotFoundError`: one request silently replaced by the other's payload.
+    `os.link` closes that by refusing the second claim outright rather than by
+    racing it, which is why this test now frees the slot itself between the
+    two requests - see below - instead of letting a second stage-and-rename
+    happen unopposed. What still has to hold, and what this test still checks,
+    is the property underneath: no two writers may ever stage at the same path.
 
     Asserted as a property rather than by racing threads: two sessions ask for
     two different things, and no staging path may be written twice. A thread
@@ -276,6 +281,14 @@ def test_two_requests_in_flight_do_not_share_one_staging_file(cfg, monkeypatch):
     monkeypatch.setattr(Path, "write_text", spy)
 
     Session(cfg=cfg, mode="server_client", port=1, player=SELF).ask("diag")
+
+    # THE MOD CONSUMES A REQUEST BEFORE THE NEXT ONE ARRIVES, and the trigger
+    # is now CLAIMED rather than overwritten, so the second session can only
+    # reach its staged write once the slot is free. Simulating that consumption
+    # is more faithful to the protocol than the old version, which could stage
+    # twice only because `os.replace` destroyed the first request.
+    cfg.artifact(cfg.artifacts.trigger, server=False).unlink()
+
     Session(cfg=cfg, mode="server_client", port=1, player=OTHER).ask("diag")
 
     assert len(staged) == 2, "the test is not exercising two staged writes"
@@ -312,3 +325,76 @@ def test_addressing_this_sessions_own_player_survives_a_different_case(
     )
 
     assert sess.ask("diag", target=SELF.upper(), timeout=1.0).text == "mine"
+
+
+# ---- the claim itself ----------------------------------------------------
+
+
+def test_a_claim_refuses_a_slot_that_is_already_taken(cfg):
+    """THE LOST UPDATE, at the primitive that allowed it.
+
+    `os.replace` succeeds unconditionally, so the second of two concurrent
+    requests overwrote the first and its caller waited out a full timeout with
+    nothing on disk to explain why. `os.link` is atomic in exactly the same way
+    and additionally refuses an occupied name.
+
+    The positive control is in the same test deliberately: a claim that refused
+    EVERYTHING would pass the first assertion while making the tool useless.
+    """
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    session_mod._claim_atomically(trigger, "diag@n43n")
+    assert trigger.read_text() == "diag@n43n", "the free slot was not claimed"
+
+    with pytest.raises(session_mod.TriggerBusy):
+        session_mod._claim_atomically(trigger, "diag@tst2")
+
+    assert trigger.read_text() == "diag@n43n", (
+        "the pending request was overwritten - which is the entire defect"
+    )
+
+
+def test_a_claim_leaves_no_staging_file_behind(cfg):
+    """`os.replace` CONSUMED the staging name; `os.link` does not - it leaves a
+    second name for the same inode. Forgetting the unlink would litter the
+    directory the game reads with one file per request.
+
+    Checked after both a successful claim and a refused one, because the
+    refused path is the one that returns early.
+    """
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    session_mod._claim_atomically(trigger, "diag@n43n")
+    assert not list(cfg.root.glob("*.staging")), "staging file left after a claim"
+
+    with pytest.raises(session_mod.TriggerBusy):
+        session_mod._claim_atomically(trigger, "diag@tst2")
+    assert not list(cfg.root.glob("*.staging")), "staging file left after a refusal"
+
+
+def test_a_claim_never_writes_into_the_polled_path(cfg, monkeypatch):
+    """The guarantee that must SURVIVE the change: the game polls the trigger,
+    so a payload written there in place is readable half-finished, and a
+    truncated command word is not an error on that side - it parses as unknown
+    and is discarded, and the harness then waits out its timeout for a reply to
+    a request the game threw away.
+    """
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    written: list[Path] = []
+    real_write_text = Path.write_text
+
+    def spy(self, *args, **kwargs):
+        written.append(Path(self))
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", spy)
+    session_mod._claim_atomically(trigger, "diag@n43n")
+
+    assert written, "nothing was written - the test is not exercising the claim"
+    assert trigger not in written, (
+        "the payload was written straight into the file the game polls"
+    )
+    assert written[-1].parent == trigger.parent, (
+        "staged outside the trigger's directory - a link only works within one "
+        "filesystem, and the save directory is on /mnt/c"
+    )
