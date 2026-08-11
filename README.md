@@ -12,7 +12,9 @@ tModLoader has not had one. This is that.
 > and no command list is kept here to be wrong about. The mod-side half is now
 > yours too: [`responder/`](responder/) is a folder you copy into your mod and
 > subclass, and CI compiles it with nothing of any mod's on the compile line.
-> See [Phase 2](#phase-2--what-would-make-this-yours).
+> Two clients on one machine no longer overwrite each other's answers, which
+> is the first thing here to have been proven by running it rather than by
+> reading it. See [Phase 2](#phase-2--what-would-make-this-yours).
 
 ## Why an MCP server rather than a shell script
 
@@ -249,8 +251,20 @@ checkout:
    subclass you need spelled out, which is most of what this item was asking
    for. What is left is a whole compiling mod you can clone and run, and the
    honest reason it has not been built is that nobody has yet needed one.
-5. Per-player artifact naming. Two developers on one machine share a save
-   directory, so they share every artifact filename. Designed, not built.
+5. ~~Per-player artifact naming~~ — **done, and run against two real clients.**
+   A client's ANSWERS now carry a player token, so two developers sharing a
+   save directory stop overwriting each other's heartbeat, diag dump, capture
+   reply and shot drop box. Requests could already be addressed; answers could
+   not be told apart, which is the half this closed.
+
+   The two-client run is the part worth reading: it caught a regression the
+   change itself introduced, a lost-update race nobody had predicted, and —
+   once that race was fixed — a deeper limit it had been hiding. Two
+   limitations remain, documented rather than papered over: an **untargeted**
+   request with two clients up is answered by whichever polls first, and the
+   trigger holds **one request rather than a queue**, so concurrent requests
+   have to be staggered. Both are in
+   [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#what-a-live-two-client-run-found).
 
 The last thing that made this a tool for one mod is gone. The filenames, the
 paths and the command list were already yours — this side holds no opinion about
