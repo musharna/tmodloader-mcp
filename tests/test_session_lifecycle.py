@@ -376,6 +376,54 @@ def test_launch_leaves_another_players_stale_files_alone(tmp_path):
     )
 
 
+def test_launch_leaves_a_pending_request_addressed_to_another_player_alone(tmp_path):
+    """FIX ROUND 3, IMPORTANT 1: the cleanup undid the claim it was shipped with.
+
+    The trigger is the ONE artifact deliberately shared between sessions - it
+    is how a client learns a request is aimed at somebody else - and it was in
+    `cfg.artifacts.all`, so every launch deleted it. Developer A launching a
+    game therefore destroyed developer B's claimed, in-flight request while
+    B's game was still running and still polling for it: exactly the silent
+    loss `os.link` was introduced to remove, arriving by a different door.
+
+    The rule is the mod's own (`DevResponder`: a request it is not addressed
+    by is left exactly where it is), so this deletes only what is this
+    session's to delete.
+    """
+    cfg = cfg_for(tmp_path)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    trigger.write_text("diag@big-bird")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+
+    assert trigger.exists() and trigger.read_text() == "diag@big-bird", (
+        "a launch deleted a request addressed to another player - that client "
+        "is still polling for it and will now wait out its whole timeout"
+    )
+
+    # POSITIVE CONTROL, in the same test: a cleanup that had simply stopped
+    # touching the trigger at all would pass the assertion above while
+    # leaving this session's own dead request wedged in the shared slot
+    # forever - which is the only escape hatch an unaddressable target has.
+    trigger.write_text("diag@n43n")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+
+    assert not trigger.exists(), (
+        "a launch left behind a pending request addressed to its OWN player - "
+        "nothing else will ever collect it, so the shared slot stays wedged"
+    )
+
+    # And the third case, for the same reason: a payload the mod's parser
+    # cannot read is addressed to nobody and will be answered by nobody.
+    trigger.write_text("@@@")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+
+    assert not trigger.exists(), (
+        "a malformed request survived a launch - no client can parse it, so "
+        "leaving it in place wedges the slot on nobody's behalf"
+    )
+
+
 def _fake_launch_world(monkeypatch, *, existing, after, ready_raises):
     """Wire launch()'s dependencies so no game is started.
 
@@ -986,6 +1034,42 @@ def test_stop_still_leaves_alone_a_game_it_did_not_start(monkeypatch):
 
     assert windows.aimed == [4808], "it aimed at a process it had not started"
     assert 31337 in windows.live, "it killed a game that was not its to kill"
+
+
+def test_stop_leaves_a_pending_request_addressed_to_another_player_alone(
+    tmp_path, monkeypatch
+):
+    """The same defect on the teardown path, and stated separately because it
+    is a separate deletion: `stop` unlinked the trigger unconditionally.
+
+    Less destructive than the launch case only because the stopping session's
+    own game is on its way out - the OTHER developer's game is not, and its
+    request vanishing from under it is the identical loss.
+    """
+    windows = FakeWindows(set())
+    windows.install(monkeypatch)
+    cfg = cfg_for(tmp_path)
+    session = Session(cfg=cfg, mode="server_client", port=1, player="n43n")
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    trigger.write_text("shot:full@big-bird")
+    session_mod.stop(cfg, session, settle=TEST_SETTLE)
+
+    assert trigger.exists() and trigger.read_text() == "shot:full@big-bird", (
+        "stop deleted a request addressed to another player - the client it "
+        "names is still running and still polling for it"
+    )
+
+    # POSITIVE CONTROL, in the same test: stop must still clear what IS its
+    # own, or a teardown leaves its own dead request holding the shared slot
+    # against the next session.
+    trigger.write_text("shot:full@n43n")
+    session_mod.stop(cfg, session, settle=TEST_SETTLE)
+
+    assert not trigger.exists(), (
+        "stop left its own session's pending request behind - the game that "
+        "would have answered it is the one being killed"
+    )
 
 
 def test_a_spawn_that_fails_halfway_does_not_leak_the_half_that_started(monkeypatch):

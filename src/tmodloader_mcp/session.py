@@ -239,6 +239,70 @@ def _claim_atomically(path: Path, text: str) -> None:
         staged.unlink(missing_ok=True)
 
 
+def _pending_payload(trigger: Path) -> str | None:
+    """What the trigger holds, or None if nothing readable is there.
+
+    None covers both "no such file" and "a file this side could not read",
+    which every caller treats the same way: neither is a request some client
+    is waiting on an answer to.
+    """
+    try:
+        return trigger.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _is_ours_to_clear(payload: str | None, *, player: str | None) -> bool:
+    """Whether a trigger holding `payload` is this session's to delete.
+
+    THE SHARED SLOT IS NOT THIS SESSION'S PROPERTY. One trigger file is polled
+    by every client sharing a save directory - deliberately, because seeing a
+    request is how a client learns one is aimed at somebody else - so deleting
+    it wholesale is the same lost update `_claim_atomically` exists to prevent,
+    committed by the housekeeping rather than by the write. `launch` and `stop`
+    both did exactly that, which meant one developer starting a game destroyed
+    the other's in-flight request while their game was still polling for it.
+
+    The rule is the mod's own, and stating it identically on both sides is the
+    point: `DevResponder` leaves a request it is not addressed by exactly where
+    it is, so the intended client finds it on its own next poll. This side
+    leaves alone precisely what that client would still collect.
+
+    AN UNREADABLE OR MALFORMED PAYLOAD IS OURS, and that is not a shortcut. The
+    mod's parser will not get a target out of it either, so no client will ever
+    consume it - and a request nobody can consume, sitting in a slot that holds
+    one request, wedges that slot for everybody. Same for one carrying no
+    address: it belongs to whoever polls first, and this session is a whoever.
+
+    Compared case-insensitively, because the mod compares a target to its own
+    name that way - `n43n` and `N43N` are one client, however it was typed.
+
+    THE ADDRESS IS THE ONLY SIGNAL, which bounds this: two sessions each driving
+    a DEDICATED SERVER out of one save directory write unaddressed requests to
+    the server-side trigger and are indistinguishable here. Nothing on disk
+    separates them; the client side, where two sessions actually is the
+    supported arrangement, carries a player and does separate.
+    """
+    if payload is None:
+        return True
+    request = parse(payload)
+    if request is None or request.target is None:
+        return True
+    return player is not None and request.target.casefold() == player.casefold()
+
+
+def _release_trigger(cfg: Config, *, player: str | None) -> None:
+    """Give up the shared trigger on both sides, where it is ours to give up.
+
+    Called instead of unlinking it, by everything that used to unlink it. See
+    `_is_ours_to_clear` for which of the two cases each side falls into.
+    """
+    for server in (False, True):
+        trigger = cfg.artifact(cfg.artifacts.trigger, server=server)
+        if _is_ours_to_clear(_pending_payload(trigger), player=player):
+            trigger.unlink(missing_ok=True)
+
+
 @dataclass
 class Session:
     """One driven game. Holds the pids it started so teardown can be surgical."""
@@ -333,25 +397,63 @@ class Session:
     # ---- driving ---------------------------------------------------------
 
     def _busy_message(self, trigger: Path, timeout: float) -> str:
-        """Why a claim gave up, naming the request in the way.
+        """Why a claim gave up, describing ONLY what is observable.
 
         The caller's own request is fine and so is the game, so a timeout that
         described either would send them to check the two things that are not
         wrong.
+
+        IT USED TO SAY "Another session's request is pending", WHICH IS AN
+        OWNERSHIP CLAIM THIS SIDE NEVER CHECKED. Nothing validates that an
+        addressed target names a live client, and the mod deliberately leaves a
+        request it is not addressed by exactly where it is - so a typo'd
+        `target`, or a client that has not loaded a character (its name is
+        empty, so it matches no target), parks a request no client will ever
+        consume. Every later call from BOTH sessions then failed with that
+        sentence, which about the caller's own typo names the wrong culprit and
+        sends them looking for a session that may not exist. Under `os.replace`
+        the next request simply flattened it; the claim removed that accident,
+        and this message is where the missing remedy is handed back.
+
+        So: the payload, its age, and - when it is addressed to this session's
+        own player - that it is theirs and how to be rid of it. That case is
+        the self-inflicted one and the only one this side can be sure about.
         """
         try:
             pending = trigger.read_text().strip()
             age = time.time() - trigger.stat().st_mtime
             held = f"{pending!r}, {age:.0f}s old"
         except (OSError, UnicodeDecodeError):
+            pending = None
             held = "a request that vanished while it was being read"
 
-        return (
-            f"the trigger at {trigger} still holds {held} after {timeout:g}s. "
-            "Another session's request is pending, and this one will not delete "
-            "it - that would be the overwrite this claim exists to prevent. If "
-            "the client it names is gone, remove the file by hand."
+        request = parse(pending) if pending is not None else None
+        addressed_to_me = (
+            request is not None
+            and request.target is not None
+            and request.target.casefold() == self.player.casefold()
         )
+
+        if addressed_to_me:
+            tail = (
+                f"It is addressed to this session's own player ({self.player!r}), "
+                "so it is nobody else's to collect - and nothing has collected "
+                "it, which means no client of that name is polling: either none "
+                "is running, or one is running without a loaded character, whose "
+                "name is empty and matches no target. A fresh `launch` clears a "
+                "pending request addressed to this session's player; so does "
+                "deleting the file."
+            )
+        else:
+            tail = (
+                "Whose request that is cannot be read off the trigger beyond the "
+                "address it carries, so this session will not delete it - it may "
+                "belong to another session still waiting for the answer, and "
+                "deleting it would be the overwrite this claim exists to "
+                "prevent. If the client it names is gone, remove the file by hand."
+            )
+
+        return f"the trigger at {trigger} still holds {held} after {timeout:g}s. {tail}"
 
     def _claimed_out_of_time_message(self, trigger: Path, timeout: float) -> str:
         """Why a claim that WON still has to fail: the game may still answer it.
@@ -642,6 +744,14 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
     otherwise survive into this one, which is the exact scenario the original
     comment describes and Task 2's per-player naming made reachable.
 
+    THE TRIGGER IS EXCLUDED FROM BOTH LOOPS and released separately, because
+    it is the one artifact shared with the OTHER session rather than merely
+    with a previous run of this one. Deleting it here destroyed a request that
+    another developer's game was still polling for - the lost update this
+    branch removed from the write path, reintroduced by the cleanup. See
+    `_release_trigger`, which deletes it only where it holds a request this
+    session may take back.
+
     Other players' files are left alone, deliberately: they are not this
     session's to delete. That holds because of WHO reads them next: the
     `heartbeat` tool hands a human an `age_seconds` to judge, so a leftover
@@ -654,12 +764,22 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
     the names it looks at, however fresh it is.
     """
     for name in cfg.artifacts.all:
+        if name == cfg.artifacts.trigger:
+            continue
         for server in (False, True):
             cfg.artifact(name, server=server).unlink(missing_ok=True)
 
     if player is not None:
         for name in artifacts_for(cfg.mod_name, player).all:
+            # The trigger is NOT per player, so this is the same shared name
+            # again and the same exclusion applies. Skipped by name rather than
+            # by trusting that, because `Artifacts.trigger` deciding to carry a
+            # token one day must not silently reopen the hole.
+            if name == cfg.artifacts.trigger:
+                continue
             cfg.artifact(name, server=False).unlink(missing_ok=True)
+
+    _release_trigger(cfg, player=player)
 
 
 def world_problem(world: str) -> str | None:
@@ -1055,9 +1175,10 @@ def stop(
         time.sleep(min(SETTLE_POLL, remaining))
         survivors = set(aimed) & _tml_pids(cfg)
 
-    for name in (cfg.artifacts.trigger,):
-        for server in (False, True):
-            cfg.artifact(name, server=server).unlink(missing_ok=True)
+    # NOT an unconditional unlink. The trigger is shared with the other
+    # session, and a teardown that deleted it took that session's in-flight
+    # request with it - see `_release_trigger`.
+    _release_trigger(cfg, player=session.player)
 
     session.started = survivors
 
