@@ -540,8 +540,8 @@ namespace TModLoaderMcp.DevBridge
 		/// </summary>
 		private void WriteDiag() {
 			try {
-				File.WriteAllText(PathFor(DiagName), CollectDiag());
-				Report("DIAG: " + PathFor(DiagName));
+				File.WriteAllText(AnswerPathFor(DiagName), CollectDiag());
+				Report("DIAG: " + AnswerPathFor(DiagName));
 			}
 			catch (Exception e) {
 				Report("ERROR: diag failed: " + e);
@@ -563,7 +563,13 @@ namespace TModLoaderMcp.DevBridge
 			FrameShot.LastPath = null;
 			FrameShot.LastError = null;
 
-			if (!FrameShot.Request(region, Names.Shot, out string problem)) {
+			// FrameShot.Capture combines this with Main.SavePath and applies
+			// ForSide(name, Main.dedServ) itself - a no-op here, since a shot
+			// can only ever be taken client-side (Request refuses on
+			// Main.dedServ above), so that second call never sees
+			// dedicatedServer true and never re-suffixes what AnswerName
+			// already produced.
+			if (!FrameShot.Request(region, AnswerName(Names.Shot), out string problem)) {
 				Report("REFUSED: " + problem);
 				return;
 			}
@@ -660,7 +666,7 @@ namespace TModLoaderMcp.DevBridge
 				"written: " + DateTime.UtcNow.ToString("HH:mm:ss") + "Z\n";
 
 			try {
-				File.WriteAllText(PathFor(HeartbeatName), body);
+				File.WriteAllText(AnswerPathFor(HeartbeatName), body);
 			}
 			catch {
 				// Nothing useful left to do - the report channel itself is gone.
@@ -801,17 +807,56 @@ namespace TModLoaderMcp.DevBridge
 		}
 
 		/// <summary>
-		/// Full path to one of this side's artifacts. Every read and write of a
-		/// responder file goes through here, so a side can never be given a name
-		/// the other side also answers to.
+		/// Full path to one of this side's SHARED artifacts - the trigger and
+		/// the published command list. Both must stay addressed by the SAME
+		/// name regardless of which client is polling: the trigger is how one
+		/// client's request reaches whichever client it names (see the
+		/// IsFor(LocalPlayerName) check in Tick), and a client-specific trigger
+		/// path would make that addressing meaningless, since nobody would be
+		/// polling the name a request actually landed under. Deliberately does
+		/// NOT take a player token - see AnswerPathFor for the files that do.
 		/// </summary>
 		private static string PathFor(string name) {
 			return Path.Combine(Main.SavePath, DevArtifacts.ForSide(name, Main.dedServ));
 		}
 
+		/// <summary>
+		/// This client's token, or null on a dedicated server and before a
+		/// character exists.
+		/// </summary>
+		private static string PlayerTokenOrNull => DevArtifacts.PlayerToken(LocalPlayerName);
+
+		/// <summary>
+		/// This side's answer to a request, named for THIS client:
+		/// biomancy-diag-n43n-003f.txt rather than biomancy-diag.txt. Two
+		/// clients polling the same Main.SavePath would otherwise overwrite
+		/// each other's diag, heartbeat and capture answers exactly the way
+		/// DevArtifacts' own docs describe for sides.
+		///
+		/// Before a character exists PlayerTokenOrNull is null and ForSide's
+		/// null-token branch returns the plain sided name unchanged - so a
+		/// client at the menu still writes the unsuffixed heartbeat the
+		/// harness reads before any world is loaded, without a special case
+		/// here.
+		/// </summary>
+		private static string AnswerPathFor(string name) {
+			return Path.Combine(Main.SavePath, AnswerName(name));
+		}
+
+		/// <summary>
+		/// The FILENAME (not the full path) an answer would be written under,
+		/// sided and tokened. FrameShot writes its own file, on its own
+		/// schedule, from an event this class does not control - so what
+		/// crosses into FrameShot.Request is the finished filename rather than
+		/// a path this class could combine itself.
+		/// </summary>
+		private static string AnswerName(string name) {
+			return DevArtifacts.ForSide(name, Main.dedServ, PlayerTokenOrNull);
+		}
+
 		protected static void Report(string line) {
 			try {
-				File.WriteAllText(PathFor(ResultName), line + "\n");
+				File.WriteAllText(AnswerPathFor(ResultName), line + "\n");
 			}
 			catch {
 				// Nothing useful left to do - the report channel itself is gone.

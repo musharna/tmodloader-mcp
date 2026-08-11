@@ -21,6 +21,7 @@ event loop is what stops two requests consuming each other's reply.
 # does, and costs nothing: requires-python is >=3.12, where `str | None` and
 # `list[int]` are native syntax.
 
+from pathlib import Path
 from typing import Any, TypedDict
 
 # mcp 2.x renamed FastMCP to MCPServer and moved it out of mcp.server.fastmcp,
@@ -166,6 +167,10 @@ class HeartbeatSideOut(TypedDict):
     """
 
     side: str
+    # Null for the dedicated server, and for a client that is up without a
+    # character. Null is not "unknown" here — it is a state the caller can act
+    # on, so it is reported rather than omitted.
+    player: str | None
     present: bool
     live: bool
     # Null rather than absent - see StatusOut. Null also when the file is there
@@ -179,7 +184,15 @@ class HeartbeatSideOut(TypedDict):
 
 
 class HeartbeatOut(TypedDict):
-    client: HeartbeatSideOut
+    """Every client, plus the server.
+
+    A LIST rather than one `client` key, because the old shape could not
+    express two clients at once and silently reported whichever had written
+    last. That was the shared-file bug wearing a different hat: two clients,
+    one answer, no way to tell.
+    """
+
+    clients: list[HeartbeatSideOut]
     server: HeartbeatSideOut
 
 
@@ -513,7 +526,7 @@ def read_capture(name: str) -> Image:
 
     Args:
         name: A capture filename from `captures`, e.g.
-            `<mod>-shot-001-topleft.png`. A NAME, never a path — see
+            `<mod>-shot-<token>-001-topleft.png`. A NAME, never a path — see
             `captures.read` for why the containment is structural.
     """
     cfg = _cfg()
@@ -746,12 +759,21 @@ def heartbeat() -> HeartbeatOut:
     causes:
 
     - **absent** — nothing ever wrote one. The mod is not loaded, is not
-      enabled in this install, or was built without the dev bridge.
+      enabled in this install, or was built without the dev bridge. For
+      clients this is an EMPTY `clients` list, not an entry saying so.
     - **stale** — a game ran and is no longer running. The file outlives the
       process, so this is indistinguishable from live to anything that only
       checks whether it exists.
     - **live, no world** — still loading. Nothing is wrong; wait longer.
     - **live, world, not armed** — loaded and ticking, bridge not listening.
+
+    `clients` is a LIST because two clients can share one save directory and
+    the old single-client shape reported whichever wrote last. Expect an entry
+    per client — and one more: an entry with `player: null` is the untokened
+    heartbeat every client writes before its character loads, which nothing
+    deletes and each new client overwrites. Treat it as a slot rather than as
+    a client. A real client is the one carrying a token and an advancing
+    `polls`.
 
     Reads OFF DISK and needs no session, deliberately: a failed `launch` raises
     without storing one, so a tool that required a session could never answer
@@ -763,15 +785,15 @@ def heartbeat() -> HeartbeatOut:
     one at a time cannot see the difference.
     """
     cfg = _cfg()
-    out: dict[str, HeartbeatSideOut] = {}
 
-    for name, is_server in (("client", False), ("server", True)):
-        hb = heartbeat_mod.read(cfg.artifact(cfg.artifacts.heartbeat, server=is_server))
-        out[name] = HeartbeatSideOut(
-            # `hb.side` is the mod's own account of itself and can disagree with
-            # the file this was read from. Where they differ the mod is right,
-            # so it is reported rather than the key it was filed under.
+    def _entry(path: Path, player: str | None) -> HeartbeatSideOut:
+        hb = heartbeat_mod.read(path)
+        return HeartbeatSideOut(
+            # `hb.side` is the mod's own account of itself and can disagree
+            # with the file this was read from. Where they differ the mod is
+            # right, so it is reported rather than the key it was filed under.
             side=hb.side,
+            player=player,
             present=hb.present,
             live=hb.live,
             age_seconds=hb.age,
@@ -781,7 +803,15 @@ def heartbeat() -> HeartbeatOut:
             diagnosis=heartbeat_mod.diagnose(hb),
         )
 
-    return HeartbeatOut(client=out["client"], server=out["server"])
+    prefix = cfg.artifacts.prefix
+    clients = [
+        _entry(path, heartbeat_mod.player_of(path.name, prefix))
+        for path in heartbeat_mod.client_files(cfg.save_dir, prefix)
+    ]
+    return HeartbeatOut(
+        clients=clients,
+        server=_entry(cfg.artifact(cfg.artifacts.heartbeat, server=True), None),
+    )
 
 
 @mcp.tool(
@@ -987,12 +1017,34 @@ def diagnose_silence() -> str:
             "That IS the diagnosis - fix the paths before looking at the mod."
         )
     else:
-        client = heartbeat_mod.read(cfg.artifact(cfg.artifacts.heartbeat, server=False))
+        # A WALK, not a single read: once a client has a character it writes a
+        # per-player name, so reading only the unsuffixed file reported
+        # "client heartbeat: absent" in the one tool whose entire job is
+        # explaining why the game is silent. `client_files` finds every
+        # client's heartbeat, per-player or not-yet-a-player, the same way
+        # `heartbeat` does.
+        prefix = cfg.artifacts.prefix
+        found = heartbeat_mod.client_files(cfg.save_dir, prefix)
+        if found:
+            client_lines = []
+            for path in found:
+                player = heartbeat_mod.player_of(path.name, prefix)
+                label = f"client heartbeat ({player})" if player else "client heartbeat"
+                client_lines.append(
+                    f"{label}: {heartbeat_mod.diagnose(heartbeat_mod.read(path))}"
+                )
+        else:
+            client_lines = [
+                (
+                    "client heartbeat: none found - no client, live or stale, has "
+                    "ever written one"
+                )
+            ]
         server = heartbeat_mod.read(cfg.artifact(cfg.artifacts.heartbeat, server=True))
         readings = "\n".join(
             [
                 f"mod under test: {cfg.mod_name}",
-                f"client heartbeat: {heartbeat_mod.diagnose(client)}",
+                *client_lines,
                 f"server heartbeat: {heartbeat_mod.diagnose(server)}",
                 _reading(
                     "mods installed",

@@ -10,6 +10,7 @@ for as long as the object that generated it.
 
 from __future__ import annotations
 
+import os
 import struct
 import time
 import zlib
@@ -20,10 +21,29 @@ import pytest
 from tmodloader_mcp import session as session_mod
 from tmodloader_mcp.session import Session
 from tmodloader_mcp.triggers import (
+    HEARTBEAT_MAX_AGE,
     Reply,
     TriggerError,
     artifacts_for,
 )
+
+
+def _client_heartbeat(path: Path, *, age: float = 0.0) -> None:
+    """A REAL client heartbeat: world-ready, and genuinely `age` seconds old.
+
+    Real files with real mtimes throughout, matching `test_heartbeat.py` -
+    `os.utime` rather than a patched clock, because `heartbeat_is_live` reads
+    `st_mtime` and a fake clock would test the fake.
+    """
+    path.write_text("dedServ: False\nworld-ready: True\n")
+    if age:
+        stamp = time.time() - age
+        os.utime(path, (stamp, stamp))
+
+
+#: Comfortably past HEARTBEAT_MAX_AGE, so a backdated file is unambiguously
+#: stale rather than merely old.
+_WELL_PAST_MAX_AGE = HEARTBEAT_MAX_AGE + 30.0
 
 
 def _chunk(kind: bytes, data: bytes) -> bytes:
@@ -69,6 +89,11 @@ class FakeCfg:
 
     def artifact(self, name: str, *, server: bool) -> Path:
         return self.root / (f"server-{name}" if server else name)
+
+
+def cfg_for(root: Path, mod_name: str = "Biomancy") -> FakeCfg:
+    """A `FakeCfg` rooted at `root`, named for the callers that just want one."""
+    return FakeCfg(root, mod_name)
 
 
 class FakeWindows:
@@ -124,7 +149,12 @@ def _session_that_captures(tmp_path, monkeypatch, payloads):
         # The mod always writes ONE fixed filename. That is the whole bug: it
         # is not a thing this harness gets to choose, so the harness has to
         # stop handing that path back as if it were stable.
-        cfg.artifact(cfg.artifacts.shot, server=False).write_bytes(queue.pop(0))
+        #
+        # The drop box is now PER PLAYER on the client side (`shot` reads
+        # `self.artifacts.shot`, which carries `sess.player`), so the fixture
+        # has to write where the session will actually look - `cfg.artifacts`
+        # has no player and would silently miss it.
+        cfg.artifact(sess.artifacts.shot, server=False).write_bytes(queue.pop(0))
         return Reply(command=command, text="ok")
 
     monkeypatch.setattr(Session, "ask", fake_ask)
@@ -292,6 +322,60 @@ def test_a_refused_capture_is_not_left_in_the_capture_directory(tmp_path, monkey
 # ---- launch() ----------------------------------------------------------
 
 
+def test_launch_clears_a_stale_per_player_reply(tmp_path):
+    """The cleanup comment's own scenario, now reachable.
+
+    A per-player diag left by a dead run is exactly what lets a readiness
+    check pass against a process that is gone.
+    """
+    stale = tmp_path / "biomancy-diag-n43n-003f.txt"
+    stale.write_text("from a previous run\n")
+    fresh = tmp_path / "biomancy-diag.txt"
+    fresh.write_text("also stale\n")
+
+    session_mod._clear_stale_artifacts(cfg_for(tmp_path), player="n43n")
+
+    assert not stale.exists()
+    # Positive control: the unsuffixed form was being cleared before this
+    # change and must still be, so a green result cannot mean "cleared
+    # nothing".
+    assert not fresh.exists()
+
+
+def test_launch_leaves_another_players_stale_files_alone(tmp_path):
+    """The other half of the same fix, stated as its own test.
+
+    `client_files` reports a dead player's leftover heartbeat with an age, so
+    it reads as not-live rather than as a phantom client - but only if this
+    cleanup does not delete files that are not this session's to delete.
+
+    FIX ROUND 2, IMPORTANT 2: the original version of this test asserted only
+    that `someone_elses` survives, which a `_clear_stale_artifacts` that
+    deleted NOTHING AT ALL - or was never called - would also pass. This
+    plants THIS player's own stale file alongside the other player's, so the
+    same test proves both halves: the file that must go is gone, and the file
+    that must stay survives.
+    """
+    someone_elses = tmp_path / "biomancy-diag-big-bird-44a3.txt"
+    someone_elses.write_text("a different player's dead run\n")
+
+    # Positive control, in the SAME test: this player's own stale artifact
+    # MUST be deleted by the same call.
+    this_players_own = tmp_path / "biomancy-diag-n43n-003f.txt"
+    this_players_own.write_text("this player's own dead run\n")
+
+    session_mod._clear_stale_artifacts(cfg_for(tmp_path), player="n43n")
+
+    assert someone_elses.exists(), (
+        "a per-player artifact belonging to a DIFFERENT player was deleted - "
+        "it is not this session's to clear"
+    )
+    assert not this_players_own.exists(), (
+        "this player's own stale artifact survived the cleanup - a green "
+        "result on the assertion above cannot mean the cleanup did nothing"
+    )
+
+
 def _fake_launch_world(monkeypatch, *, existing, after, ready_raises):
     """Wire launch()'s dependencies so no game is started.
 
@@ -312,7 +396,7 @@ def _fake_launch_world(monkeypatch, *, existing, after, ready_raises):
 
     monkeypatch.setattr(session_mod.subprocess, "Popen", fake_popen)
 
-    def fake_wait(cfg, *, mode, timeout):
+    def fake_wait(cfg, *, mode, player, timeout):
         if ready_raises:
             raise session_mod.SessionError("no live heartbeat within 300s")
 
@@ -392,7 +476,7 @@ def _wait_ready_error(tmp_path, monkeypatch, mode):
     monkeypatch.setattr(session_mod, "heartbeat_is_live", lambda p: False)
 
     with pytest.raises(session_mod.SessionError) as e:
-        session_mod._wait_ready(cfg, mode=mode, timeout=0.0)
+        session_mod._wait_ready(cfg, mode=mode, player="n43n", timeout=0.0)
 
     return str(e.value)
 
@@ -442,13 +526,18 @@ def test_a_server_heartbeat_missing_under_server_client_does_not_blame_steam(
     """
     cfg = FakeCfg(tmp_path)
     client_hb = cfg.artifact("biomancy-hooks.txt", server=False)
+    # `_wait_ready` checks the two names THIS launch's client could
+    # legitimately be writing under (unsuffixed, or this player's token), so
+    # a client that is "up" has to be a real file on disk for it to find -
+    # content is irrelevant since `world_is_ready` is monkeypatched below.
+    client_hb.touch()
     monkeypatch.setattr(
         session_mod, "heartbeat_is_live", lambda p: p.name == client_hb.name
     )
     monkeypatch.setattr(session_mod, "world_is_ready", lambda text: False)
 
     with pytest.raises(session_mod.SessionError) as e:
-        session_mod._wait_ready(cfg, mode="server_client", timeout=0.0)
+        session_mod._wait_ready(cfg, mode="server_client", player="n43n", timeout=0.0)
 
     message = str(e.value)
     assert "Steam is NOT the likely cause" in message
@@ -470,6 +559,119 @@ def test_client_mode_failure_still_blames_steam(tmp_path, monkeypatch):
 
     assert "Steam" in message
     assert "NOT the likely cause" not in message
+
+
+def test_wait_ready_follows_the_clients_heartbeat_wherever_it_moves(
+    tmp_path, monkeypatch
+):
+    """FIX ROUND 1: `_wait_ready` watched ONE FIXED PATH for the client side.
+
+    That path is the unsuffixed `<mod>-hooks.txt`, and Task 2's per-player
+    naming means the mod stops writing it the moment a character loads -
+    which is EXACTLY when `world-ready` turns True, the other half of what
+    this function waits for. Pinned to the fixed path, the check would watch
+    a file the mod had just stopped updating and time out on a game running
+    perfectly.
+
+    Two independent, real ways to reach that:
+
+    1. The unsuffixed file appears first, live and world-ready - then the mod
+       picks up a character and switches to a per-player name; the unsuffixed
+       file ages past HEARTBEAT_MAX_AGE while the per-player one stays fresh.
+    2. The client is launched already knowing its player (`-player <name>
+       -join`), so the unsuffixed file NEVER EXISTS AT ALL - only the
+       per-player name ever appears, from the very first heartbeat.
+
+    All three cases below must be READY (the call must not raise). Real files
+    with real mtimes throughout - see `_client_heartbeat`.
+    """
+    monkeypatch.setattr(session_mod.time, "sleep", lambda s: None)
+    cfg = FakeCfg(tmp_path)
+    server_hb = cfg.artifact(cfg.artifacts.heartbeat, server=True)
+    _client_heartbeat(server_hb)
+
+    unsuffixed = tmp_path / "biomancy-hooks.txt"
+    per_player = tmp_path / "biomancy-hooks-n43n-003f.txt"
+
+    # Case 1: unsuffixed alone, live and world-ready. TODAY'S BEHAVIOUR - must
+    # not regress.
+    _client_heartbeat(unsuffixed)
+    session_mod._wait_ready(cfg, mode="server_client", player="n43n", timeout=1.0)
+
+    # Case 2: the mod switches to a per-player name; the unsuffixed file goes
+    # STALE (backdated past HEARTBEAT_MAX_AGE) rather than being deleted -
+    # which is what actually happens on disk, since nothing rewrites it once
+    # the mod stops touching it. Against the PRE-FIX code this is the failure:
+    # it watches only `unsuffixed`, finds it stale, and never looks at
+    # `per_player` at all.
+    _client_heartbeat(per_player)
+    _client_heartbeat(unsuffixed, age=_WELL_PAST_MAX_AGE)
+    session_mod._wait_ready(cfg, mode="server_client", player="n43n", timeout=1.0)
+
+    # Case 3: the unsuffixed file never existed - the client knew its player
+    # from its very first tick. Against the pre-fix code this is the same
+    # failure by a different route: the one path it watches was never written.
+    unsuffixed.unlink()
+    session_mod._wait_ready(cfg, mode="server_client", player="n43n", timeout=1.0)
+
+
+def test_wait_ready_positive_control_no_live_client_heartbeat_at_all(
+    tmp_path, monkeypatch
+):
+    """POSITIVE CONTROL for the test above.
+
+    A `_wait_ready` that simply accepted anything - or that stopped checking
+    the client side at all while chasing the fix above - would pass every
+    case in that test. This pins the other direction: with no client
+    heartbeat of any name, live or stale, readiness must NOT be satisfied.
+    """
+    monkeypatch.setattr(session_mod.time, "sleep", lambda s: None)
+    cfg = FakeCfg(tmp_path)
+    server_hb = cfg.artifact(cfg.artifacts.heartbeat, server=True)
+    _client_heartbeat(server_hb)
+
+    with pytest.raises(session_mod.SessionError) as e:
+        session_mod._wait_ready(cfg, mode="server_client", player="n43n", timeout=0.0)
+
+    assert "no client heartbeat of any name appeared" in str(e.value)
+
+
+def test_wait_ready_ignores_another_players_leftover_heartbeat(tmp_path, monkeypatch):
+    """FIX ROUND 2, IMPORTANT 1: a directory-wide walk re-opened the hole
+    `_clear_stale_artifacts` exists to close.
+
+    `_clear_stale_artifacts` deliberately leaves another player's files alone
+    (see its docstring) - they are not this session's to delete, and the
+    `heartbeat` tool that reads them shows a human their age. `_wait_ready`
+    shows nobody an age: it collapses a file to one ready/not-ready bit, so a
+    leftover from a DIFFERENT player's stopped session - fresh enough to still
+    be "live" if the turnaround was under HEARTBEAT_MAX_AGE - must not be
+    mistaken for THIS launch's client.
+    """
+    monkeypatch.setattr(session_mod.time, "sleep", lambda s: None)
+    cfg = FakeCfg(tmp_path)
+    server_hb = cfg.artifact(cfg.artifacts.heartbeat, server=True)
+    _client_heartbeat(server_hb)
+
+    # A DIFFERENT player's heartbeat: fresh, world-ready, left behind by a
+    # session that already stopped. Nothing for THIS launch's player ("n43n")
+    # exists yet.
+    someone_elses = tmp_path / "biomancy-hooks-big-bird-44a3.txt"
+    _client_heartbeat(someone_elses)
+
+    with pytest.raises(session_mod.SessionError) as e:
+        session_mod._wait_ready(cfg, mode="server_client", player="n43n", timeout=0.1)
+    assert "no client heartbeat of any name appeared" in str(e.value), (
+        "another player's leftover heartbeat was accepted as this launch's "
+        "client - it is not one of the names this player could be writing"
+    )
+
+    # Positive control in the SAME test: THIS launch's own player heartbeat
+    # appearing IS what satisfies readiness - a green result above cannot mean
+    # the check rejects everything regardless of what is on disk.
+    this_players = tmp_path / "biomancy-hooks-n43n-003f.txt"
+    _client_heartbeat(this_players)
+    session_mod._wait_ready(cfg, mode="server_client", player="n43n", timeout=1.0)
 
 
 # ---- the two file races --------------------------------------------------

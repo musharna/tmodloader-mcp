@@ -36,24 +36,99 @@ biomancy-hooks-server.txt   <- server
 Get that rule wrong in either direction and a harness reads the other side's
 answer without being able to tell.
 
-## The six filenames
+## The filenames
 
 Every name is built from the mod's **internal name, lowercased**. tModLoader
 takes that name from the source folder, so a mod in `ModSources/Biomancy`
 writes `biomancy-*`.
 
-| File                    | Written by  | When                        |
-| ----------------------- | ----------- | --------------------------- |
-| `<mod>-commands.txt`    | mod         | once, at load               |
-| `<mod>-hooks.txt`       | mod         | continuously, while ticking |
-| `<mod>-capture.trigger` | **harness** | per request                 |
-| `<mod>-capture.txt`     | mod         | per request, in reply       |
-| `<mod>-diag.txt`        | mod         | when asked                  |
-| `<mod>-shot.png`        | mod         | when asked                  |
+Two clients can now be on one machine at once (see
+[Two clients at once](#two-clients-at-once) below), and their **answers** have
+to be told apart the same way their **requests** already could be. So a
+client's per-reply files carry a **player token** — everything it writes back
+_about_ its own player — while the files both clients poll or share stay
+exactly one name:
+
+| File                        | Written by  | When                                   | Per player?    |
+| --------------------------- | ----------- | -------------------------------------- | -------------- |
+| `<mod>-commands.txt`        | mod         | once, at load                          | no             |
+| `<mod>-hooks.txt`           | mod         | continuously, until a character exists | no (see below) |
+| `<mod>-hooks-<token>.txt`   | mod         | continuously, once a character exists  | **yes**        |
+| `<mod>-capture.trigger`     | **harness** | per request                            | no             |
+| `<mod>-capture-<token>.txt` | mod         | per request, in reply                  | **yes**        |
+| `<mod>-diag-<token>.txt`    | mod         | when asked                             | **yes**        |
+| `<mod>-shot-<token>.png`    | mod         | when asked                             | **yes**        |
 
 The prefix must be letters and digits only. It lands in filenames and inside a
 regular expression, so a separator would build a path rather than a name and a
-dot would widen the pattern.
+dot would widen the pattern. The token sits **before the extension** — after
+it, `biomancy-diag.txt-n43n-003f` stops being a text file to anything that
+reads extensions.
+
+### The player token
+
+A character name is turned into a token by: lowercasing it, collapsing every
+run of non-alphanumeric characters to a single `-`, trimming leading and
+trailing `-`, then appending `-` plus the **first four hex characters of the
+MD5 of the ORIGINAL name's UTF-8 bytes** — not the slug, the name as typed. The
+hash is always appended, not only on collision: whether two names would clash
+is a question neither side can answer alone, since the mod knows one player
+and the harness knows one player, and a rule with a branch needs both sides to
+agree about when to take it.
+
+A name that slugs to nothing — pure punctuation — becomes `player-<digest>`
+rather than a bare digest, because the bare form does not match the grammar
+below and a token the grammar rejects is a file that discovery cannot see: a
+client that vanishes from `heartbeat` rather than one that is reported wrong.
+
+The result matches:
+
+```
+[a-z0-9][a-z0-9-]*-[0-9a-f]{4}
+```
+
+pinned as `PLAYER_TOKEN_GRAMMAR` in `triggers.py`, and imported everywhere
+else a token has to be recognised rather than re-derived, so the boundary
+against an adjacent capture index stays the one grammar instead of two
+hand-written copies of it.
+
+Three computed examples:
+
+| Name       | Token           |
+| ---------- | --------------- |
+| `n43n`     | `n43n-003f`     |
+| `Big Bird` | `big-bird-44a3` |
+| `BigBird`  | `bigbird-ca4c`  |
+
+`Big Bird` and `BigBird` land on different tokens even though they slug to
+similar text, because the hash is taken from the ORIGINAL bytes — the
+punctuation the slug throws away is still what the digest sees.
+
+**CASE IS PART OF THAT, AND ADDRESSING IS NOT.** `n43n` and `N43N` slug the
+same and digest differently — `n43n-003f` against `n43n-b6ff` — while the
+addressing check in [the trigger](#modcapturetrigger--the-request) compares
+names case-insensitively. So a client answers a target it does not spell the
+same way, and then writes under the spelling it does. **Address a client by
+its character name exactly**; the harness can only resolve this for its own
+session's player, whose spelling it was given. Both halves are deliberate: the
+digest distinguishes names that differ only by case, and a mod refusing
+`@N43N` from a developer typing quickly would be its own kind of wrong.
+
+### What deliberately stays shared
+
+`<mod>-capture.trigger` and `<mod>-commands.txt` are **not** per player, and
+that is load-bearing rather than an oversight:
+
+- **The trigger** is how one client learns a request is aimed at somebody
+  else. `DevResponder` leaves a trigger it is not addressed by exactly where
+  it is, unconsumed, so the intended client finds it on its own next poll. A
+  per-player trigger would give each client its own copy of the request and
+  delete the one part of addressing that already worked — the mod's whole
+  addressing check depends on every client polling the **same** file and
+  deciding for itself whether a request is its own.
+- **The command list** describes the channel, not an answer on it. Both
+  clients serve the same verbs from the same running mod, so a second copy
+  would only be the first one repeated under a different name.
 
 ## `<mod>-commands.txt` — what you serve
 
@@ -79,7 +154,7 @@ so its reappearance proves the mod loaded _in this run_. Nothing published
 means no responder is running — a different answer from a game still starting,
 and the harness reports it as such rather than waiting out a timeout.
 
-## `<mod>-hooks.txt` — the heartbeat
+## The heartbeat
 
 Written repeatedly while the mod ticks. `key: value`, one per line:
 
@@ -113,6 +188,26 @@ Four fields carry most of the diagnostic weight:
 
 Booleans are written as C# `bool.ToString()` gives them: `True` / `False`.
 
+**A CLIENT writes `<mod>-hooks.txt` (no token) for as long as it has no local
+character, and `<mod>-hooks-<token>.txt` from the moment one loads.** This is
+not a legacy name kept around for compatibility — it is the one heartbeat form
+that means "this client is up and has not got a character yet", and a world
+becomes ready at exactly the moment a character exists, so `launch`'s
+readiness wait watches BOTH names for exactly this reason: whichever one this
+client is currently writing is the one that will flip to `world-ready: True`.
+A dedicated server never has a player, so it never writes a tokened heartbeat
+at all — only the `-server` suffix from
+[Where the files live](#where-the-files-live) applies to it.
+
+**Read the untokened client heartbeat as a slot, not as a client.** Nothing
+deletes it when its writer moves to a tokened name, and every client that
+boots writes it again on the way through the menu — so with two clients it
+holds ONE record, belonging to whoever started last, frozen at whatever it
+said then. Measured: `polls: 1`, unchanged, still reading `live` for 45
+seconds after the client it came from had been in the world for a minute. Use
+`dedServ`, `polls` and the token to decide what is really running; see
+[What a live two-client run found](#what-a-live-two-client-run-found).
+
 ## `<mod>-capture.trigger` — the request
 
 The **harness** writes this; the mod polls for it, acts, and deletes it. The
@@ -136,12 +231,27 @@ was thrown away. A hang, reported as a hang, caused by a partial write.
 **A command you do not serve must be refused, not guessed at.** Falling back to
 some default action makes a typo look like a success.
 
-## `<mod>-capture.txt` — the reply
+This is the one artifact that stays a **single shared name even with two
+clients** — see [What deliberately stays shared](#what-deliberately-stays-shared)
+for why an addressed trigger still has to be one file both clients poll.
 
-One line. The first word decides how it is read:
+**One name means one slot: it holds a single request, not a queue.** A second
+request written before the first has been read replaces it, and the one that
+lost is gone with no trace — its caller waits out the full timeout while
+nothing anywhere explains why. Measured with two clients capturing at the same
+instant: one answered in 1.2s, the other timed out at 120s having never had a
+request on disk to find. Stagger concurrent requests, or address the two
+clients from one caller that serialises them.
+
+## The reply
+
+One line, written to `<mod>-capture-<token>.txt` — or, before this client has
+a character, `<mod>-capture.txt`; the same fallback described for the
+heartbeat applies to every answer file, not only it. The first word decides
+how the reply is read:
 
 ```
-SHOT: C:\Users\...\biomancy-shot.png
+SHOT: C:\Users\...\biomancy-shot-n43n-003f.png
 ERROR something went wrong
 REFUSED not while a boss is alive
 ```
@@ -154,9 +264,11 @@ completed one.
 The harness waits until the file's contents **stop changing** rather than for a
 fixed interval, and treats an empty file as still being written.
 
-## `<mod>-diag.txt` — the state dump
+## The state dump
 
-`key: value` lines, with **indented lines** under a key forming a list:
+Written to `<mod>-diag-<token>.txt` (or `<mod>-diag.txt` before a character
+exists — see [The reply](#the-reply)). `key: value` lines, with **indented
+lines** under a key forming a list:
 
 ```
 version: 0.8.1
@@ -178,11 +290,20 @@ Three rules the parser depends on:
 - **A key may repeat its meaning in a composite value** (`creep-residue: 0=35
 2=12`) and it stays a string. Only bare integers become numbers.
 
-## `<mod>-shot.png`
+## The drop box
 
-A single fixed filename that each capture overwrites. The harness renames it to
-`<mod>-shot-<index>-<region>.png` after each request, which is why three
-captures in a row do not all end up pointing at one file.
+`shot`'s single fixed filename that each capture overwrites —
+`<mod>-shot-<token>.png` (or `<mod>-shot.png` before a character exists). The
+harness renames it to `<mod>-shot-<token>-<index>-<region>.png` after each
+request, which is why three captures in a row do not all end up pointing at
+one file, and why two clients each calling `shot` do not end up pointing at
+each other's — the token makes the drop box itself per-client, not just the
+history built from it.
+
+This does **not** apply to the `capture` verb, which uses Terraria's own
+capture camera rather than `shot`'s back-buffer read and writes into a
+directory the mod does not name — see
+[Two clients at once](#two-clients-at-once).
 
 **Read the game's own back buffer, not the screen.** OS-level capture was tried
 first here and returned a picture of a Discord window sitting in front of the
@@ -190,31 +311,85 @@ game, having passed every check available. A back-buffer read cannot contain
 another window by construction rather than by luck — and that guarantee is the
 reason this project exists.
 
-## Known limitation: one client per side
+## Two clients at once
 
 The trigger payload can be **addressed** — `shot@n43n` asks one player by name,
 and the mod is expected to ignore a request aimed at somebody else. That much
-already works, and it is why `trigger` and `diag` take a `target`.
+already worked before this section changed, and it is why `trigger` and `diag`
+take a `target`. tModLoader will happily start a second client: it is launched
+directly as `dotnet tModLoader.dll -join ...`, not through Steam, so nothing
+stops a second process joining the same server.
 
-What does not work is two clients at once, and the reason is here in this
-document rather than in the engine. tModLoader will happily start a second
-client: it is launched directly as `dotnet tModLoader.dll -join ...`, not
-through Steam, so nothing stops a second process joining the same server.
-
-The obstacle is that **everything a client writes is namespaced by side, not by
-player**. Two clients would share one `<mod>-hooks.txt`, one
+What used not to work was two clients **answering** at once. The diagnosis
+that used to live in this section is still the reason the naming above exists,
+so it is kept rather than deleted: **everything a client wrote was namespaced
+by side, not by player**. Two clients shared one `<mod>-hooks.txt`, one
 `<mod>-capture.txt`, one `<mod>-diag.txt` and one `<mod>-shot.png`. Requests
-could be told apart and answers could not: a heartbeat could not say which
-client was alive, and two captures would overwrite one drop box.
+could be told apart — the trigger carries `@name` — and answers could not: a
+heartbeat could not say which client was alive, and two captures overwrote one
+drop box. The fix is everything above this section: a client's ANSWERS now
+carry its player token, on both sides of the contract at once.
 
-Fixing it means extending the naming rule above so a client's artifacts carry
-the player as well as the side — a change to this contract, made on both sides
-at once. It is recorded here because "the client's view is where most sync bugs
-live" is this project's own justification for existing, and two clients seeing
-each other is the case that most deserves testing and currently cannot be.
+**One name still deliberately survives unsuffixed on purpose, not as a gap:**
+`<mod>-hooks.txt`. A client that is up but has no character yet writes it, and
+a client that later gets a character writes `<mod>-hooks-<token>.txt` instead
+— see [The heartbeat](#the-heartbeat). Both the trigger and the command list
+stay shared too, for the reason given in
+[What deliberately stays shared](#what-deliberately-stays-shared) — none of
+these three are the limitation this section used to describe; they were never
+part of the ambiguity that namespacing removes.
+
+### What a live two-client run found
+
+Two clients, `n43n` and `tst2`, against one server — the case this whole
+section is about, run for the first time on 2026-08-11. What follows is
+**observed**, and replaces the three predictions that used to stand here.
+
+**Addressing works, and each client answers as itself.** A `shot` addressed to
+each in turn produced two distinct files with two distinct tokens and two
+distinct sets of bytes, and neither client consumed the other's request. That
+last part is earned rather than lucky: the responder checks addressing BEFORE
+deleting the trigger, so a client that is not the addressee leaves the file
+where its owner will find it. Keep that ordering if you write your own.
+
+**A single client does appear twice, and the second entry is a phantom.** It
+was predicted as a tokened entry beside a plain one decaying past the
+45-second window. What actually happens is worse: the plain entry is a
+_frozen_ main-menu observation — `polls: 1`, `gameMenu: True`,
+`world-ready: False` — abandoned the moment the client got a character. So for
+45 seconds `heartbeat` reports a second client that is "still starting up",
+and after that a dead one, and neither ever existed. It is also **shared**:
+the second client to boot overwrites it, so N clients produce ONE phantom,
+belonging to whoever started most recently.
+
+**An untargeted request is a coin flip — so address them.** `IsFor` returns
+true for every client when no `@player` is given, so all of them qualify and
+whichever polls first deletes the shared trigger and answers. Run twice in a
+row, it was answered by a different client each time. A caller waiting on its
+own player's answer file therefore times out roughly half the time, with a
+perfectly good answer sitting on disk under somebody else's name. **Pass a
+target whenever more than one client is up.**
+
+**Two requests cannot be in flight at once.** The trigger is one file and one
+slot, so a second request written while the first is still unread simply
+replaces it — the loser is lost silently and its caller waits out the full
+timeout. This is what stops the `capture` verb's attribution question from
+being answerable at all: two near-simultaneous captures are not something the
+protocol can carry, so whether it would report the wrong client's picture
+remains **unreachable rather than open**. Stagger concurrent requests.
+
+Whether the trigger should become a queue is a real question and a separate
+one. [What deliberately stays shared](#what-deliberately-stays-shared) argues
+for one trigger from ADDRESSING — every client must be able to see a request
+to know it is not theirs — and that argument is sound and says nothing about
+two requests at the same instant.
 
 ## What the harness clears
 
-Before every launch it deletes all six. A heartbeat or a command list left by
-a previous run is exactly what lets a readiness check pass against a process
-that is no longer there.
+Before every launch it deletes the six unsuffixed names, both sides, and —
+when a player is given — that launch's own per-player names. A heartbeat or a
+command list left by a previous run is exactly what lets a readiness check
+pass against a process that is no longer there. A DIFFERENT player's leftover
+files are deliberately left alone: they are not this launch's to delete, and
+`heartbeat` reports their age rather than treating their mere existence as
+"live", so a stale one reads as stale rather than as a phantom client.

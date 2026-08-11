@@ -29,6 +29,7 @@
     <Compile Include="DevBridgeGateTests.cs" />
     <Compile Include="DevArtifactsTests.cs" />
     <Compile Include="DevArtifactNamesTests.cs" />
+    <Compile Include="PlayerTokenTests.cs" />
     <Compile Include="ShotRegionTests.cs" />
     <Compile Include="CaptureBoundsTests.cs" />
     <Compile Include="CaptureFindTests.cs" />

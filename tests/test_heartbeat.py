@@ -161,3 +161,42 @@ def test_an_unreadable_heartbeat_does_not_invent_a_fresh_one(tmp_path):
     hb = heartbeat.read(d)
     assert hb.present is False
     assert hb.age is None
+
+
+def test_it_finds_one_file_per_client(tmp_path):
+    (tmp_path / "biomancy-hooks-n43n-003f.txt").write_text("side: client\n")
+    (tmp_path / "biomancy-hooks-big-bird-44a3.txt").write_text("side: client\n")
+    found = heartbeat.client_files(tmp_path, "biomancy")
+    assert sorted(p.name for p in found) == [
+        "biomancy-hooks-big-bird-44a3.txt",
+        "biomancy-hooks-n43n-003f.txt",
+    ]
+
+
+def test_an_unsuffixed_heartbeat_is_a_client_with_no_character_yet(tmp_path):
+    """The one place the old name survives, carrying a new meaning.
+
+    `launch` tells "live, no world" from "absent" by reading a heartbeat
+    written BEFORE a world is up — and before a world is up there is no
+    LocalPlayer to build a token from. Dropping this file would make the
+    harness blind at exactly the moment the heartbeat matters most.
+    """
+    (tmp_path / "biomancy-hooks.txt").write_text("side: client\n")
+    found = heartbeat.client_files(tmp_path, "biomancy")
+    assert [p.name for p in found] == ["biomancy-hooks.txt"]
+
+
+def test_the_servers_file_is_not_mistaken_for_a_clients(tmp_path):
+    # `-server` is a side suffix, not a player token, and a glob loose enough
+    # to catch it would report the dedicated server as a client.
+    (tmp_path / "biomancy-hooks-server.txt").write_text("side: server\n")
+    (tmp_path / "biomancy-hooks-n43n-003f.txt").write_text("side: client\n")
+    found = heartbeat.client_files(tmp_path, "biomancy")
+    # Positive control in the same test: the real client IS found, so this
+    # cannot pass by finding nothing at all.
+    assert [p.name for p in found] == ["biomancy-hooks-n43n-003f.txt"]
+
+
+def test_another_mods_heartbeat_is_not_ours(tmp_path):
+    (tmp_path / "othermod-hooks-n43n-003f.txt").write_text("side: client\n")
+    assert heartbeat.client_files(tmp_path, "biomancy") == []
