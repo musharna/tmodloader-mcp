@@ -352,12 +352,49 @@ class Session:
             "the client it names is gone, remove the file by hand."
         )
 
+    def _claimed_out_of_time_message(self, trigger: Path, timeout: float) -> str:
+        """Why a claim that WON still has to fail: the game may still answer it.
+
+        Deliberately not `_busy_message`. That one describes a request the
+        caller never got - another session's, still in the way, safe to leave
+        alone and safe to retry against immediately. This one describes a
+        request the caller DID get: it is this session's own, it is sitting on
+        the trigger the game polls, and the game will most likely serve it.
+        What ran out was this call's own time to keep waiting, not the game's
+        silence - so the fix is a longer timeout, not a check on the game or a
+        deletion of anything.
+
+        The trigger is left claimed rather than withdrawn - see `_claim` - so a
+        retry issued right away may find this same request of its own still
+        sitting there. That is the expected shape of a retry here, not a stall.
+        """
+        try:
+            pending = trigger.read_text().strip()
+            held = f"{pending!r}"
+        except (OSError, UnicodeDecodeError):
+            held = "its own request"
+
+        return (
+            f"the trigger at {trigger} now holds {held}, this session's own "
+            f"claim, with none of the {timeout:g}s timeout left to wait for a "
+            "reply. The game may still answer it - what ran out was this "
+            "call's own time, not the game's silence. Retry with a longer "
+            "timeout; a retry started right away may find this same request "
+            "of its own still pending, which is expected rather than stuck."
+        )
+
     def _claim(self, trigger: Path, payload: str, *, timeout: float) -> float:
         """Take the trigger slot, and return what is LEFT of `timeout`.
 
         Returning the remainder rather than swallowing it is the whole point:
         the caller asked for an answer within `timeout`, not for `timeout`
         waiting to ask plus `timeout` waiting to hear.
+
+        A claim that only succeeds once the budget is essentially gone is
+        still a WIN, not a loss - the trigger now holds the caller's own
+        request rather than somebody else's. Handing that case `_busy_message`
+        would tell the caller to go remove their own live request by hand, so
+        it gets its own message and its own trigger is left exactly as claimed.
         """
         deadline = time.monotonic() + timeout
         while True:
@@ -371,7 +408,7 @@ class Session:
                 continue
             remaining = max(0.0, deadline - time.monotonic())
             if remaining < CLAIM_POLL:
-                raise TriggerError(self._busy_message(trigger, timeout))
+                raise TriggerError(self._claimed_out_of_time_message(trigger, timeout))
             return remaining
 
     def ask(

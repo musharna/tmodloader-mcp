@@ -511,6 +511,15 @@ def test_a_claim_that_succeeds_on_its_last_tick_still_fails_as_a_claim(
     was never what was slow. The budget was spent entirely by contention for
     the slot, and the failure has to say so.
 
+    A first fix reused `_busy_message` here, which is wrong in a different way:
+    by the time the floor fires the claim has ALREADY SUCCEEDED, so the
+    trigger holds this session's own request, not somebody else's. Telling the
+    caller "another session's request is pending... remove the file by hand"
+    describes a request that is neither - it is theirs, it is live, and
+    deleting it would destroy the very thing they just asked for. The message
+    under test here has to say the opposite: the claim went through, the game
+    may still answer it, and the remedy is a longer timeout - not a deletion.
+
     The clock is faked rather than raced: `time.monotonic` and `time.sleep`
     are both replaced with a hand-advanced counter, so the claim succeeds at a
     deterministic instant with less than one `CLAIM_POLL` of budget left,
@@ -539,8 +548,19 @@ def test_a_claim_that_succeeds_on_its_last_tick_still_fails_as_a_claim(
     assert "polling" not in message, (
         f"blamed the game for a budget the claim spent: {message}"
     )
-    assert "Another session's request is pending" in message, (
-        f"does not stay framed as a claim: {message}"
+    assert "Another session's request is pending" not in message, (
+        f"describes the caller's own live claim as somebody else's: {message}"
+    )
+    assert "remove the file by hand" not in message, (
+        f"told the caller to delete a request that is their own and still "
+        f"live: {message}"
+    )
+    assert "may still answer" in message, (
+        f"does not say the claim went through and the game may still serve "
+        f"it: {message}"
+    )
+    assert "retry" in message.lower(), (
+        f"does not point the caller at the actual remedy - a longer timeout: {message}"
     )
 
 
@@ -595,12 +615,20 @@ def test_a_claim_under_real_process_contention_admits_exactly_one(tmp_path):
         )
         procs.append(proc)
 
-    for proc in procs:
-        proc.start()
-    for proc in procs:
-        proc.join(timeout=10)
+    try:
+        for proc in procs:
+            proc.start()
+        for proc in procs:
+            proc.join(timeout=10)
 
-    assert all(not proc.is_alive() for proc in procs), "a worker never finished"
+        assert all(not proc.is_alive() for proc in procs), "a worker never finished"
+    finally:
+        # A hung or crashed child must not outlive a failing run - terminate
+        # whatever is still alive rather than leaking a background process.
+        for proc in procs:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5)
 
     outcomes = [p.read_text() for p in result_paths]
     assert outcomes.count("ok") == 1, f"expected exactly one winner, got {outcomes}"
