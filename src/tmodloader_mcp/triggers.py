@@ -21,6 +21,7 @@ that read a heartbeat left behind by a process that had already been killed.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass
@@ -33,6 +34,39 @@ from .commands import CommandSet
 #: the capture-matching pattern, so a separator would build a path instead of a
 #: name and a dot would widen the pattern.
 MOD_NAME = re.compile(r"^[A-Za-z0-9]+$")
+
+#: A slug plus four hex of MD5. Pinned here as a constant because
+#: `captures.capture_pattern` has to embed the SAME grammar to stay
+#: unambiguous against the three-digit index that follows it, and two
+#: hand-written copies of a regex are two regexes.
+PLAYER_TOKEN_GRAMMAR = r"[a-z0-9][a-z0-9-]*-[0-9a-f]{4}"
+
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def player_token(name: str | None) -> str | None:
+    """A character name as a filename fragment, or None if there is no name.
+
+    Lowercase, runs of non-alphanumerics collapsed to one `-`, trimmed, plus
+    four hex of the MD5 of the ORIGINAL bytes.
+
+    The hash is always present rather than only on collision. Adding it only
+    when two names clash needs both sides to agree about WHEN, and they cannot
+    see each other's players — the mod knows one name, the harness knows one
+    name. A rule with one branch is a rule that cannot disagree.
+
+    MD5 is a filename disambiguator, not a security boundary: nothing here
+    depends on it being hard to collide deliberately.
+    """
+    if not name or not name.strip():
+        return None
+    slug = _NON_ALNUM.sub("-", name.lower()).strip("-")
+    digest = hashlib.md5(name.encode("utf-8")).hexdigest()[:4]
+    # A name of pure punctuation slugs to "". `player` rather than nothing,
+    # because the bare digest does not match PLAYER_TOKEN_GRAMMAR - and a token
+    # the grammar rejects is a file `captures` and heartbeat discovery cannot
+    # see, which is a silent disappearance rather than an error.
+    return f"{slug or 'player'}-{digest}"
 
 
 @dataclass(frozen=True)
