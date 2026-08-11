@@ -723,7 +723,7 @@ def test_the_trigger_file_is_never_written_where_the_game_is_watching(
         "game can read it half-written"
     )
     assert written, "nothing was written at all - the test is not exercising ask()"
-    assert trigger.read_text() == "diag", "the trigger never arrived intact"
+    assert trigger.read_text() == "diag@n43n", "the trigger never arrived intact"
 
     staged = written[-1]
     assert staged.parent == trigger.parent, (
