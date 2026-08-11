@@ -453,6 +453,76 @@ def test_a_claim_that_never_clears_names_what_is_holding_it(sess, cfg, monkeypat
     )
 
 
+def test_a_blocked_claim_does_not_assert_an_ownership_it_cannot_know(
+    sess, cfg, monkeypatch
+):
+    """FIX ROUND 3, IMPORTANT 2: the message named a culprit it never checked.
+
+    Nothing validates that an addressed target names a LIVE client, and the
+    mod leaves a request it is not addressed by exactly where it is - so one
+    typo'd `target`, or a client that has not loaded a character, parks a
+    request no client will ever consume. Every later call from BOTH sessions
+    then failed with "Another session's request is pending", which about a
+    caller's own typo is simply false, and sends them to look at a session
+    that may not exist.
+
+    What is observable is the payload and its age. That is what it may say.
+    """
+    _publish(cfg)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(trigger, "diag@nobody-by-that-name")
+
+    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+
+    with pytest.raises(TriggerError) as refused:
+        sess.ask("diag", timeout=0.2)
+
+    message = str(refused.value)
+    assert "Another session's request is pending" not in message, (
+        f"asserts whose request it is, which nothing here checked: {message}"
+    )
+    # POSITIVE CONTROL, in the same test: a message that had gone vague to
+    # satisfy the assertion above would be worse than the one it replaced.
+    # What IS observable still has to be in it.
+    assert "nobody-by-that-name" in message, (
+        f"does not name the payload that is actually in the way: {message}"
+    )
+
+
+def test_a_blocked_claim_on_this_sessions_own_request_names_the_remedy(
+    sess, cfg, monkeypatch
+):
+    """The self-inflicted half, which the caller can actually act on.
+
+    A request addressed to THIS session's own player that no client has taken
+    means no client of that name is polling - the commonest cause being a
+    client that has not loaded a character, whose name is empty and matches no
+    target. Saying "another session's" about that is the wrong owner AND the
+    wrong remedy.
+    """
+    _publish(cfg)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(trigger, f"diag@{SELF}")
+
+    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+
+    with pytest.raises(TriggerError) as refused:
+        sess.ask("diag", timeout=0.2)
+
+    message = str(refused.value)
+    assert "this session's own player" in message, (
+        f"does not say the pending request is the caller's own: {message}"
+    )
+    assert "`launch`" in message, (
+        f"does not name the remedy - a fresh launch clears this session's own "
+        f"pending request, and nothing else in the message tells them so: "
+        f"{message}"
+    )
+    assert "may belong to another session" not in message, (
+        f"hedges about an owner it can see is the caller themselves: {message}"
+    )
+
+
 def test_the_claim_wait_spends_the_callers_timeout_not_a_second_budget(
     sess, cfg, monkeypatch
 ):
