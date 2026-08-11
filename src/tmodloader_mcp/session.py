@@ -200,9 +200,9 @@ def _claim_atomically(path: Path, text: str) -> None:
     nothing at all. The harness then waits out its timeout for a reply to a
     request that was thrown away, and reports a hang.
 
-    Staged under a name nothing watches and renamed into place, so the polled
+    Staged under a name nothing watches and linked into place, so the polled
     name only ever refers to a finished payload. The staging file is a sibling
-    deliberately: a rename is only a rename within one filesystem, and the save
+    deliberately: a hard link only works within one filesystem, and the save
     directory is on /mnt/c while a temp dir would not be.
 
     THE STAGING NAME IS UNIQUE PER WRITE, and it has to be. It used to be

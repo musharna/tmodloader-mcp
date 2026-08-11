@@ -222,11 +222,15 @@ shot:topleft@n43n    both
 
 Two constraints that are not optional:
 
-**The harness writes it atomically** — staged under another name and renamed
+**The harness writes it atomically** — staged under another name and _linked_
 into place — because a polled file can otherwise be read half-written, and a
 truncated command word is not an error on your side. It parses as unknown, you
 do nothing, and the harness waits out its timeout for a reply to a request that
-was thrown away. A hang, reported as a hang, caused by a partial write.
+was thrown away. A hang, reported as a hang, caused by a partial write. The
+link is also the claim: it succeeds only when the name is free, so the same
+operation that makes the write atomic is what refuses to overwrite a pending
+request — see the rule below. The staging name is removed once the link lands,
+whether it wins the name or not.
 
 **A command you do not serve must be refused, not guessed at.** Falling back to
 some default action makes a typo look like a success.

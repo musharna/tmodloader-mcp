@@ -8,10 +8,10 @@ can be fooled by another window sitting on top of the game. OS-level capture was
 tried first and returned a picture of Discord.
 
 Both sides of a session share one save directory, so the server's artifacts are
-suffixed. A request may also be ADDRESSED (`diag@n43n`), because two clients on
-one machine share a trigger file and would otherwise race for it — whichever
-polled first would consume a request meant for the other and answer as the wrong
-player.
+suffixed. A request can be ADDRESSED (`diag@n43n`) to name one player among
+several clients sharing a trigger file. This harness addresses every request to
+its own player by default — see `Session.ask` — so writing an address here is
+how one session reaches a client OTHER than its own.
 
 The waiting is here rather than in each caller because getting it wrong is easy
 and quiet: the shell version of this loop was hand-written per harness, and the
