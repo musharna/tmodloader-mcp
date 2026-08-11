@@ -104,6 +104,16 @@ Three computed examples:
 similar text, because the hash is taken from the ORIGINAL bytes — the
 punctuation the slug throws away is still what the digest sees.
 
+**CASE IS PART OF THAT, AND ADDRESSING IS NOT.** `n43n` and `N43N` slug the
+same and digest differently — `n43n-003f` against `n43n-b6ff` — while the
+addressing check in [the trigger](#modcapturetrigger--the-request) compares
+names case-insensitively. So a client answers a target it does not spell the
+same way, and then writes under the spelling it does. **Address a client by
+its character name exactly**; the harness can only resolve this for its own
+session's player, whose spelling it was given. Both halves are deliberate: the
+digest distinguishes names that differ only by case, and a mod refusing
+`@N43N` from a developer typing quickly would be its own kind of wrong.
+
 ### What deliberately stays shared
 
 `<mod>-capture.trigger` and `<mod>-commands.txt` are **not** per player, and

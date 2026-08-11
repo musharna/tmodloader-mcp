@@ -283,3 +283,32 @@ def test_two_requests_in_flight_do_not_share_one_staging_file(cfg, monkeypatch):
         f"both sessions staged at {staged[0]} — concurrent requests overwrite "
         "each other's payload before either reaches the game"
     )
+
+
+def test_addressing_this_sessions_own_player_survives_a_different_case(
+    sess, cfg, monkeypatch
+):
+    """A REGRESSION THE ADDRESSEE FIX INTRODUCED, caught reviewing it.
+
+    The mod compares a target to its own name with `OrdinalIgnoreCase`, so it
+    answers to `n43n`, `N43N` and `N43n` alike — and then writes under its OWN
+    name. The token's four hex characters are the MD5 of the ORIGINAL bytes,
+    deliberately, so those three spellings produce three DIFFERENT tokens.
+
+    Before the addressee fix this worked by accident: the wait was pinned to
+    the session's player whatever the target said. Keying it to the target
+    would have made `diag(target='N43N')` from an `n43n` session time out
+    against a client answering perfectly — the exact failure the fix removes,
+    reintroduced one case-fold away from it.
+
+    The session knows the canonical spelling of its own player. A target that
+    names it, however typed, resolves to that spelling.
+    """
+    _publish(cfg)
+    _replies_when_triggered(
+        monkeypatch,
+        cfg.artifact(artifacts_for(cfg.mod_name, SELF).result, server=False),
+        "mine",
+    )
+
+    assert sess.ask("diag", target=SELF.upper(), timeout=1.0).text == "mine"

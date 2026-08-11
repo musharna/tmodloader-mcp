@@ -267,10 +267,29 @@ class Session:
         It worked before answers were per-player, and that is the uncomfortable
         part: every client wrote one shared reply file, so addressing worked
         BECAUSE answers were ambiguous. Removing the ambiguity is what broke it.
+
+        A TARGET NAMING THIS SESSION'S OWN PLAYER RESOLVES TO ITS SPELLING,
+        whatever case it was typed in. The mod compares a target to its own
+        name case-insensitively and then writes under its OWN name, while the
+        token's four hex characters are the MD5 of the ORIGINAL bytes - so
+        `n43n` and `N43N` are one client and two filenames. Keying the wait to
+        the target as typed would have made `diag(target='N43N')` time out
+        against a client answering perfectly: the very failure this fix exists
+        to remove, one case-fold away from it.
+
+        For any OTHER player there is no canonical spelling to resolve to - the
+        only account of that client's name is the client's own - so the target
+        must match the character name exactly. Inherent rather than an
+        oversight: the digest distinguishes names that differ ONLY by case,
+        which is the point of digesting the original bytes.
         """
         if server:
             return self.cfg.artifacts
-        return artifacts_for(self.cfg.mod_name, player or self.player)
+
+        if player is None or player.casefold() == self.player.casefold():
+            player = self.player
+
+        return artifacts_for(self.cfg.mod_name, player)
 
     def commands(self, *, server: bool = False) -> CommandSet:
         """What this side's mod says it serves.

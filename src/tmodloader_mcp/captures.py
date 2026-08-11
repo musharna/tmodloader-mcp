@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .triggers import PLAYER_TOKEN_GRAMMAR
+from .triggers import PLAYER_TOKEN_GRAMMAR, artifacts_for
 
 
 def capture_pattern(mod_name: str) -> re.Pattern[str]:
@@ -53,9 +53,15 @@ def capture_pattern(mod_name: str) -> re.Pattern[str]:
     copy: two hand-written copies of a regex are two regexes, and this one has
     to stay the SAME grammar `triggers` uses or the boundary against the
     three-digit index stops being findable.
+
+    The PREFIX comes from `artifacts_for` for the same reason and was the same
+    hand-copy one line further down - `mod_name.lower()` is the naming rule
+    restated, and a rule restated is a rule that can diverge from the names
+    actually written.
     """
     return re.compile(
-        rf"^{re.escape(mod_name.lower())}-shot-{PLAYER_TOKEN_GRAMMAR}-\d{{3}}-[a-z]+\.png$"
+        rf"^{re.escape(artifacts_for(mod_name).prefix)}"
+        rf"-shot-{PLAYER_TOKEN_GRAMMAR}-\d{{3}}-[a-z]+\.png$"
     )
 
 
@@ -95,7 +101,8 @@ def contained(save_dir: Path, mod_name: str, name: str) -> Path:
     if not capture_pattern(mod_name).match(name):
         raise CaptureError(
             f"{name!r} is not a capture name for {mod_name}. Only files this "
-            f"harness wrote - {mod_name.lower()}-shot-<token>-<index>-<region>.png "
+            f"harness wrote - {artifacts_for(mod_name).prefix}"
+            "-shot-<token>-<index>-<region>.png "
             "- can be read back; the save directory also holds diag dumps, "
             "heartbeats, the world, and any other mod's captures."
         )

@@ -759,12 +759,21 @@ def heartbeat() -> HeartbeatOut:
     causes:
 
     - **absent** — nothing ever wrote one. The mod is not loaded, is not
-      enabled in this install, or was built without the dev bridge.
+      enabled in this install, or was built without the dev bridge. For
+      clients this is an EMPTY `clients` list, not an entry saying so.
     - **stale** — a game ran and is no longer running. The file outlives the
       process, so this is indistinguishable from live to anything that only
       checks whether it exists.
     - **live, no world** — still loading. Nothing is wrong; wait longer.
     - **live, world, not armed** — loaded and ticking, bridge not listening.
+
+    `clients` is a LIST because two clients can share one save directory and
+    the old single-client shape reported whichever wrote last. Expect an entry
+    per client — and one more: an entry with `player: null` is the untokened
+    heartbeat every client writes before its character loads, which nothing
+    deletes and each new client overwrites. Treat it as a slot rather than as
+    a client. A real client is the one carrying a token and an advancing
+    `polls`.
 
     Reads OFF DISK and needs no session, deliberately: a failed `launch` raises
     without storing one, so a tool that required a session could never answer
@@ -794,7 +803,7 @@ def heartbeat() -> HeartbeatOut:
             diagnosis=heartbeat_mod.diagnose(hb),
         )
 
-    prefix = cfg.mod_name.lower()
+    prefix = cfg.artifacts.prefix
     clients = [
         _entry(path, heartbeat_mod.player_of(path.name, prefix))
         for path in heartbeat_mod.client_files(cfg.save_dir, prefix)
@@ -1014,7 +1023,7 @@ def diagnose_silence() -> str:
         # explaining why the game is silent. `client_files` finds every
         # client's heartbeat, per-player or not-yet-a-player, the same way
         # `heartbeat` does.
-        prefix = cfg.mod_name.lower()
+        prefix = cfg.artifacts.prefix
         found = heartbeat_mod.client_files(cfg.save_dir, prefix)
         if found:
             client_lines = []
