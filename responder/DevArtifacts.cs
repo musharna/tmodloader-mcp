@@ -1,4 +1,7 @@
+using System.Globalization;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace TModLoaderMcp.DevBridge
 {
@@ -86,6 +89,85 @@ namespace TModLoaderMcp.DevBridge
 			return Path.GetFileNameWithoutExtension(name)
 				+ SideSuffix
 				+ Path.GetExtension(name);
+		}
+
+		/// <summary>
+		/// Side suffix and player token together, in that order.
+		///
+		/// The two axes are independent and compose: the mod prefix keeps two
+		/// MODS apart, the side suffix keeps two SIDES apart, and the token
+		/// keeps two CLIENTS apart. A dedicated server passes a null token
+		/// because it has no client to be confused with.
+		/// </summary>
+		public static string ForSide(string name, bool dedicatedServer, string playerToken) {
+			string sided = ForSide(name, dedicatedServer);
+
+			// Absence must stay absence even with a token in hand: a null name
+			// has nothing to tag, and "-n43n-003f" alone would be a real,
+			// plausible-looking file in Main.SavePath - the same failure the
+			// two-argument sibling above guards against for "-server".
+			if (string.IsNullOrEmpty(sided) || string.IsNullOrEmpty(playerToken)) {
+				return sided;
+			}
+
+			// Same Path methods the two-argument overload uses, not manual
+			// dot-finding, so the two cannot silently diverge on a name with a
+			// dot in a directory component. Before the extension: after it,
+			// `biomancy-diag.txt-n43n-003f` is not a text file to anything
+			// that reads extensions.
+			return Path.GetFileNameWithoutExtension(sided) + "-" + playerToken + Path.GetExtension(sided);
+		}
+
+		/// <summary>
+		/// A character name as a filename fragment, or null if there is no name.
+		///
+		/// Lowercase, runs of non-alphanumerics collapsed to one '-', trimmed,
+		/// plus four hex of the MD5 of the ORIGINAL bytes. Kept identical to
+		/// triggers.player_token on the harness side; the vector table in
+		/// PlayerTokenTests is what holds the two together, because nothing at
+		/// runtime would notice them drifting apart - each side would write and
+		/// read its own spelling and simply never meet.
+		///
+		/// The hash is always present rather than only on collision: adding it
+		/// only when two names clash needs both sides to agree about WHEN, and
+		/// neither can see the other's players.
+		/// </summary>
+		public static string PlayerToken(string name) {
+			if (string.IsNullOrWhiteSpace(name)) {
+				return null;
+			}
+
+			var slug = new StringBuilder();
+			bool pendingDash = false;
+			foreach (char raw in name.ToLowerInvariant()) {
+				if ((raw >= 'a' && raw <= 'z') || (raw >= '0' && raw <= '9')) {
+					if (pendingDash && slug.Length > 0) {
+						slug.Append('-');
+					}
+
+					pendingDash = false;
+					slug.Append(raw);
+				}
+				else {
+					// Deferred rather than appended: this collapses a RUN to
+					// one dash and drops leading and trailing ones without a
+					// second trimming pass.
+					pendingDash = true;
+				}
+			}
+
+			// UTF-8 of the ORIGINAL name, not the slug - the slug is lossy and
+			// is exactly what the hash exists to disambiguate.
+			byte[] digest = MD5.HashData(Encoding.UTF8.GetBytes(name));
+			var hex = new StringBuilder(4);
+			for (int i = 0; i < 2; i++) {
+				hex.Append(digest[i].ToString("x2", CultureInfo.InvariantCulture));
+			}
+
+			// "player" rather than nothing when the slug is empty: the bare
+			// digest does not match the token grammar the harness matches
+			// against, and a file that grammar rejects simply disappears.
+			return (slug.Length > 0 ? slug.ToString() : "player") + "-" + hex;
 		}
 	}
 }

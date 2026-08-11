@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,8 +31,10 @@ from .diag import Diag
 from .diag import parse as parse_diag
 from .diag import sections as diag_sections
 from .triggers import (
+    Artifacts,
     Reply,
     TriggerError,
+    artifacts_for,
     compose,
     heartbeat_is_live,
     world_is_ready,
@@ -185,10 +188,30 @@ def _write_atomically(path: Path, text: str) -> None:
     name only ever refers to a finished payload. The staging file is a sibling
     deliberately: a rename is only a rename within one filesystem, and the save
     directory is on /mnt/c while a temp dir would not be.
+
+    THE STAGING NAME IS UNIQUE PER WRITE, and it has to be. It used to be
+    `<path>.staging` - one name, derived from the polled path, which every
+    client shares BY DESIGN. So two requests in flight at once shared one
+    staging file: the last write won its contents, the first rename carried
+    them, and the second rename raised `FileNotFoundError` having already lost
+    its payload. One request silently replaced by another's - a lost update, in
+    the one place this project exists to make unambiguous.
+
+    Found by firing two captures at once, which is a thing this project could
+    not produce until two clients could run at once. Per-write rather than
+    per-session, because two threads driving one session collide identically
+    and a per-player name would fix only the case that happened to be found.
     """
-    staged = path.with_name(f"{path.name}.staging")
-    staged.write_text(text)
-    os.replace(staged, path)
+    staged = path.with_name(f"{path.name}.{uuid.uuid4().hex[:12]}.staging")
+    try:
+        staged.write_text(text)
+        os.replace(staged, path)
+    finally:
+        # A throw between the write and the rename would otherwise leave the
+        # payload behind under a name nothing will ever collect, in the same
+        # directory the game is reading. `missing_ok` because the ordinary path
+        # through here is a successful rename, after which it is already gone.
+        staged.unlink(missing_ok=True)
 
 
 @dataclass
@@ -216,6 +239,57 @@ class Session:
 
     def path(self, name: str, *, server: bool) -> Path:
         return self.cfg.artifact(name, server=server)
+
+    @property
+    def artifacts(self) -> Artifacts:
+        """This session's names, carrying its player.
+
+        `cfg.artifacts` has no player and stays the right answer for the
+        dedicated server and for anything reading off disk without a session.
+        """
+        return artifacts_for(self.cfg.mod_name, self.player)
+
+    def _names(self, server: bool, player: str | None = None) -> Artifacts:
+        """Per-player names for the client, unsuffixed ones for the server.
+
+        The dedicated server has no player. Handing it a token would rename
+        files it writes under names nothing reads.
+
+        `player` IS THE ADDRESSEE, and defaults to this session's own. That
+        distinction is the whole of a live failure: an answer is written by the
+        client the request NAMED, under ITS token, so the path to wait at is a
+        function of who was addressed rather than of who asked. This used to
+        read `self.player` unconditionally, so `diag(target='somebody else')`
+        waited out its full timeout at a filename that client never touches -
+        while the answer sat on disk beside it, correct and unread. The
+        session's player is only the DEFAULT addressee.
+
+        It worked before answers were per-player, and that is the uncomfortable
+        part: every client wrote one shared reply file, so addressing worked
+        BECAUSE answers were ambiguous. Removing the ambiguity is what broke it.
+
+        A TARGET NAMING THIS SESSION'S OWN PLAYER RESOLVES TO ITS SPELLING,
+        whatever case it was typed in. The mod compares a target to its own
+        name case-insensitively and then writes under its OWN name, while the
+        token's four hex characters are the MD5 of the ORIGINAL bytes - so
+        `n43n` and `N43N` are one client and two filenames. Keying the wait to
+        the target as typed would have made `diag(target='N43N')` time out
+        against a client answering perfectly: the very failure this fix exists
+        to remove, one case-fold away from it.
+
+        For any OTHER player there is no canonical spelling to resolve to - the
+        only account of that client's name is the client's own - so the target
+        must match the character name exactly. Inherent rather than an
+        oversight: the digest distinguishes names that differ ONLY by case,
+        which is the point of digesting the original bytes.
+        """
+        if server:
+            return self.cfg.artifacts
+
+        if player is None or player.casefold() == self.player.casefold():
+            player = self.player
+
+        return artifacts_for(self.cfg.mod_name, player)
 
     def commands(self, *, server: bool = False) -> CommandSet:
         """What this side's mod says it serves.
@@ -263,7 +337,7 @@ class Session:
         )
 
         trigger = self.path(self.cfg.artifacts.trigger, server=server)
-        result = self.path(self.cfg.artifacts.result, server=server)
+        result = self.path(self._names(server, target).result, server=server)
 
         result.unlink(missing_ok=True)
         _write_atomically(trigger, payload)
@@ -284,7 +358,7 @@ class Session:
         them said which six, and were parsed and thrown away — so a caller could
         learn that six existed and never what any of them was.
         """
-        dump = self.path(self.cfg.artifacts.diag, server=server)
+        dump = self.path(self._names(server, target).diag, server=server)
         dump.unlink(missing_ok=True)
 
         reply = self.ask("diag", target=target, server=server, timeout=timeout)
@@ -323,7 +397,7 @@ class Session:
         disguise - the path handed back was unique among the calls that made
         it, which is not the property anybody needed.
         """
-        drop = self.path(self.cfg.artifacts.shot, server=False)
+        drop = self.path(self._names(False, target).shot, server=False)
         drop.unlink(missing_ok=True)
 
         reply = self.ask("shot", argument=region, target=target, timeout=timeout)
@@ -436,6 +510,37 @@ class Session:
         )
 
 
+def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
+    """A heartbeat or reply left by a previous run is what lets a readiness
+    check pass against a dead process.
+
+    Clears the unsuffixed names for both sides - `cfg.artifacts` has no
+    player, and is the right answer for the dedicated server, which never has
+    one - AND this session's own per-player names, when `player` is given. A
+    per-player reply from a dead run under the SAME player name would
+    otherwise survive into this one, which is the exact scenario the original
+    comment describes and Task 2's per-player naming made reachable.
+
+    Other players' files are left alone, deliberately: they are not this
+    session's to delete. That holds because of WHO reads them next: the
+    `heartbeat` tool hands a human an `age_seconds` to judge, so a leftover
+    file reads as not-live rather than as a phantom client. It does NOT hold
+    for `_wait_ready`, which collapses a file to a single ready/not-ready bit
+    and shows nobody its age - a leftover that is merely fresh enough would
+    read as ready. `_wait_ready` is not exposed to that risk by leaving files
+    alone here; it is protected by scoping its own candidates to the player
+    THIS launch was given, so another player's leftover is simply not one of
+    the names it looks at, however fresh it is.
+    """
+    for name in cfg.artifacts.all:
+        for server in (False, True):
+            cfg.artifact(name, server=server).unlink(missing_ok=True)
+
+    if player is not None:
+        for name in artifacts_for(cfg.mod_name, player).all:
+            cfg.artifact(name, server=False).unlink(missing_ok=True)
+
+
 def world_problem(world: str) -> str | None:
     """Why this world argument will not work, or None.
 
@@ -522,11 +627,8 @@ def launch(
 
     session = Session(cfg=cfg, mode=mode, port=port, player=player, world=world_arg)
 
-    # Clear stale artifacts BEFORE launching. A heartbeat or reply left by a
-    # previous run is what lets a readiness check pass against a dead process.
-    for name in cfg.artifacts.all:
-        for server in (False, True):
-            cfg.artifact(name, server=server).unlink(missing_ok=True)
+    # Clear stale artifacts BEFORE launching - see _clear_stale_artifacts.
+    _clear_stale_artifacts(cfg, player=player)
 
     server_cmd = [
         str(cfg.dotnet),
@@ -579,7 +681,7 @@ def launch(
                 stdin=subprocess.DEVNULL,
             )
 
-        _wait_ready(cfg, mode=mode, timeout=timeout)
+        _wait_ready(cfg, mode=mode, player=player, timeout=timeout)
     except BaseException as failure:
         # WHOEVER SPAWNS OWNS THEM UNTIL IT CAN HAND THEM BACK.
         #
@@ -611,24 +713,57 @@ def launch(
     return session
 
 
-def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
+def _wait_ready(cfg: Config, *, mode: str, player: str, timeout: float) -> None:
     """Block until the heartbeat says a world is live AND is recent.
 
     Both conditions, because they fail differently: a stale-but-ready heartbeat
     means the process died after loading, and a fresh-but-not-ready one means it
     is still loading. Checking only existence conflates them, which is exactly
     how a harness once sailed past three gates on a killed client's file.
+
+    THE CLIENT HALF IS DISCOVERED, NOT NAMED - but only among the two names
+    THIS launch's client can legitimately write. A client's heartbeat is
+    `<mod>-hooks.txt` before it has a character and `<mod>-hooks-<token>.txt`
+    from the moment one loads - and a world becomes ready at EXACTLY the
+    moment a character exists, so a check pinned to the unsuffixed path can end
+    up watching the file the mod has just stopped writing. The same failure
+    reaches here from the other direction too: `-player <name> -join` can mean
+    the client's very first heartbeat is already the per-player one, so the
+    unsuffixed file may never exist at all. Either way a fixed path goes stale
+    or empty on a game that is running perfectly, and `launch` times out on it.
+
+    NOT a directory-wide `heartbeat.client_files` walk, though: that would also
+    accept a DIFFERENT player's leftover heartbeat from a previous session.
+    `_clear_stale_artifacts` deliberately does not delete other players'
+    files (see its docstring) - so stop player A, launch player B inside
+    HEARTBEAT_MAX_AGE of that stop, and A's `<mod>-hooks-<A-token>.txt` is
+    still on disk, world-ready and fresh. A glob over every name would read
+    it as B's client and return before B's client has loaded at all. So the
+    candidate set is fixed to exactly the two names PLAYER could be writing
+    under - discovered between those two, not among every name that exists.
     """
     server_hb = cfg.artifact(cfg.artifacts.heartbeat, server=True)
-    client_hb = cfg.artifact(cfg.artifacts.heartbeat, server=False)
-    wanted = [server_hb] + ([client_hb] if mode == "server_client" else [])
+    per_player_name = artifacts_for(cfg.mod_name, player).heartbeat
+
+    def _client_candidates() -> list[Path]:
+        return [
+            cfg.artifact(cfg.artifacts.heartbeat, server=False),
+            cfg.artifact(per_player_name, server=False),
+        ]
+
+    def _any_ready(paths: list[Path]) -> bool:
+        return any(
+            heartbeat_is_live(p) and world_is_ready(p.read_text(errors="replace"))
+            for p in paths
+        )
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if all(
-            heartbeat_is_live(p) and world_is_ready(p.read_text(errors="replace"))
-            for p in wanted
-        ):
+        server_ready = heartbeat_is_live(server_hb) and world_is_ready(
+            server_hb.read_text(errors="replace")
+        )
+        client_ready = mode != "server_client" or _any_ready(_client_candidates())
+        if server_ready and client_ready:
             # A short settle after world-ready: the mod refuses commands until a
             # world has been live a few seconds, because serving one at the
             # instant capture first becomes possible crashed the engine once.
@@ -636,7 +771,28 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
             return
         time.sleep(2)
 
-    missing = [p.name for p in wanted if not heartbeat_is_live(p)]
+    missing = [server_hb.name] if not heartbeat_is_live(server_hb) else []
+
+    # A client is "missing" when NO name it could be writing under - suffixed
+    # or not - is live. That is a different question from whether one of the
+    # names it found is world-ready in time, which is a legitimate still-
+    # loading timeout rather than an absence.
+    client_missing = False
+    if mode == "server_client":
+        # `_client_candidates()` always returns both names it computed,
+        # whether or not either exists - unlike a glob, which only returns
+        # what is actually on disk. "found" here means "exists", so the
+        # not-found/went-stale distinction still asks the filesystem.
+        found = [p for p in _client_candidates() if p.is_file()]
+        live = [p for p in found if heartbeat_is_live(p)]
+        client_missing = not live
+        if not found:
+            # Distinguished from a name that appeared and went stale: "never
+            # wrote one" and "wrote one, then died" are different diagnoses,
+            # and a check that can find nothing has to say which happened.
+            missing.append("no client heartbeat of any name appeared")
+        else:
+            missing.extend(p.name for p in found if not heartbeat_is_live(p))
 
     # THE ADVICE HAS TO MATCH THE MODE THAT FAILED.
     #
@@ -646,7 +802,7 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
     # the client failure, so the identical server-mode failure was filed under
     # the same cause. Bringing Steam up fixed one and not the other, which is
     # the only reason the wrong attribution surfaced at all.
-    if client_hb.name in missing:
+    if client_missing:
         hint = (
             "The client requires Steam to be running and logged in - check that "
             "first, it is the usual cause."

@@ -31,17 +31,38 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .triggers import PLAYER_TOKEN_GRAMMAR, artifacts_for
+
 
 def capture_pattern(mod_name: str) -> re.Pattern[str]:
-    """What `shot` writes for ONE mod: its artifact prefix, plus the index and
-    region this harness renames the drop box to.
+    """What `shot` writes for ONE mod: its artifact prefix, the player token,
+    then the index and region this harness renames the drop box to.
 
     Anchored at both ends — an unanchored match would accept
     `evil-biomancy-shot-001-full.png.exe`. Built per mod rather than fixed,
     because two mods share one save directory and neither should be served the
     other's captures.
+
+    The token's grammar is PINNED rather than left as `[a-z0-9-]+`. An open
+    token is greedy across dashes and digits alike, so it would swallow the
+    three-digit index and leave the region matching what was meant to be the
+    index — the pattern would still match, and would extract the wrong fields.
+    The four-hex tail is what makes the boundary findable at all.
+
+    Imports `PLAYER_TOKEN_GRAMMAR` from `triggers` rather than holding its own
+    copy: two hand-written copies of a regex are two regexes, and this one has
+    to stay the SAME grammar `triggers` uses or the boundary against the
+    three-digit index stops being findable.
+
+    The PREFIX comes from `artifacts_for` for the same reason and was the same
+    hand-copy one line further down - `mod_name.lower()` is the naming rule
+    restated, and a rule restated is a rule that can diverge from the names
+    actually written.
     """
-    return re.compile(rf"^{re.escape(mod_name.lower())}-shot-\d{{3}}-[a-z]+\.png$")
+    return re.compile(
+        rf"^{re.escape(artifacts_for(mod_name).prefix)}"
+        rf"-shot-{PLAYER_TOKEN_GRAMMAR}-\d{{3}}-[a-z]+\.png$"
+    )
 
 
 class CaptureError(RuntimeError):
@@ -80,9 +101,10 @@ def contained(save_dir: Path, mod_name: str, name: str) -> Path:
     if not capture_pattern(mod_name).match(name):
         raise CaptureError(
             f"{name!r} is not a capture name for {mod_name}. Only files this "
-            f"harness wrote - {mod_name.lower()}-shot-<index>-<region>.png - can "
-            "be read back; the save directory also holds diag dumps, heartbeats, "
-            "the world, and any other mod's captures."
+            f"harness wrote - {artifacts_for(mod_name).prefix}"
+            "-shot-<token>-<index>-<region>.png "
+            "- can be read back; the save directory also holds diag dumps, "
+            "heartbeats, the world, and any other mod's captures."
         )
 
     root = save_dir.resolve()

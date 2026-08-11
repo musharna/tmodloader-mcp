@@ -41,6 +41,25 @@ public class MyDevResponder : DevResponder
 `Report` is `protected static` on the base class — it is how a handler answers,
 and every handler needs it.
 
+## The heartbeat before you have a character
+
+**Keep writing the unsuffixed `<mod>-hooks.txt` heartbeat until a local player
+exists.** `DevResponder` already does this for you — `AnswerPathFor` falls back
+to the plain name whenever there is no local character, which is exactly the
+state of a client sitting at the menu or mid-join. This is not a fallback to
+rediscover by reading the source; it is spelled out here because getting it
+wrong looks like nothing at all until somebody watches a launch fail.
+
+The reason it matters: [`docs/MOD_CONTRACT.md`](../docs/MOD_CONTRACT.md#the-heartbeat)
+has the harness wait on BOTH the unsuffixed heartbeat and this client's
+per-player one, because a world becomes ready at exactly the moment a
+character loads — the same tick the heartbeat's name changes out from under
+whichever file the harness was watching. A responder that stopped writing the
+unsuffixed name before a character existed — say, by writing only the tokened
+form and leaving it absent until then — would produce no heartbeat at all
+during exactly the window `launch` is waiting through, and the failure would
+read as a hung game rather than as a naming bug in the responder.
+
 ## The one thing that is easy to get wrong
 
 **`CollectDiag` must produce the grammar in
