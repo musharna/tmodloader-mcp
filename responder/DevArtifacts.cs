@@ -92,6 +92,28 @@ namespace TModLoaderMcp.DevBridge
 		}
 
 		/// <summary>
+		/// Side suffix and player token together, in that order.
+		///
+		/// The two axes are independent and compose: the mod prefix keeps two
+		/// MODS apart, the side suffix keeps two SIDES apart, and the token
+		/// keeps two CLIENTS apart. A dedicated server passes a null token
+		/// because it has no client to be confused with.
+		/// </summary>
+		public static string ForSide(string name, bool dedicatedServer, string playerToken) {
+			string sided = ForSide(name, dedicatedServer);
+			if (string.IsNullOrEmpty(playerToken)) {
+				return sided;
+			}
+
+			// Before the extension. After it, `biomancy-diag.txt-n43n-003f` is
+			// not a text file to anything that reads extensions.
+			int dot = sided.LastIndexOf('.');
+			return dot < 0
+				? sided + "-" + playerToken
+				: sided.Substring(0, dot) + "-" + playerToken + sided.Substring(dot);
+		}
+
+		/// <summary>
 		/// A character name as a filename fragment, or null if there is no name.
 		///
 		/// Lowercase, runs of non-alphanumerics collapsed to one '-', trimmed,
