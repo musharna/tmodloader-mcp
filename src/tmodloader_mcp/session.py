@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import commands as commands_mod
+from . import heartbeat as heartbeat_mod
 from . import inventory
 from .commands import CommandSet
 from .config import Config
@@ -658,17 +659,40 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
     means the process died after loading, and a fresh-but-not-ready one means it
     is still loading. Checking only existence conflates them, which is exactly
     how a harness once sailed past three gates on a killed client's file.
+
+    THE CLIENT HALF IS DISCOVERED, NOT NAMED. A client's heartbeat is
+    `<mod>-hooks.txt` before it has a character and `<mod>-hooks-<token>.txt`
+    from the moment one loads - and a world becomes ready at EXACTLY the
+    moment a character exists, so a check pinned to the unsuffixed path can end
+    up watching the file the mod has just stopped writing. The same failure
+    reaches here from the other direction too: `-player <name> -join` can mean
+    the client's very first heartbeat is already the per-player one, so the
+    unsuffixed file may never exist at all. Either way a fixed path goes stale
+    or empty on a game that is running perfectly, and `launch` times out on it.
+    `heartbeat.client_files` is asked FRESH on every poll rather than resolved
+    once, because which name is live can change between one poll and the next -
+    the same reason `Session.commands` re-reads instead of caching.
     """
     server_hb = cfg.artifact(cfg.artifacts.heartbeat, server=True)
-    client_hb = cfg.artifact(cfg.artifacts.heartbeat, server=False)
-    wanted = [server_hb] + ([client_hb] if mode == "server_client" else [])
+    client_dir = cfg.artifact(cfg.artifacts.heartbeat, server=False).parent
+    prefix = cfg.mod_name.lower()
+
+    def _client_candidates() -> list[Path]:
+        return heartbeat_mod.client_files(client_dir, prefix)
+
+    def _any_ready(paths: list[Path]) -> bool:
+        return any(
+            heartbeat_is_live(p) and world_is_ready(p.read_text(errors="replace"))
+            for p in paths
+        )
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if all(
-            heartbeat_is_live(p) and world_is_ready(p.read_text(errors="replace"))
-            for p in wanted
-        ):
+        server_ready = heartbeat_is_live(server_hb) and world_is_ready(
+            server_hb.read_text(errors="replace")
+        )
+        client_ready = mode != "server_client" or _any_ready(_client_candidates())
+        if server_ready and client_ready:
             # A short settle after world-ready: the mod refuses commands until a
             # world has been live a few seconds, because serving one at the
             # instant capture first becomes possible crashed the engine once.
@@ -676,7 +700,24 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
             return
         time.sleep(2)
 
-    missing = [p.name for p in wanted if not heartbeat_is_live(p)]
+    missing = [server_hb.name] if not heartbeat_is_live(server_hb) else []
+
+    # A client is "missing" when NO name it could be writing under - suffixed
+    # or not - is live. That is a different question from whether one of the
+    # names it found is world-ready in time, which is a legitimate still-
+    # loading timeout rather than an absence.
+    client_missing = False
+    if mode == "server_client":
+        found = _client_candidates()
+        live = [p for p in found if heartbeat_is_live(p)]
+        client_missing = not live
+        if not found:
+            # Distinguished from a name that appeared and went stale: "never
+            # wrote one" and "wrote one, then died" are different diagnoses,
+            # and a glob that can return nothing has to say which happened.
+            missing.append("no client heartbeat of any name appeared")
+        else:
+            missing.extend(p.name for p in found if not heartbeat_is_live(p))
 
     # THE ADVICE HAS TO MATCH THE MODE THAT FAILED.
     #
@@ -686,7 +727,7 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
     # the client failure, so the identical server-mode failure was filed under
     # the same cause. Bringing Steam up fixed one and not the other, which is
     # the only reason the wrong attribution surfaced at all.
-    if client_hb.name in missing:
+    if client_missing:
         hint = (
             "The client requires Steam to be running and logged in - check that "
             "first, it is the usual cause."

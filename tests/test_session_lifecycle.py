@@ -10,6 +10,7 @@ for as long as the object that generated it.
 
 from __future__ import annotations
 
+import os
 import struct
 import time
 import zlib
@@ -20,10 +21,29 @@ import pytest
 from tmodloader_mcp import session as session_mod
 from tmodloader_mcp.session import Session
 from tmodloader_mcp.triggers import (
+    HEARTBEAT_MAX_AGE,
     Reply,
     TriggerError,
     artifacts_for,
 )
+
+
+def _client_heartbeat(path: Path, *, age: float = 0.0) -> None:
+    """A REAL client heartbeat: world-ready, and genuinely `age` seconds old.
+
+    Real files with real mtimes throughout, matching `test_heartbeat.py` -
+    `os.utime` rather than a patched clock, because `heartbeat_is_live` reads
+    `st_mtime` and a fake clock would test the fake.
+    """
+    path.write_text("dedServ: False\nworld-ready: True\n")
+    if age:
+        stamp = time.time() - age
+        os.utime(path, (stamp, stamp))
+
+
+#: Comfortably past HEARTBEAT_MAX_AGE, so a backdated file is unambiguously
+#: stale rather than merely old.
+_WELL_PAST_MAX_AGE = HEARTBEAT_MAX_AGE + 30.0
 
 
 def _chunk(kind: bytes, data: bytes) -> bytes:
@@ -490,6 +510,11 @@ def test_a_server_heartbeat_missing_under_server_client_does_not_blame_steam(
     """
     cfg = FakeCfg(tmp_path)
     client_hb = cfg.artifact("biomancy-hooks.txt", server=False)
+    # `_wait_ready` now DISCOVERS the client's heartbeat via `client_files`
+    # rather than reading one fixed path, so a client that is "up" has to be
+    # a real file on disk for the glob to find - content is irrelevant since
+    # `world_is_ready` is monkeypatched below.
+    client_hb.touch()
     monkeypatch.setattr(
         session_mod, "heartbeat_is_live", lambda p: p.name == client_hb.name
     )
@@ -518,6 +543,81 @@ def test_client_mode_failure_still_blames_steam(tmp_path, monkeypatch):
 
     assert "Steam" in message
     assert "NOT the likely cause" not in message
+
+
+def test_wait_ready_follows_the_clients_heartbeat_wherever_it_moves(
+    tmp_path, monkeypatch
+):
+    """FIX ROUND 1: `_wait_ready` watched ONE FIXED PATH for the client side.
+
+    That path is the unsuffixed `<mod>-hooks.txt`, and Task 2's per-player
+    naming means the mod stops writing it the moment a character loads -
+    which is EXACTLY when `world-ready` turns True, the other half of what
+    this function waits for. Pinned to the fixed path, the check would watch
+    a file the mod had just stopped updating and time out on a game running
+    perfectly.
+
+    Two independent, real ways to reach that:
+
+    1. The unsuffixed file appears first, live and world-ready - then the mod
+       picks up a character and switches to a per-player name; the unsuffixed
+       file ages past HEARTBEAT_MAX_AGE while the per-player one stays fresh.
+    2. The client is launched already knowing its player (`-player <name>
+       -join`), so the unsuffixed file NEVER EXISTS AT ALL - only the
+       per-player name ever appears, from the very first heartbeat.
+
+    All three cases below must be READY (the call must not raise). Real files
+    with real mtimes throughout - see `_client_heartbeat`.
+    """
+    monkeypatch.setattr(session_mod.time, "sleep", lambda s: None)
+    cfg = FakeCfg(tmp_path)
+    server_hb = cfg.artifact(cfg.artifacts.heartbeat, server=True)
+    _client_heartbeat(server_hb)
+
+    unsuffixed = tmp_path / "biomancy-hooks.txt"
+    per_player = tmp_path / "biomancy-hooks-n43n-003f.txt"
+
+    # Case 1: unsuffixed alone, live and world-ready. TODAY'S BEHAVIOUR - must
+    # not regress.
+    _client_heartbeat(unsuffixed)
+    session_mod._wait_ready(cfg, mode="server_client", timeout=1.0)
+
+    # Case 2: the mod switches to a per-player name; the unsuffixed file goes
+    # STALE (backdated past HEARTBEAT_MAX_AGE) rather than being deleted -
+    # which is what actually happens on disk, since nothing rewrites it once
+    # the mod stops touching it. Against the PRE-FIX code this is the failure:
+    # it watches only `unsuffixed`, finds it stale, and never looks at
+    # `per_player` at all.
+    _client_heartbeat(per_player)
+    _client_heartbeat(unsuffixed, age=_WELL_PAST_MAX_AGE)
+    session_mod._wait_ready(cfg, mode="server_client", timeout=1.0)
+
+    # Case 3: the unsuffixed file never existed - the client knew its player
+    # from its very first tick. Against the pre-fix code this is the same
+    # failure by a different route: the one path it watches was never written.
+    unsuffixed.unlink()
+    session_mod._wait_ready(cfg, mode="server_client", timeout=1.0)
+
+
+def test_wait_ready_positive_control_no_live_client_heartbeat_at_all(
+    tmp_path, monkeypatch
+):
+    """POSITIVE CONTROL for the test above.
+
+    A `_wait_ready` that simply accepted anything - or that stopped checking
+    the client side at all while chasing the fix above - would pass every
+    case in that test. This pins the other direction: with no client
+    heartbeat of any name, live or stale, readiness must NOT be satisfied.
+    """
+    monkeypatch.setattr(session_mod.time, "sleep", lambda s: None)
+    cfg = FakeCfg(tmp_path)
+    server_hb = cfg.artifact(cfg.artifacts.heartbeat, server=True)
+    _client_heartbeat(server_hb)
+
+    with pytest.raises(session_mod.SessionError) as e:
+        session_mod._wait_ready(cfg, mode="server_client", timeout=0.0)
+
+    assert "no client heartbeat of any name appeared" in str(e.value)
 
 
 # ---- the two file races --------------------------------------------------
