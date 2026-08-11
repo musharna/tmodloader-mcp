@@ -134,9 +134,23 @@ KILL_SETTLE = 10.0
 #: bound it asked for rather than one poll's worth of overshoot.
 SETTLE_POLL = 0.5
 
+#: How often a blocked claim retries for the trigger slot. Much shorter than
+#: SETTLE_POLL: a slot is normally freed within one of the mod's poll ticks, so
+#: this is the resolution at which "already gone" is noticed, not a settle.
+CLAIM_POLL = 0.1
+
 
 class SessionError(RuntimeError):
     """The game could not be launched, reached, or shut down."""
+
+
+class TriggerBusy(RuntimeError):
+    """Another request is already pending at the trigger path.
+
+    Not an error the caller sees. `ask` catches it and waits, because a slot
+    held by a request the game is about to consume is a normal, sub-second
+    condition rather than a fault.
+    """
 
 
 def _tml_pids(cfg: Config) -> set[int]:
@@ -175,8 +189,9 @@ def _next_capture_index(drop: Path) -> int:
     return highest + 1
 
 
-def _write_atomically(path: Path, text: str) -> None:
-    """Put `text` at `path` without `path` ever holding a fragment of it.
+def _claim_atomically(path: Path, text: str) -> None:
+    """Put `text` at `path` without `path` ever holding a fragment of it, and
+    ONLY IF NOBODY ELSE HAS IT.
 
     The game POLLS the trigger path, so a write in place is readable by it
     half-finished, and a truncated command word is not an error on that side:
@@ -201,16 +216,25 @@ def _write_atomically(path: Path, text: str) -> None:
     not produce until two clients could run at once. Per-write rather than
     per-session, because two threads driving one session collide identically
     and a per-player name would fix only the case that happened to be found.
+
+    THE CLAIM IS THE POINT, and it is free. `os.replace` succeeded whatever was
+    already there, so two sessions sharing this path meant the second silently
+    replaced the first: measured as one capture answering in 1.2s while the
+    other timed out at 120s having never had a request on disk. `os.link` is
+    atomic in exactly the same way and refuses an occupied name, so exclusivity
+    costs no second file to keep consistent with this one.
     """
     staged = path.with_name(f"{path.name}.{uuid.uuid4().hex[:12]}.staging")
     try:
         staged.write_text(text)
-        os.replace(staged, path)
+        try:
+            os.link(staged, path)
+        except FileExistsError as taken:
+            raise TriggerBusy(str(path)) from taken
     finally:
-        # A throw between the write and the rename would otherwise leave the
-        # payload behind under a name nothing will ever collect, in the same
-        # directory the game is reading. `missing_ok` because the ordinary path
-        # through here is a successful rename, after which it is already gone.
+        # `os.replace` consumed the staging name; `os.link` leaves it as a
+        # second name for the same inode, so this is now the ordinary path
+        # rather than only the failure path.
         staged.unlink(missing_ok=True)
 
 
@@ -340,7 +364,7 @@ class Session:
         result = self.path(self._names(server, target).result, server=server)
 
         result.unlink(missing_ok=True)
-        _write_atomically(trigger, payload)
+        _claim_atomically(trigger, payload)
 
         text = self._await_text(result, timeout=timeout, what=f"reply to {payload!r}")
         return Reply(command=command, text=text.strip())
