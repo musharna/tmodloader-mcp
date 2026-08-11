@@ -1185,7 +1185,21 @@ print(server.heartbeat())
 "
 ```
 
-Expected: one entry in `clients`, with `player` set to the token for `n43n`.
+Expected: **one or two** entries in `clients`, at least one with `player` set to
+the token for `n43n`.
+
+AMENDED after Task 5's review. Two entries is the CORRECT expectation once a
+character loads, and the plan originally said one. Nothing deletes
+`<mod>-hooks.txt` when the client switches to its tokenised name, and
+`client_files` matches both forms — so one client legitimately shows up twice:
+the tokenised entry live, and the plain entry aging past `HEARTBEAT_MAX_AGE`
+(45s) with `player: null`.
+
+Record which you see, and treat it as a QUESTION TO SETTLE rather than a pass or
+fail: either the plain file should be deleted when the mod starts writing a
+tokenised one, or `heartbeat` should suppress a stale plain entry when a live
+tokenised one exists, or two entries is simply the honest answer and the tool's
+docstring should say so. Do not "fix" it mid-run — report what happened.
 
 - [ ] **Step 2: Join a second client against the same server**
 
@@ -1219,6 +1233,35 @@ answers are still shared and the change has failed.
 Take a `shot` addressed to each in turn and confirm two distinct files, each
 matching `capture_pattern`, with the right token. Confirm from `logs` that
 neither client consumed a request addressed to the other.
+
+- [ ] **Step 5a: An UNTARGETED request, with two clients listening**
+
+AMENDED after Task 5's review. `DevRequest.IsFor` returns true for ANY client
+when no `@player` is given, while `Session.ask` waits on THIS session's
+per-player result file and `trigger`'s `target` defaults to None. So a bare
+`trigger("diag")` can be consumed by the other client, which writes its own
+tokenised answer, and this session times out with nothing on disk explaining
+why.
+
+Run `trigger("diag")` with no target, twice, and record what happens each time.
+This is the first moment that behaviour has ever been observable. Report it;
+do not fix it here.
+
+- [ ] **Step 5b: Two captures at once — does `capture` attribute correctly?**
+
+AMENDED after Task 5's review, which found this by reading and could not test
+it. The mod's `capture` verb enumerates every `*.png` under the shared
+`Main.SavePath` and picks the largest path not present before it started
+waiting. Per-player shot names make this WORSE than it was: previously both
+clients wrote the same path, so a rewrite was normally excluded by the
+before-set; now client B's shot creates a genuinely new path that is "fresh" to
+a concurrent client A, so A can report `PNG: <B's file>` — a well-formed answer
+attributed to the wrong player, which is the exact failure class this whole plan
+exists to remove.
+
+Trigger a capture on both clients as close to simultaneously as you can manage,
+and record which file each reports. If A reports B's file, that is the predicted
+defect confirmed — write it up, do not fix it in this task.
 
 - [ ] **Step 6: Stop, and record**
 
