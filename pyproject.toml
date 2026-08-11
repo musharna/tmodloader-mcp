@@ -66,3 +66,13 @@ addopts = "-q"
 [tool.ruff]
 line-length = 88
 target-version = "py312"
+# `docs/superpowers` holds PLANS AND SPECS, not published documentation - their
+# Python code blocks are deliberately partial fragments (an in-function body,
+# a snippet showing what to insert where), not standalone modules. Ruff
+# formats Python inside markdown fences as if each block were a whole file, so
+# pointed at a fragment it "corrects" the indentation that was the point,
+# occasionally past the edge of what still parses (a dedented `return` reads
+# as one outside any function). Scoped to this one directory rather than
+# `docs/` wholesale so docs/MOD_CONTRACT.md - a protocol document whose
+# examples should stay well-formed - stays linted.
+exclude = ["docs/superpowers"]

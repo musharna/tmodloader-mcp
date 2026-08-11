@@ -29,7 +29,7 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 @pytest.fixture
 def save_dir(tmp_path):
     """A save directory holding one capture and one thing that is not one."""
-    (tmp_path / "biomancy-shot-001-topleft.png").write_bytes(PNG)
+    (tmp_path / "biomancy-shot-n43n-003f-001-topleft.png").write_bytes(PNG)
     (tmp_path / "biomancy-diag.txt").write_text("side: client netmode=1\n")
     return tmp_path
 
@@ -40,12 +40,17 @@ def test_a_capture_is_returned_as_bytes(save_dir):
     Every other test here asserts a refusal. Without this one, a reader that
     refused everything unconditionally would pass the lot.
     """
-    assert captures.read(save_dir, "Biomancy", "biomancy-shot-001-topleft.png") == PNG
+    assert (
+        captures.read(save_dir, "Biomancy", "biomancy-shot-n43n-003f-001-topleft.png")
+        == PNG
+    )
 
 
 def test_the_listing_shows_captures_and_nothing_else(save_dir):
     """`biomancy-diag.txt` is in the same directory and is not a capture."""
-    assert captures.available(save_dir, "Biomancy") == ["biomancy-shot-001-topleft.png"]
+    assert captures.available(save_dir, "Biomancy") == [
+        "biomancy-shot-n43n-003f-001-topleft.png"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -90,11 +95,11 @@ def test_a_symlink_pointing_out_is_refused(save_dir, tmp_path):
     """
     secret = tmp_path.parent / "secret.png"
     secret.write_bytes(b"not yours")
-    link = save_dir / "biomancy-shot-002-full.png"
+    link = save_dir / "biomancy-shot-n43n-003f-002-full.png"
     link.symlink_to(secret)
 
     with pytest.raises(captures.CaptureError):
-        captures.read(save_dir, "Biomancy", "biomancy-shot-002-full.png")
+        captures.read(save_dir, "Biomancy", "biomancy-shot-n43n-003f-002-full.png")
 
 
 def test_a_file_in_the_save_dir_that_is_not_a_capture_is_refused(save_dir):
@@ -113,16 +118,20 @@ def test_a_file_in_the_save_dir_that_is_not_a_capture_is_refused(save_dir):
 
 def test_a_capture_that_is_not_there_says_so_rather_than_pretending(save_dir):
     with pytest.raises(captures.CaptureError) as e:
-        captures.read(save_dir, "Biomancy", "biomancy-shot-404-full.png")
+        captures.read(save_dir, "Biomancy", "biomancy-shot-n43n-003f-404-full.png")
 
-    assert "biomancy-shot-404-full.png" in str(e.value)
+    assert "biomancy-shot-n43n-003f-404-full.png" in str(e.value)
 
 
 def test_the_refusals_are_not_all_the_same_check(save_dir):
     """A guard that rejected everything for one reason would satisfy every test
     above while being wrong about why. Each refusal names its own cause."""
     reasons = set()
-    for name in ["../outside.png", "biomancy-diag.txt", "biomancy-shot-404-x.png"]:
+    for name in [
+        "../outside.png",
+        "biomancy-diag.txt",
+        "biomancy-shot-n43n-003f-404-x.png",
+    ]:
         try:
             captures.read(save_dir, "Biomancy", name)
         except captures.CaptureError as e:
@@ -133,18 +142,21 @@ def test_the_refusals_are_not_all_the_same_check(save_dir):
 
 def test_reading_does_not_depend_on_the_save_dir_being_absolute(tmp_path, monkeypatch):
     """A relative cwd must not defeat the containment check."""
-    (tmp_path / "biomancy-shot-001-full.png").write_bytes(PNG)
+    (tmp_path / "biomancy-shot-n43n-003f-001-full.png").write_bytes(PNG)
     monkeypatch.chdir(tmp_path)
 
-    assert captures.read(Path("."), "Biomancy", "biomancy-shot-001-full.png") == PNG
+    assert (
+        captures.read(Path("."), "Biomancy", "biomancy-shot-n43n-003f-001-full.png")
+        == PNG
+    )
 
 
 # --- Pruning. This DELETES, in the user's save directory. -------------------
 
 
-def _shot(save, index, region="full", mod="biomancy", age=0.0):
+def _shot(save, index, region="full", mod="biomancy", age=0.0, token="n43n-003f"):
     """A capture on disk with a genuinely older mtime, not a patched clock."""
-    p = save / f"{mod}-shot-{index:03d}-{region}.png"
+    p = save / f"{mod}-shot-{token}-{index:03d}-{region}.png"
     p.write_bytes(b"\x89PNG")
     if age:
         stamp = time.time() - age
@@ -159,13 +171,13 @@ def test_pruning_keeps_the_newest_and_removes_the_rest(tmp_path):
     removed = captures.prune(tmp_path, "Biomancy", keep=2)
 
     assert removed == [
-        "biomancy-shot-001-full.png",
-        "biomancy-shot-002-full.png",
-        "biomancy-shot-003-full.png",
+        "biomancy-shot-n43n-003f-001-full.png",
+        "biomancy-shot-n43n-003f-002-full.png",
+        "biomancy-shot-n43n-003f-003-full.png",
     ]
     assert captures.available(tmp_path, "Biomancy") == [
-        "biomancy-shot-004-full.png",
-        "biomancy-shot-005-full.png",
+        "biomancy-shot-n43n-003f-004-full.png",
+        "biomancy-shot-n43n-003f-005-full.png",
     ]
 
 
@@ -182,8 +194,10 @@ def test_pruning_orders_by_mtime_not_by_the_index_in_the_name(tmp_path):
 
     removed = captures.prune(tmp_path, "Biomancy", keep=1)
 
-    assert captures.available(tmp_path, "Biomancy") == ["biomancy-shot-001-full.png"]
-    assert "biomancy-shot-003-full.png" in removed
+    assert captures.available(tmp_path, "Biomancy") == [
+        "biomancy-shot-n43n-003f-001-full.png"
+    ]
+    assert "biomancy-shot-n43n-003f-003-full.png" in removed
 
 
 def test_pruning_never_touches_anything_that_is_not_a_capture(tmp_path):
@@ -206,8 +220,8 @@ def test_pruning_never_touches_anything_that_is_not_a_capture(tmp_path):
     removed = captures.prune(tmp_path, "Biomancy", keep=0)
 
     assert removed == [
-        "biomancy-shot-001-full.png",
-        "biomancy-shot-002-full.png",
+        "biomancy-shot-n43n-003f-001-full.png",
+        "biomancy-shot-n43n-003f-002-full.png",
     ]
     # POSITIVE CONTROL: everything else is still there. Asserting only that the
     # captures went would pass on an implementation that deleted the lot.
@@ -237,7 +251,9 @@ def test_a_negative_keep_is_refused_rather_than_treated_as_zero(tmp_path):
     with pytest.raises(captures.CaptureError, match="keep must be 0 or more"):
         captures.prune(tmp_path, "Biomancy", keep=-1)
 
-    assert captures.available(tmp_path, "Biomancy") == ["biomancy-shot-001-full.png"]
+    assert captures.available(tmp_path, "Biomancy") == [
+        "biomancy-shot-n43n-003f-001-full.png"
+    ]
 
 
 def test_pruning_an_absent_directory_is_empty_not_a_crash(tmp_path):
@@ -250,9 +266,11 @@ def test_pruning_serves_one_mod_and_not_its_neighbour(tmp_path):
     _shot(tmp_path, 1, mod="othermod")
 
     assert captures.prune(tmp_path, "Othermod", keep=0) == [
-        "othermod-shot-001-full.png"
+        "othermod-shot-n43n-003f-001-full.png"
     ]
-    assert captures.available(tmp_path, "Biomancy") == ["biomancy-shot-001-full.png"]
+    assert captures.available(tmp_path, "Biomancy") == [
+        "biomancy-shot-n43n-003f-001-full.png"
+    ]
 
 
 def test_a_capture_shaped_symlink_out_of_the_directory_stops_the_prune(tmp_path):
@@ -272,7 +290,7 @@ def test_a_capture_shaped_symlink_out_of_the_directory_stops_the_prune(tmp_path)
     save = tmp_path / "save"
     save.mkdir()
     real = _shot(save, 1, age=100)
-    (save / "biomancy-shot-002-full.png").symlink_to(outside)
+    (save / "biomancy-shot-n43n-003f-002-full.png").symlink_to(outside)
 
     with pytest.raises(captures.CaptureError, match="outside"):
         captures.prune(save, "Biomancy", keep=0)
@@ -281,3 +299,45 @@ def test_a_capture_shaped_symlink_out_of_the_directory_stops_the_prune(tmp_path)
     # the legitimate capture that would otherwise have been deleted first.
     assert outside.read_bytes() == b"someone else's file"
     assert real.is_file(), "a refusal must not leave a half-finished prune"
+
+
+from tmodloader_mcp.captures import capture_pattern
+
+
+def test_a_per_player_capture_matches():
+    assert capture_pattern("Biomancy").match("biomancy-shot-n43n-003f-001-full.png")
+
+
+def test_the_token_cannot_swallow_the_index():
+    """The grammar is pinned rather than open for exactly this.
+
+    `[a-z0-9-]+` alone is greedy across dashes AND digits, so a token pattern
+    that did not end in four hex could absorb `-001` and leave the region to
+    stand in for the index. The four-hex tail is what makes the boundary
+    findable.
+    """
+    m = capture_pattern("Biomancy").match(
+        "biomancy-shot-big-bird-44a3-012-topright.png"
+    )
+    assert m
+
+    # The positive control: a name that is NOT a valid token is refused, so
+    # the test above cannot be passing because the pattern matches anything.
+    assert not capture_pattern("Biomancy").match(
+        "biomancy-shot-nothex-zzzz-012-topright.png"
+    )
+
+
+def test_an_unanchored_lookalike_is_still_refused():
+    # The reason the docstring gives for anchoring both ends, re-asserted
+    # against the new shape.
+    assert not capture_pattern("Biomancy").match(
+        "evil-biomancy-shot-n43n-003f-001-full.png"
+    )
+    assert not capture_pattern("Biomancy").match(
+        "biomancy-shot-n43n-003f-001-full.png.exe"
+    )
+
+
+def test_another_mods_capture_is_not_ours():
+    assert not capture_pattern("Biomancy").match("othermod-shot-n43n-003f-001-full.png")

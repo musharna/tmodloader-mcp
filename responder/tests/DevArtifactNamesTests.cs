@@ -77,5 +77,32 @@ namespace TModLoaderMcp.DevBridge.Tests
 			// it.
 			Assert.Equal("biomancy-diag.txt", new DevArtifactNames(given).Diag);
 		}
+
+		[Fact]
+		public void AClientsAnswersCarryItsPlayer() {
+			Assert.Equal("biomancy-diag-n43n-003f.txt",
+				DevArtifacts.ForSide("biomancy-diag.txt", false, "n43n-003f"));
+			Assert.Equal("biomancy-shot-n43n-003f.png",
+				DevArtifacts.ForSide("biomancy-shot.png", false, "n43n-003f"));
+		}
+
+		[Fact]
+		public void TheDedicatedServerKeepsItsSideSuffixAndGainsNoPlayer() {
+			// Two axes that compose: the side suffix keeps two SIDES apart, the
+			// token keeps two CLIENTS apart. A server has no client to be
+			// confused with, and adding a token would rename files the harness
+			// reads by their old names.
+			Assert.Equal("biomancy-diag-server.txt",
+				DevArtifacts.ForSide("biomancy-diag.txt", true, null));
+		}
+
+		[Fact]
+		public void AClientWithNoCharacterYetKeepsTheUnsuffixedName() {
+			// Not a legacy fallback - this name MEANS "up, no character yet",
+			// and `launch` depends on being able to read it before a world is
+			// loaded. See MOD_CONTRACT.md.
+			Assert.Equal("biomancy-hooks.txt",
+				DevArtifacts.ForSide("biomancy-hooks.txt", false, null));
+		}
 	}
 }

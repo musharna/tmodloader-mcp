@@ -83,5 +83,63 @@ namespace TModLoaderMcp.DevBridge.Tests
                 "a generic verb is registered after the mod's hook, so a mod " +
                 "could take the name and the harness would lose the verb it needs");
         }
+
+        /// <summary>
+        /// The single highest-risk property this task added: the trigger and
+        /// the command list must stay addressed by ONE name shared by every
+        /// client, or the IsFor(LocalPlayerName) addressing check at Tick()
+        /// becomes meaningless - each client would poll its own private,
+        /// nonexistent trigger and never see a request meant for it. These
+        /// three tests are what stops a future edit from folding PathFor and
+        /// AnswerPathFor back together "for simplicity" and silently deleting
+        /// multi-client addressing while every other test in this project
+        /// stays green (DevResponder.cs is not on the compile line - nothing
+        /// else here would notice).
+        ///
+        /// Each was mutation-tested: pointed at AnswerPathFor (or given a
+        /// second parameter) and confirmed to fail, then reverted. See
+        /// task-5-report.md for the transcript.
+        /// </summary>
+        [Fact]
+        public void TheTriggerIsReadThroughThePlainPathForNotTheTokenedOne() {
+            // Negative lookbehind for "Answer": "AnswerPathFor(TriggerName)"
+            // contains the literal substring "PathFor(TriggerName)" - Answer
+            // ends in the very letters PathFor starts with - so a plain
+            // Assert.Contains("PathFor(TriggerName)", ...) would pass on the
+            // very regression this test exists to catch.
+            Assert.Matches(new Regex(@"(?<!Answer)PathFor\(TriggerName\)"), Source());
+        }
+
+        [Fact]
+        public void TheCommandListIsPublishedThroughThePlainPathForNotTheTokenedOne() {
+            Assert.Matches(new Regex(@"(?<!Answer)PathFor\(Names\.Commands\)"), Source());
+        }
+
+        /// <summary>
+        /// PathFor's declaration takes exactly ONE argument. A second
+        /// parameter is exactly how a token would sneak into the trigger and
+        /// command-list path without either call site above visibly changing.
+        /// </summary>
+        [Fact]
+        public void PathForTakesExactlyOneArgumentSoItCannotAcquireAToken() {
+            Assert.Matches(
+                new Regex(@"private\s+static\s+string\s+PathFor\s*\(\s*string\s+name\s*\)\s*\{"),
+                Source());
+        }
+
+        /// <summary>
+        /// The property AnswerName/AnswerPathFor's null-token composition
+        /// actually relies on: a dedicated server never has a player token,
+        /// because LocalPlayerName short-circuits to null before ever
+        /// reaching Main.LocalPlayer. See
+        /// DevArtifactsTests.ADedicatedServerWithATokenWouldNotMatchTheHarnessesOrdering
+        /// for what breaks if this ever stops being true.
+        /// </summary>
+        [Fact]
+        public void LocalPlayerNameIsNullOnADedicatedServer() {
+            Assert.Matches(
+                new Regex(@"private\s+static\s+string\s+LocalPlayerName\s*\{\s*get\s*\{\s*if\s*\(\s*Main\.dedServ\s*\)\s*\{\s*return\s+null\s*;"),
+                Source());
+        }
     }
 }

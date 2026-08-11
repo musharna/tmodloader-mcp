@@ -148,12 +148,16 @@ actually in your save directory**, with the Windows paths it wants. `inventory`
 answers the same question without launching anything.
 
 `TMODLOADER_MOD_NAME` is the mod's **internal** name, which every artifact
-filename is built from: `<modname>-capture.trigger`, `<modname>-diag.txt`,
-`<modname>-shot.png`, lowercased. tModLoader takes that name from the source
-folder, so it is derived from `TMODLOADER_MOD_SOURCE` and only needs setting for
-a checkout whose folder is named something other than the mod. Deriving it is
-also what keeps two mods driven from one machine out of each other's trigger
-files — they share a save directory.
+filename is built from: `<modname>-diag-<token>.txt`, `<modname>-shot-<token>.png`,
+lowercased, where `<token>` identifies which player's client wrote it — except
+`<modname>-capture.trigger` and `<modname>-commands.txt`, which stay one name
+shared by every client (see
+[`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#the-filenames) for why).
+tModLoader takes the mod's name from the source folder, so it is derived from
+`TMODLOADER_MOD_SOURCE` and only needs setting for a checkout whose folder is
+named something other than the mod. Deriving it is also what keeps two mods
+driven from one machine out of each other's trigger files — they share a save
+directory.
 
 `TMODLOADER_MOD_SOURCE_WIN` is the mod source as Windows sees it, which `-build`
 needs because tModLoader compiles inside a Windows process with no `/mnt/c`. It
