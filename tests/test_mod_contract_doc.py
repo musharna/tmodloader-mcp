@@ -53,21 +53,32 @@ def _expected() -> set[str]:
     (from `artifacts_for("mod")`, player=None) and the tokened name (from
     `artifacts_for("mod", _PROBE_PLAYER)`), with the PROBE's real computed
     token subbed back out for TOKEN_PLACEHOLDER — so this checks the
-    document's GRAMMAR, not one player's literal hash. `trigger` and
-    `commands` are deliberately absent from the tokened half: the protocol
-    does not namespace them, and a name never computed here cannot silently
-    stop being checked.
+    document's GRAMMAR, not one player's literal hash.
+
+    The per-player half is `tokened.all - shared.all` — a SET DIFFERENCE
+    against `.all`, not four named accessors (`.result`, `.diag`, ...) picked
+    by hand. `trigger` and `commands` fall out of the tokened half on their
+    own, because they are identical in both sets and a difference cancels
+    them — nobody has to remember to exclude them. A NAMED list would also
+    have quietly matched today's four correctly and then said nothing the day
+    a fifth per-player artifact was added to `Artifacts` and this function was
+    not updated to match: not in the list, so absence from the document would
+    never register as "missing", and being undocumented, it could never be
+    flagged as "invented" either — the exact silent gap this whole test
+    exists to prevent, one level removed. A difference against the live
+    `.all` cannot go stale that way; a fifth tokened name shows up here the
+    moment `Artifacts` computes one.
     """
-    shared = {
-        name.replace("mod-", f"{PLACEHOLDER}-", 1) for name in artifacts_for("mod").all
-    }
+    shared_names = artifacts_for("mod").all
 
     tokened = artifacts_for("mod", _PROBE_PLAYER)
     token = player_token(_PROBE_PLAYER)
     assert token, "the probe player name must be non-empty to produce a token"
+
+    shared = {name.replace("mod-", f"{PLACEHOLDER}-", 1) for name in shared_names}
     per_player = {
         name.replace(token, TOKEN_PLACEHOLDER).replace("mod-", f"{PLACEHOLDER}-", 1)
-        for name in (tokened.result, tokened.diag, tokened.heartbeat, tokened.shot)
+        for name in set(tokened.all) - set(shared_names)
     }
 
     return shared | per_player
