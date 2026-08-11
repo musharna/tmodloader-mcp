@@ -109,7 +109,17 @@ repository had ever been able to express.
 
   A blocked claim never deletes the request in its way — that would be the same
   overwrite under a friendlier name — so a trigger held by a client that will
-  never consume it is reported, naming the pending request and its age.
+  never consume it is reported, naming the pending request and its age. It does
+  not name an OWNER: nothing validates that an address belongs to a live
+  client, so a caller's own typo'd `target` used to be reported as "another
+  session's request", which is the wrong culprit and the wrong remedy.
+
+  `launch` and `stop` no longer delete the trigger unconditionally either. That
+  was the same lost update arriving through the housekeeping — one developer
+  starting a game destroyed the other's in-flight request while their game was
+  still polling for it. Both now release it only where it holds a request
+  addressed to their own player, unaddressed, or unparseable, which is also the
+  only way a request nobody can consume ever leaves the shared slot.
 
 - **An untargeted request is no longer a coin flip.** Every client request now
   carries the session's own player. The mod accepts an unaddressed request at
