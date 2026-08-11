@@ -1110,13 +1110,44 @@ must be spelled out rather than left as a fallback an implementer discovers,
 because a responder that skipped it would look correct until somebody watched a
 launch.
 
-- [ ] **Step 5: Run everything and commit**
+- [ ] **Step 5: The CHANGELOG entry this plan forgot**
+
+AMENDED mid-run. Task 4's review found no task in this plan covers `CHANGELOG.md`
+at all, while Task 4 changed a published tool's output shape. `CHANGELOG.md:231`
+establishes the `**Breaking:**` precedent — follow it.
+
+Under `[Unreleased]`, add `### Changed` with the `heartbeat` shape change:
+`{client, server}` became `{clients: [...], server}`, and `HeartbeatSideOut`
+gained `player`. Say why the break was taken rather than shimmed: the old shape
+could not express two clients and silently reported whichever wrote last, which
+is the same shared-file ambiguity this release removes, wearing a different hat.
+Add an `### Added` entry for per-player artifact naming itself: what gained a
+token, what deliberately did not (the trigger and the command list), and the
+token rule with its grammar.
+
+- [ ] **Step 6: A refusal message that now describes a filename shape nobody writes**
+
+AMENDED mid-run, found by Task 3's review. `captures.contained` raises a
+`CaptureError` whose text still spells the old shape `<mod>-shot-<index>-
+<region>.png`. It is a string that lies to the caller about the protocol, in the
+one place a caller reads when their name was rejected. Correct it to the
+tokened shape, and check the rest of that module's messages for the same
+staleness rather than fixing only the one that was reported.
+
+- [ ] **Step 7: Run everything and commit**
 
 ```bash
 .venv/bin/python -m pytest --color=no | tail -1
 .venv/bin/python -m ruff check . && .venv/bin/python -m ruff format --check .
 git add -A && git commit -m "docs(contract): two clients, and the name that means no character yet"
 ```
+
+NOTE: the "one surviving limitation" section is written from what is KNOWN now.
+Three behaviours can only be settled by Task 8's live run — a client appearing
+twice in `heartbeat` (tokened and live, plain and aging out), an untargeted
+request being answerable by either client, and the `capture` verb picking the
+largest new PNG in a shared directory. Write the section so those can be added
+to it, and do not assert what the live run has not shown.
 
 ---
 
