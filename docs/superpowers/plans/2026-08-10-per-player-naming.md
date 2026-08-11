@@ -876,7 +876,73 @@ Expected: PASS. `launch`'s readiness check reads this — it must now consider a
 client ready if ANY entry is live, which is the correct reading and also what
 makes a second client not break the first's launch.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Two more readers that name the heartbeat**
+
+AMENDED mid-run, after Task 2's review surfaced them. Neither was in the
+original plan, and both are reachable bugs the moment Task 2 lands.
+
+**7a. `src/tmodloader_mcp/server.py:990-991`** — inside the `diagnose_silence`
+prompt:
+
+```python
+        client = heartbeat_mod.read(cfg.artifact(cfg.artifacts.heartbeat, server=False))
+```
+
+This reads the ONE unsuffixed client heartbeat. Once a client has a character it
+writes a per-player name, so this reports "client heartbeat: absent" — in the
+one tool whose entire job is explaining why the game is silent. Replace it with
+a walk over `heartbeat_mod.client_files(...)`, rendering one
+`heartbeat_mod.diagnose(...)` line per client (and a line saying so when there
+are none). Keep the server line as it is.
+
+**7b. `src/tmodloader_mcp/session.py:546`** — stale-artifact cleanup before
+launch:
+
+```python
+    for name in cfg.artifacts.all:
+        for server in (False, True):
+            cfg.artifact(name, server=server).unlink(missing_ok=True)
+```
+
+Its own comment states the stakes: "A heartbeat or reply left by a previous run
+is what lets a readiness check pass against a dead process." `cfg.artifacts` has
+no player, so after Task 2 this clears only the unsuffixed names and a
+per-player reply from a dead run survives into this one. Clear BOTH
+`cfg.artifacts.all` and `session.artifacts.all` — the session knows its own
+player by then.
+
+Leave other players' files alone, deliberately: they are not this session's to
+delete, and Task 4's `client_files` walk reports them with an age, so a dead
+one reads as not-live rather than as a phantom client.
+
+- [ ] **Step 8: Write the failing test for 7b, then fix it**
+
+```python
+def test_launch_clears_a_stale_per_player_reply(tmp_path):
+    """The cleanup comment's own scenario, now reachable.
+
+    A per-player diag left by a dead run is exactly what lets a readiness
+    check pass against a process that is gone.
+    """
+    stale = tmp_path / "biomancy-diag-n43n-003f.txt"
+    stale.write_text("from a previous run\n")
+    fresh = tmp_path / "biomancy-diag.txt"
+    fresh.write_text("also stale\n")
+
+    _clear_stale_artifacts(cfg_for(tmp_path), player="n43n")
+
+    assert not stale.exists()
+    # Positive control: the unsuffixed form was being cleared before this
+    # change and must still be, so a green result cannot mean "cleared
+    # nothing".
+    assert not fresh.exists()
+```
+
+Extract the cleanup loop into a named helper so it can be tested at all — it is
+currently inline in `launch`, which needs a real config and a real process.
+Match the surrounding code's naming.
+
+- [ ] **Step 9: Commit**
 
 ```bash
 git add -A && git commit -m "feat(heartbeat): report which clients are alive, not one of them"
