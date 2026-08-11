@@ -101,16 +101,21 @@ namespace TModLoaderMcp.DevBridge
 		/// </summary>
 		public static string ForSide(string name, bool dedicatedServer, string playerToken) {
 			string sided = ForSide(name, dedicatedServer);
-			if (string.IsNullOrEmpty(playerToken)) {
+
+			// Absence must stay absence even with a token in hand: a null name
+			// has nothing to tag, and "-n43n-003f" alone would be a real,
+			// plausible-looking file in Main.SavePath - the same failure the
+			// two-argument sibling above guards against for "-server".
+			if (string.IsNullOrEmpty(sided) || string.IsNullOrEmpty(playerToken)) {
 				return sided;
 			}
 
-			// Before the extension. After it, `biomancy-diag.txt-n43n-003f` is
-			// not a text file to anything that reads extensions.
-			int dot = sided.LastIndexOf('.');
-			return dot < 0
-				? sided + "-" + playerToken
-				: sided.Substring(0, dot) + "-" + playerToken + sided.Substring(dot);
+			// Same Path methods the two-argument overload uses, not manual
+			// dot-finding, so the two cannot silently diverge on a name with a
+			// dot in a directory component. Before the extension: after it,
+			// `biomancy-diag.txt-n43n-003f` is not a text file to anything
+			// that reads extensions.
+			return Path.GetFileNameWithoutExtension(sided) + "-" + playerToken + Path.GetExtension(sided);
 		}
 
 		/// <summary>

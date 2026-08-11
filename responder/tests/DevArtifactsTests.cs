@@ -67,5 +67,70 @@ namespace TModLoaderMcp.DevBridge.Tests
 			Assert.Null(DevArtifacts.ForSide(null, dedicatedServer: true));
 			Assert.Equal(string.Empty, DevArtifacts.ForSide(string.Empty, dedicatedServer: true));
 		}
+
+		/// <summary>
+		/// The three-argument overload has the same absence rule as its sibling
+		/// above, and a token must not be able to smuggle it past. Before this
+		/// was guarded, ForSide(null, false, "tok") threw a NullReferenceException
+		/// (LastIndexOf on null) and ForSide("", false, "tok") returned "-tok" -
+		/// the token alone LOOKS like a plausible filename, which is exactly the
+		/// failure the two-argument sibling test above exists to forbid.
+		/// </summary>
+		[Fact]
+		public void EmptyAndNullStayThatWayEvenWithAToken() {
+			Assert.Null(DevArtifacts.ForSide(null, dedicatedServer: false, playerToken: "n43n-003f"));
+			Assert.Equal(string.Empty,
+				DevArtifacts.ForSide(string.Empty, dedicatedServer: false, playerToken: "n43n-003f"));
+
+			// Both axes null/empty at once, and the dedicated-server side of it too.
+			Assert.Null(DevArtifacts.ForSide(null, dedicatedServer: true, playerToken: "n43n-003f"));
+			Assert.Equal(string.Empty,
+				DevArtifacts.ForSide(string.Empty, dedicatedServer: true, playerToken: null));
+		}
+
+		/// <summary>
+		/// LATENT ORDERING DIVERGENCE between the two languages, not exercised
+		/// anywhere else in this file. This method composes SIDE then TOKEN:
+		/// ForSide(name, dedicatedServer: true, playerToken: "tok") produces
+		/// "biomancy-diag-server-tok.txt". The harness composes the reverse -
+		/// triggers.py's Artifacts._named splices the token in first, and
+		/// config.py's Config.artifact then appends "-server" to that ALREADY
+		/// tokenised name, producing "biomancy-diag-tok-server.txt". Those two
+		/// spellings are different files.
+		///
+		/// They agree TODAY only because a dedicated server never has a player
+		/// token: DevResponder.LocalPlayerName returns null whenever
+		/// Main.dedServ is true (source-scanned by
+		/// DevResponderContractTests.LocalPlayerNameIsNullOnADedicatedServer),
+		/// so this method is never actually asked to combine dedicatedServer:
+		/// true with a non-null token at runtime. Nothing HERE enforces that -
+		/// this test only proves the two orderings genuinely diverge, so a
+		/// future change that gives a server a token cannot be made safely
+		/// without also fixing this composition to match the harness's order.
+		/// </summary>
+		[Fact]
+		public void ADedicatedServerWithATokenWouldNotMatchTheHarnessesOrdering() {
+			string sideThenToken =
+				DevArtifacts.ForSide("biomancy-diag.txt", dedicatedServer: true, playerToken: "n43n-003f");
+
+			// The harness's ordering, replicated inline rather than imported -
+			// there is no shared code between the two languages, which is the
+			// whole reason this divergence can exist unnoticed.
+			const string tokenThenSide = "biomancy-diag-n43n-003f-server.txt";
+
+			Assert.NotEqual(tokenThenSide, sideThenToken);
+		}
+
+		/// <summary>
+		/// The one case where the divergence above is silent: a null token
+		/// makes both orderings collapse to the same sided-only name, because
+		/// there is nothing left to order.
+		/// </summary>
+		[Fact]
+		public void ADedicatedServerWithNoTokenIsWhereTheTwoOrderingsHappenToAgree() {
+			Assert.Equal(
+				DevArtifacts.ForSide("biomancy-diag.txt", dedicatedServer: true),
+				DevArtifacts.ForSide("biomancy-diag.txt", dedicatedServer: true, playerToken: null));
+		}
 	}
 }
