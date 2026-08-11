@@ -246,14 +246,31 @@ frees or the caller's timeout is spent. Two rules follow, and both are
 load-bearing:
 
 - **A claim that finds the slot occupied must not delete what is there.** That
-  request belongs to another session and deleting it is the overwrite this
+  request may belong to another session, and deleting it is the overwrite this
   rule exists to prevent, wearing a friendlier name. Report it instead — naming
   the pending payload and its age, since neither the caller's own request nor
   the game is what is wrong.
-- **The claim spends the caller's timeout, not a second budget.** A caller
-  asking for an answer within N seconds did not ask for N waiting to ask plus
-  N waiting to hear, and a claim that consumed the whole budget must fail as a
-  claim rather than reporting a game that was never involved.
+
+  **Report only what the trigger shows.** The address it carries is the only
+  evidence of who is waiting on it, and nothing validates that an address names
+  a live client — so a message asserting "another session's request is pending"
+  is a guess, and about a caller's own typo'd `target` it is a wrong guess that
+  sends them hunting a session that does not exist. A payload addressed to the
+  reporting session's OWN player is the one case that is certain, and it comes
+  with a remedy: see [What the harness clears](#what-the-harness-clears).
+- **The claim and the reply share one budget.** A caller asking for an answer
+  within N seconds did not ask for N waiting to ask plus N waiting to hear, so
+  the claim returns what is left of the timeout and a claim that consumed the
+  whole budget fails as a claim rather than reporting a game that was never
+  involved.
+
+  Scoped to ONE request, which is what this rule can promise: a tool that
+  issues a request and then waits for a SECOND file — the state dump, the drop
+  box — spends its timeout on the trigger-plus-reply round trip and then waits
+  up to that timeout again for the file, so an end-to-end call can take roughly
+  twice what it was given. Documented rather than tightened, because the second
+  wait is for a file the mod writes after answering and the reply is not
+  evidence it has landed.
 
 ## The reply
 
@@ -424,10 +441,34 @@ two requests at the same instant.
 
 ## What the harness clears
 
-Before every launch it deletes the six unsuffixed names, both sides, and —
-when a player is given — that launch's own per-player names. A heartbeat or a
-command list left by a previous run is exactly what lets a readiness check
-pass against a process that is no longer there. A DIFFERENT player's leftover
-files are deliberately left alone: they are not this launch's to delete, and
-`heartbeat` reports their age rather than treating their mere existence as
-"live", so a stale one reads as stale rather than as a phantom client.
+Before every launch it deletes the five unsuffixed REPLY-side names, both
+sides, and — when a player is given — that launch's own per-player names. A
+heartbeat or a command list left by a previous run is exactly what lets a
+readiness check pass against a process that is no longer there. A DIFFERENT
+player's leftover files are deliberately left alone: they are not this launch's
+to delete, and `heartbeat` reports their age rather than treating their mere
+existence as "live", so a stale one reads as stale rather than as a phantom
+client.
+
+**The trigger is not one of them.** It is the sixth name, and the only one
+shared with the OTHER session rather than merely with a previous run of this
+one — so deleting it on the way in or out is the same overwrite the
+[claim rule](#modcapturetrigger--the-request) exists to prevent, committed by
+the housekeeping instead of by the write. `launch` and `stop` both used to do
+it unconditionally, which meant one developer starting a game destroyed the
+other's in-flight request while their game was still polling for it.
+
+So both RELEASE it rather than delete it: the file goes only when what it holds
+is that session's to take back — a request addressed to that session's own
+player, one carrying no address at all, or one no parser can read. A request
+addressed to anybody else stays exactly where it is, which is the same rule the
+mod itself follows when it declines to consume a request it is not addressed
+by. An unreadable or unaddressed payload counts as the session's own because
+nothing will ever collect it either way, and a slot that holds one request
+cannot afford to hold it forever.
+
+That release is also the only way an UNCONSUMABLE request leaves the slot.
+Nothing validates that a target names a live client, so a typo — or a client
+that has not loaded a character, whose name is empty and matches no target —
+parks a request no client will ever take. A fresh `launch` from the session
+that addressed it clears it; deleting the file by hand always works.
