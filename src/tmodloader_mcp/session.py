@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import commands as commands_mod
-from . import heartbeat as heartbeat_mod
 from . import inventory
 from .commands import CommandSet
 from .config import Config
@@ -468,8 +467,15 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
     comment describes and Task 2's per-player naming made reachable.
 
     Other players' files are left alone, deliberately: they are not this
-    session's to delete, and `heartbeat.client_files` reports them with an
-    age, so a dead one reads as not-live rather than as a phantom client.
+    session's to delete. That holds because of WHO reads them next: the
+    `heartbeat` tool hands a human an `age_seconds` to judge, so a leftover
+    file reads as not-live rather than as a phantom client. It does NOT hold
+    for `_wait_ready`, which collapses a file to a single ready/not-ready bit
+    and shows nobody its age - a leftover that is merely fresh enough would
+    read as ready. `_wait_ready` is not exposed to that risk by leaving files
+    alone here; it is protected by scoping its own candidates to the player
+    THIS launch was given, so another player's leftover is simply not one of
+    the names it looks at, however fresh it is.
     """
     for name in cfg.artifacts.all:
         for server in (False, True):
@@ -620,7 +626,7 @@ def launch(
                 stdin=subprocess.DEVNULL,
             )
 
-        _wait_ready(cfg, mode=mode, timeout=timeout)
+        _wait_ready(cfg, mode=mode, player=player, timeout=timeout)
     except BaseException as failure:
         # WHOEVER SPAWNS OWNS THEM UNTIL IT CAN HAND THEM BACK.
         #
@@ -652,7 +658,7 @@ def launch(
     return session
 
 
-def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
+def _wait_ready(cfg: Config, *, mode: str, player: str, timeout: float) -> None:
     """Block until the heartbeat says a world is live AND is recent.
 
     Both conditions, because they fail differently: a stale-but-ready heartbeat
@@ -660,7 +666,8 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
     is still loading. Checking only existence conflates them, which is exactly
     how a harness once sailed past three gates on a killed client's file.
 
-    THE CLIENT HALF IS DISCOVERED, NOT NAMED. A client's heartbeat is
+    THE CLIENT HALF IS DISCOVERED, NOT NAMED - but only among the two names
+    THIS launch's client can legitimately write. A client's heartbeat is
     `<mod>-hooks.txt` before it has a character and `<mod>-hooks-<token>.txt`
     from the moment one loads - and a world becomes ready at EXACTLY the
     moment a character exists, so a check pinned to the unsuffixed path can end
@@ -669,16 +676,25 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
     the client's very first heartbeat is already the per-player one, so the
     unsuffixed file may never exist at all. Either way a fixed path goes stale
     or empty on a game that is running perfectly, and `launch` times out on it.
-    `heartbeat.client_files` is asked FRESH on every poll rather than resolved
-    once, because which name is live can change between one poll and the next -
-    the same reason `Session.commands` re-reads instead of caching.
+
+    NOT a directory-wide `heartbeat.client_files` walk, though: that would also
+    accept a DIFFERENT player's leftover heartbeat from a previous session.
+    `_clear_stale_artifacts` deliberately does not delete other players'
+    files (see its docstring) - so stop player A, launch player B inside
+    HEARTBEAT_MAX_AGE of that stop, and A's `<mod>-hooks-<A-token>.txt` is
+    still on disk, world-ready and fresh. A glob over every name would read
+    it as B's client and return before B's client has loaded at all. So the
+    candidate set is fixed to exactly the two names PLAYER could be writing
+    under - discovered between those two, not among every name that exists.
     """
     server_hb = cfg.artifact(cfg.artifacts.heartbeat, server=True)
-    client_dir = cfg.artifact(cfg.artifacts.heartbeat, server=False).parent
-    prefix = cfg.mod_name.lower()
+    per_player_name = artifacts_for(cfg.mod_name, player).heartbeat
 
     def _client_candidates() -> list[Path]:
-        return heartbeat_mod.client_files(client_dir, prefix)
+        return [
+            cfg.artifact(cfg.artifacts.heartbeat, server=False),
+            cfg.artifact(per_player_name, server=False),
+        ]
 
     def _any_ready(paths: list[Path]) -> bool:
         return any(
@@ -708,13 +724,17 @@ def _wait_ready(cfg: Config, *, mode: str, timeout: float) -> None:
     # loading timeout rather than an absence.
     client_missing = False
     if mode == "server_client":
-        found = _client_candidates()
+        # `_client_candidates()` always returns both names it computed,
+        # whether or not either exists - unlike a glob, which only returns
+        # what is actually on disk. "found" here means "exists", so the
+        # not-found/went-stale distinction still asks the filesystem.
+        found = [p for p in _client_candidates() if p.is_file()]
         live = [p for p in found if heartbeat_is_live(p)]
         client_missing = not live
         if not found:
             # Distinguished from a name that appeared and went stale: "never
             # wrote one" and "wrote one, then died" are different diagnoses,
-            # and a glob that can return nothing has to say which happened.
+            # and a check that can find nothing has to say which happened.
             missing.append("no client heartbeat of any name appeared")
         else:
             missing.extend(p.name for p in found if not heartbeat_is_live(p))
