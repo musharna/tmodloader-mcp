@@ -90,14 +90,14 @@ repository had ever been able to express.
   addressed rather than of who asked.
 
 - **Two requests in flight no longer share one staging file.** The trigger is
-  written atomically — staged beside the polled path and renamed into place —
+  written atomically — staged beside the polled path and linked into place —
   but the staging name was derived FROM that shared path, so two concurrent
-  writers shared it. The last write won the contents, the first rename carried
-  them, and the second raised `FileNotFoundError` having already lost its
+  writers shared it. The last write won the contents, the first link carried
+  it, and the second raised `FileNotFoundError` having already lost its
   payload: one request silently replaced by another's, in the one place this
   project exists to make unambiguous. The staging name is now unique per
-  write, and a `finally` clears it so a throw between write and rename stops
-  leaving the payload in the directory the game reads.
+  write, and a `finally` clears it on every write — not only a failed one —
+  so nothing is left behind in the directory the game reads.
 
 - **Two sessions can now issue requests at the same time.** The trigger is
   claimed rather than written: `os.link` is atomic exactly as `os.replace` was

@@ -259,11 +259,13 @@ checkout:
 
    The two-client run is the part worth reading: it caught a regression the
    change itself introduced, a lost-update race nobody had predicted, and —
-   once that race was fixed — a deeper limit it had been hiding. Two
-   limitations remain, documented rather than papered over: an **untargeted**
-   request with two clients up is answered by whichever polls first, and the
-   trigger holds **one request rather than a queue**, so concurrent requests
-   have to be staggered. Both are in
+   once that race was fixed — a deeper limit it had been hiding. Both are
+   closed now: every request carries the session's own player by default, so
+   the **untargeted** coin flip is gone, and the trigger is **claimed rather
+   than overwritten** — a second request waits for the slot instead of
+   silently replacing what is in it. The trigger still holds **one request at
+   a time**, not a queue; that is the mechanism now, not a limitation to work
+   around. See
    [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#what-a-live-two-client-run-found).
 
 The last thing that made this a tool for one mod is gone. The filenames, the
