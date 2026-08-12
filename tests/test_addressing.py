@@ -75,7 +75,9 @@ def _publish(cfg: FakeCfg, *, server: bool = False) -> None:
     addressing.
     """
     cfg.artifact(cfg.artifacts.commands, server=server).write_text(
-        "diag\tnoarg\tstate dump\nshot\targ\tone region of the frame\n"
+        "diag\tnoarg\tstate dump\n"
+        "shot\targ\tone region of the frame\n"
+        "capture\tnoarg\tsave a screenshot\n"
     )
 
 
@@ -970,4 +972,92 @@ def test_claiming_the_capture_lock_spends_the_callers_budget(sess, cfg):
     assert 0 < remaining < 5.0, (
         "the claim handed back the full budget, so the boundary wait it just "
         "slept through will be spent a second time by the reply"
+    )
+
+
+# ---- wiring: `ask` and the capture lock -------------------------------------
+
+
+def test_a_capture_holds_the_lock_and_a_diag_does_not(sess, cfg, monkeypatch):
+    """The lock covers captures, not the whole protocol.
+
+    Locking every request would serialise two sessions completely - which is
+    the thing 0.3.0 exists to have stopped.
+    """
+    _publish(cfg)  # `compose` validates against the published set
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    seen = []
+
+    def watch(self, result, *, timeout, what):
+        # `self` here is bound to `sess`: this replaces a class attribute,
+        # not an instance one, and Python's descriptor protocol hands the
+        # instance to the first positional slot on every call through it.
+        seen.append(lock.exists())
+        # Stands in for the game reading and discarding the trigger it just
+        # answered - nothing else in this fake environment ever does, and
+        # without it the second `ask` finds the first request still on disk
+        # and times out claiming a slot that is, in reality, this session's
+        # own abandoned one.
+        trigger.unlink(missing_ok=True)
+        return "OK"
+
+    monkeypatch.setattr(session_mod.Session, "_await_text", watch)
+
+    sess.ask("capture", timeout=5.0)
+    sess.ask("diag", timeout=5.0)
+
+    assert seen == [True, False], (
+        f"lock held during [capture, diag] was {seen} - a capture must hold "
+        "it and a diag must not"
+    )
+
+
+def test_the_capture_lock_is_released_even_when_the_reply_never_comes(
+    sess, cfg, monkeypatch
+):
+    """A timeout must not wedge captures for both sessions.
+
+    Seen failing before the fix by removing the `finally`.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+
+    def never(self, result, *, timeout, what):
+        raise session_mod.TriggerError("no reply")
+
+    monkeypatch.setattr(session_mod.Session, "_await_text", never)
+
+    with pytest.raises(session_mod.TriggerError):
+        sess.ask("capture", timeout=1.0)
+
+    assert not lock.exists(), "a failed capture kept the lock"
+    assert stamp.exists(), (
+        "no stamp was written, so the next capture will not know to miss "
+        "this second - and Terraria may well have written a PNG regardless "
+        "of whether the reply arrived"
+    )
+
+
+def test_a_session_waiting_for_the_capture_lock_holds_no_trigger(
+    sess, cfg, monkeypatch
+):
+    """The property that makes two locks safe, asserted rather than assumed.
+
+    If `ask` claimed the trigger first and the lock second, two captures
+    would deadlock: each holding what the other waits for.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    session_mod._claim_atomically(lock, "held by somebody else")
+
+    with pytest.raises(session_mod.TriggerError):
+        sess.ask("capture", timeout=0.3)
+
+    assert not trigger.exists(), (
+        "a session blocked on the capture lock had already claimed the "
+        "trigger - two captures in this order deadlock"
     )

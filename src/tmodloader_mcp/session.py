@@ -725,9 +725,40 @@ class Session:
         result = self.path(self._names(server, target).result, server=server)
 
         result.unlink(missing_ok=True)
-        remaining = self._claim(trigger, payload, timeout=timeout)
 
-        text = self._await_text(result, timeout=remaining, what=f"reply to {payload!r}")
+        # SERIALISED, because Terraria names the file it writes after the
+        # second it wrote it in and nothing downstream can undo that. Two
+        # captures inside one second produce ONE picture and two callers each
+        # told it is theirs - watched happen, live, with two clients.
+        #
+        # The lock comes BEFORE the trigger claim and that order is load
+        # bearing: a session waiting here holds no trigger, so the trigger's
+        # holder always finishes.
+        # Client side only: `CaptureNow` refuses on a dedicated server, and a
+        # server-side lock would be a DIFFERENT file (`-server` suffixed) that
+        # serialises against nothing.
+        capturing = _will_capture(payload) and not server
+        lock = self.path(self.cfg.artifacts.capture_lock, server=server)
+        stamp = self.path(self.cfg.artifacts.capture_stamp, server=server)
+
+        held = False
+        try:
+            if capturing:
+                timeout = self._claim_capture(lock, stamp, timeout=timeout)
+                held = True
+
+            remaining = self._claim(trigger, payload, timeout=timeout)
+            text = self._await_text(
+                result, timeout=remaining, what=f"reply to {payload!r}"
+            )
+        finally:
+            if held:
+                # Stamped even on failure: Terraria may have written a PNG
+                # whether or not the reply arrived, and a second nobody
+                # recorded is a second the next capture will land in.
+                _write_stamp(stamp, time.time())
+                lock.unlink(missing_ok=True)
+
         return Reply(command=command, text=text.strip())
 
     def diag(
