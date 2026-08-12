@@ -208,6 +208,13 @@ class Reply:
     command: str
     text: str
 
+    #: Something that happened on the way to this reply which the caller could
+    #: not otherwise learn - currently only "a stale capture lock was broken".
+    #: Deliberately NOT folded into `text`: `ok` and `refused` are decided by
+    #: what `text` starts with, so anything prepended there changes how the
+    #: game's own answer is read.
+    note: str | None = None
+
     @property
     def ok(self) -> bool:
         return not self.text.startswith(("ERROR", "REFUSED", "IGNORED"))

@@ -957,7 +957,9 @@ def test_a_held_capture_lock_blocks_a_second_capture_until_it_is_released(sess, 
     # POSITIVE CONTROL, same test: released, the same call succeeds. Without
     # it, a `_claim_capture` that always raised would pass everything above.
     lock.unlink()
-    assert sess._claim_capture(lock, stamp, timeout=5.0) > 0
+    remaining, note = sess._claim_capture(lock, stamp, timeout=5.0)
+    assert remaining > 0
+    assert note is None, "nothing was stale here - there is nothing to report"
     assert lock.exists()
 
 
@@ -967,12 +969,50 @@ def test_claiming_the_capture_lock_spends_the_callers_budget(sess, cfg):
     stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
 
     session_mod._write_stamp(stamp, time.time())
-    remaining = sess._claim_capture(lock, stamp, timeout=5.0)
+    remaining, _note = sess._claim_capture(lock, stamp, timeout=5.0)
 
     assert 0 < remaining < 5.0, (
         "the claim handed back the full budget, so the boundary wait it just "
         "slept through will be spent a second time by the reply"
     )
+
+
+def test_a_caller_whose_capture_broke_a_stale_lock_is_told(sess, cfg, monkeypatch):
+    """Silence here would hand back a picture taken after clearing somebody
+    else's wreckage, with nothing to say a lock was ever broken.
+
+    That matters because breaking is a JUDGEMENT - the lock was assumed dead
+    from its age alone - and a judgement nobody records is one nobody can
+    check afterwards.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(lock, "a dead session")
+    old = time.time() - (session_mod.CAPTURE_LOCK_STALE + 5)
+    os.utime(lock, (old, old))
+
+    def answer(self, result, *, timeout, what):
+        # Stands in for the game reading and discarding the trigger it just
+        # answered - see `test_a_capture_holds_the_lock_and_a_diag_does_not`,
+        # which names why: nothing else in this fake environment ever does,
+        # and without it the second `ask` below finds the first request still
+        # on disk and times out claiming a slot that is, in reality, this
+        # session's own abandoned one.
+        trigger.unlink(missing_ok=True)
+        return "PNG: C:\\x.png"
+
+    monkeypatch.setattr(session_mod.Session, "_await_text", answer)
+
+    reply = sess.ask("capture", timeout=5.0)
+
+    assert reply.note is not None and "stale" in reply.note.lower()
+    assert reply.text == "PNG: C:\\x.png", "the note leaked into the reply body"
+
+    # POSITIVE CONTROL, same test: an ordinary capture carries no note, so
+    # this cannot pass by every reply having grown one.
+    lock.unlink(missing_ok=True)
+    assert sess.ask("capture", timeout=5.0).note is None
 
 
 # ---- wiring: `ask` and the capture lock -------------------------------------

@@ -296,7 +296,7 @@ def _will_capture(payload: str) -> bool:
 
 def _break_stale_lock(lock: Path) -> float | None:
     """Remove a capture lock no live capture could still be holding, and say
-    how old it was. `None` when there was nothing to break.
+    how old it was. `None` when nothing was broken.
 
     A capture's duration is bounded, so age is a real signal here in a way it
     is not for the trigger - and the two failure modes are not comparable.
@@ -304,8 +304,16 @@ def _break_stale_lock(lock: Path) -> float | None:
     0.3.0; breaking the trigger claim wrongly destroys a request somebody is
     waiting on. Do not carry this over.
 
-    The unlink is guarded because the holder may release between the stat and
-    the unlink, which is a race this function WINS by doing nothing.
+    THE RETURN IS "DID THIS CALL REMOVE IT", not merely "was it stale". The
+    holder may release between the stat and the unlink - a race this function
+    WINS by doing nothing further - and that race's `FileNotFoundError` used
+    to be swallowed the same way a permission failure is, with the age handed
+    back regardless of which happened. That age now reaches a caller: Task 8
+    turns it into "a stale capture lock was broken to take this capture", and
+    in that interleaving nothing here broke anything - the holder finished on
+    its own. Saying so anyway would be a false claim about a judgement call
+    nobody made. So the unlink's own outcome decides the answer, not just the
+    stat that preceded it.
     """
     try:
         age = time.time() - lock.stat().st_mtime
@@ -315,8 +323,14 @@ def _break_stale_lock(lock: Path) -> float | None:
     if age <= CAPTURE_LOCK_STALE:
         return None
 
-    with contextlib.suppress(OSError):
+    try:
         lock.unlink()
+    except OSError:
+        # Gone already (the race above), or some other removal failure - either
+        # way this call did not perform the break, so it does not get to claim
+        # one. `_claim_capture`'s retry is unaffected: the lock is not held
+        # either way, so retrying is correct on both branches of this except.
+        return None
     return age
 
 
@@ -630,9 +644,11 @@ class Session:
             "two callers told it is theirs. Retry with a longer timeout."
         )
 
-    def _claim_capture(self, lock: Path, stamp: Path, *, timeout: float) -> float:
+    def _claim_capture(
+        self, lock: Path, stamp: Path, *, timeout: float
+    ) -> tuple[float, str | None]:
         """Take the capture lock, wait out the previous capture's second, and
-        return what is LEFT of `timeout`.
+        return what is LEFT of `timeout` and a note for the caller.
 
         TAKEN BEFORE THE TRIGGER, always, and that ordering is the whole
         reason two locks are safe: a session waiting here is by construction
@@ -653,13 +669,22 @@ class Session:
         by `ask`'s `finally` and leaves nothing behind, so the ordinary
         out-of-time path in `_await_text` is the honest report - there is
         nothing here for an early raise to warn about.
+
+        THE NOTE IS EARNED, NOT INFERRED FROM `SlotBusy`. Only
+        `_break_stale_lock` returning an age means THIS call broke a lock; a
+        `SlotBusy` that resolves any other way - the lock was never stale, or
+        it vanished under a race `_break_stale_lock` recognises as somebody
+        else's release - retries silently, same as before Task 8.
         """
+        broke: float | None = None
         deadline = time.monotonic() + timeout
         while True:
             try:
                 _claim_atomically(lock, str(os.getpid()))
             except SlotBusy:
-                if _break_stale_lock(lock) is not None:
+                age = _break_stale_lock(lock)
+                if age is not None:
+                    broke = age
                     continue
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -674,7 +699,13 @@ class Session:
         if wait:
             time.sleep(wait)
 
-        return max(0.0, deadline - time.monotonic())
+        note = (
+            f"a stale capture lock ({broke:.0f}s old, past the "
+            f"{CAPTURE_LOCK_STALE:g}s bound) was broken to take this capture"
+            if broke is not None
+            else None
+        )
+        return max(0.0, deadline - time.monotonic()), note
 
     def ask(
         self,
@@ -741,10 +772,14 @@ class Session:
         lock = self.path(self.cfg.artifacts.capture_lock, server=server)
         stamp = self.path(self.cfg.artifacts.capture_stamp, server=server)
 
+        # Set before the `try`: a non-capture request never claims the lock,
+        # so nothing downstream ever assigns this, and `Reply` still needs a
+        # value to pass.
+        note = None
         held = False
         try:
             if capturing:
-                timeout = self._claim_capture(lock, stamp, timeout=timeout)
+                timeout, note = self._claim_capture(lock, stamp, timeout=timeout)
                 held = True
 
             remaining = self._claim(trigger, payload, timeout=timeout)
@@ -759,7 +794,7 @@ class Session:
                 _write_stamp(stamp, time.time())
                 lock.unlink(missing_ok=True)
 
-        return Reply(command=command, text=text.strip())
+        return Reply(command=command, text=text.strip(), note=note)
 
     def diag(
         self, *, server: bool = False, target: str | None = None, timeout: float = 60.0
