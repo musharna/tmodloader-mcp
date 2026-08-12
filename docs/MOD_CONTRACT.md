@@ -483,6 +483,20 @@ does NOT carry over to the trigger claim, where breaking wrongly destroys a
 request somebody is waiting on. Client side only: the mod refuses `capture`
 on a dedicated server, so a server-side lock would serialise against nothing.
 
+**That claim assumes the round trip fits inside `CAPTURE_LOCK_STALE`, and
+nothing enforces it.** The lock's mtime is set once, at claim time, and is
+never refreshed while it is held — across the lock claim, the boundary wait,
+the trigger claim and the reply wait. `ask` defaults `timeout` to 60s, but a
+caller may pass more: a capture given, say, `timeout=120` that legitimately
+spends most of that on lock contention and a slow reply is still LIVE with a
+lock now older than the bound. A second session capturing at that moment
+cannot tell that from a dead run's lock — it breaks a lock that is still
+somebody's and captures into the window that breaking opens, which is the
+exact collision this mechanism exists to remove, reached through a supported
+parameter with no error and no warning. Not fixed here: writing the holder's
+own deadline into the lock file, so the bound holds by construction instead
+of by an assumption on the round trip's length, is the next piece of work.
+
 **A stated residual: a capture that times out releases its lock while a PNG
 may still be on its way.** The lock is released in a `finally`, so when the
 wait for the reply runs out the release happens then — but the game has the
@@ -494,10 +508,20 @@ a reply that may never come would wedge captures for both sessions on every
 timed-out request, which is a certain outage traded against a rare collision.
 The stamp is written on that path too, so the next claimant still misses the
 second the timeout happened in — it just cannot know about a write that had
-not happened yet. A capture given a timeout longer than the mod's own settle
-window does not reach this case; the residual belongs to a caller who cut the
-budget short. The timed-out caller is told nothing was confirmed, which is
-already true of any timeout here.
+not happened yet. This case is reached whenever the reply wait runs out,
+whatever timeout the caller gave — see [the shared-budget
+rule](#modcapturetrigger--the-request): `capture` spends that ONE timeout
+across the lock claim, the boundary wait, the trigger claim and the reply
+wait, so contention on the lock alone can consume most of even a generous
+timeout before the reply wait ever starts. Worked case: `ask("capture",
+timeout=60)` while another session holds the lock for 56s reaches the trigger
+claim with roughly 4s left; if the reply is not in by then, the `finally`
+still releases the lock while the game may still be about to write the PNG —
+this same case, from a caller who gave four times the timeout of the caller
+who got there in 4s flat. A LONGER timeout does not exempt a caller from this
+residual, and can make it worse: the lock stays claimed for longer while the
+extra time is spent on contention the caller cannot see. The timed-out caller
+is told nothing was confirmed, which is already true of any timeout here.
 
 Distinct from that, and not a residual: a capture whose budget is used up
 BEFORE anything is asked — by waiting for the lock, or by waiting out the
@@ -556,9 +580,8 @@ update the trigger exclusion exists to prevent, arriving through a second
 file. A lock a DEAD run left behind is told from one a LIVE session holds by
 its AGE, which is the only signal that can make that call, and a launch makes
 it: after the two clears above, and for both sides, it breaks the capture lock
-if and only if it is older than `CAPTURE_LOCK_STALE`. So a crashed run's lock
-does not survive the next launch, and a lock a session is holding right now
-does. Nothing else about a launch is allowed to touch either file.
+if and only if it is older than `CAPTURE_LOCK_STALE`. Nothing else about a
+launch is allowed to touch either file.
 Neither file is ever written or read by the mod — both are held entirely
 between two of this harness's OWN sessions, to keep them from capturing in the
 same wall-clock second, before either one writes a trigger.
