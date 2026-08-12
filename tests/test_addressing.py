@@ -875,3 +875,55 @@ def test_a_lock_older_than_any_real_capture_is_broken(tmp_path):
     # And an absent lock is not an error - the ordinary case.
     lock.unlink()
     assert session_mod._break_stale_lock(lock) is None
+
+
+# ---- the capture stamp -----------------------------------------------------
+
+
+def test_the_stamp_pushes_the_next_capture_out_of_the_recorded_second(tmp_path):
+    """Serialising the requests is not enough on its own.
+
+    A completes at 18:12:01.05 and B writes at 18:12:01.95: they never
+    overlap and they still collide, because Terraria stamps the filename to
+    the second. The wait is what makes the second differ.
+    """
+    stamp = tmp_path / "biomancy-capture.stamp"
+    session_mod._write_stamp(stamp, 1000.25)
+
+    # Same second as the stamp: wait out what is left of it.
+    assert session_mod._stamp_wait(stamp, now=1000.25) == pytest.approx(0.75)
+    assert session_mod._stamp_wait(stamp, now=1000.90) == pytest.approx(0.10)
+
+    # POSITIVE CONTROL: a stamp whose second has already passed costs
+    # nothing. Without this a solo session would pay on every capture, which
+    # is the whole reason the wait was pushed onto the contender.
+    assert session_mod._stamp_wait(stamp, now=1001.0) == 0.0
+    assert session_mod._stamp_wait(stamp, now=9999.0) == 0.0
+
+
+def test_a_stamp_that_cannot_be_trusted_never_blocks_a_capture(tmp_path):
+    """The stamp is an optimisation, and an optimisation may not become an
+    outage.
+
+    A clock that ran ahead - or a file somebody edited - would otherwise park
+    every future capture for as long as the difference. One second is all
+    this wait can ever legitimately need, so one second is the cap.
+    """
+    stamp = tmp_path / "biomancy-capture.stamp"
+
+    assert session_mod._stamp_wait(stamp, now=1000.0) == 0.0  # absent
+
+    stamp.write_text("not a number")
+    assert session_mod._stamp_wait(stamp, now=1000.0) == 0.0
+
+    stamp.write_text("")
+    assert session_mod._stamp_wait(stamp, now=1000.0) == 0.0
+
+    # From the future, by a lot. Capped, not obeyed.
+    session_mod._write_stamp(stamp, 50_000.0)
+    assert session_mod._stamp_wait(stamp, now=1000.0) == session_mod.STAMP_WAIT_MAX
+
+    # POSITIVE CONTROL: a legitimate stamp still produces a real wait, so
+    # this cannot pass by the function having become "always zero".
+    session_mod._write_stamp(stamp, 1000.5)
+    assert session_mod._stamp_wait(stamp, now=1000.5) == pytest.approx(0.5)
