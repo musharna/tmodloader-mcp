@@ -1014,6 +1014,13 @@ def test_a_caller_whose_capture_broke_a_stale_lock_is_told(sess, cfg, monkeypatc
     lock.unlink(missing_ok=True)
     assert sess.ask("capture", timeout=5.0).note is None
 
+    # SECOND POSITIVE CONTROL: a non-capture request never even reaches the
+    # code that could set a note - `note` is assigned only inside `ask`'s
+    # `if capturing:` branch - and until now nothing in the suite asserted
+    # that beyond inspection. Every other `.ask("diag", ...)` call in this
+    # file ignores `.note` entirely, so this is the one place it is pinned.
+    assert sess.ask("diag", timeout=5.0).note is None
+
 
 # ---- wiring: `ask` and the capture lock -------------------------------------
 
