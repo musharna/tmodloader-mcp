@@ -369,7 +369,11 @@ def trigger(
             commands are server-authoritative and refuse on a client, and each
             side publishes its own list.
         timeout: Seconds to wait for the game's reply. A command that does real
-            work on a large world can outlast the default.
+            work on a large world can outlast the default — but for `capture`
+            specifically, going past 60s (`CAPTURE_LOCK_STALE`) risks a second
+            session mistaking this call's still-held lock for a dead run's,
+            breaking it, and capturing into the same window; see
+            `docs/MOD_CONTRACT.md#two-clients-at-once`.
 
     `refused` is reported separately from `ok`: a refusal is the mod
     deliberately saying no, and treating it as success is how a rejected action
