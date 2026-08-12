@@ -374,6 +374,13 @@ def trigger(
     `refused` is reported separately from `ok`: a refusal is the mod
     deliberately saying no, and treating it as success is how a rejected action
     reads as a completed one.
+
+    `note` is usually null and is the one field with no other way to reach you:
+    something that happened on the way to this reply which the reply itself
+    cannot show. Currently it says a stale capture lock was broken to take this
+    picture — captures are serialised across sessions sharing a save directory,
+    and a lock held past 60s is assumed to belong to a run that died. That is a
+    judgement made from age alone, so it is reported rather than done quietly.
     """
     if _session is None:
         raise RuntimeError("no session — call `launch` first")
