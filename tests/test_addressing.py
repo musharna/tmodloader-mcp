@@ -813,7 +813,7 @@ def test_launch_refuses_a_character_name_padded_with_whitespace(monkeypatch):
 def test_what_counts_as_a_capture_is_asked_of_the_parser():
     """The lock has to cover what the MOD will do, not what the caller typed.
 
-    `DevResponder.cs:428`: an unreadable or bare payload is "the historical
+    `DevResponder.cs:429`: an unreadable or bare payload is "the historical
     bare-trigger behaviour, a capture". Matching the literal string "capture"
     would miss it. Matching the parser cannot.
     """
