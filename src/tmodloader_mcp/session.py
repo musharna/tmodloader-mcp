@@ -16,6 +16,7 @@ exits immediately.
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import re
 import subprocess
@@ -146,6 +147,12 @@ CLAIM_POLL = 0.1
 #: plus the round trip; the observed live capture took 1.2s. Four times the
 #: WORST case, not the observed one, because the observed one was lucky.
 CAPTURE_LOCK_STALE = 60.0
+
+#: The most a stamp may ever delay a capture. Crossing one second boundary is
+#: all the rule needs; anything longer means the stamp is wrong - a clock that
+#: ran ahead, a hand-edited file - and a wrong stamp must cost a moment, not
+#: an outage.
+STAMP_WAIT_MAX = 1.0
 
 
 class SessionError(RuntimeError):
@@ -311,6 +318,39 @@ def _break_stale_lock(lock: Path) -> float | None:
     with contextlib.suppress(OSError):
         lock.unlink()
     return age
+
+
+def _write_stamp(stamp: Path, when: float) -> None:
+    """Record when a capture's reply arrived, for whoever captures next.
+
+    Best effort on purpose: a stamp that cannot be written costs a possible
+    collision, and raising here would cost a capture that already succeeded.
+    """
+    with contextlib.suppress(OSError):
+        stamp.write_text(f"{when:.6f}")
+
+
+def _stamp_wait(stamp: Path, *, now: float) -> float:
+    """How long to wait before capturing, so as not to land in the stamped
+    second.
+
+    `now` is passed in rather than read here so the boundary arithmetic can
+    be tested without sleeping through it.
+
+    ZERO IS THE DEFAULT ANSWER for everything doubtful - no stamp, an
+    unreadable one, one that does not parse, one whose second has passed.
+    This is an optimisation for a case that has to be observed to matter, and
+    it is never a reason to refuse or to stall.
+    """
+    try:
+        recorded = float(stamp.read_text(errors="replace").strip())
+    except (OSError, ValueError):
+        return 0.0
+
+    remaining = (math.floor(recorded) + 1) - now
+    if remaining <= 0:
+        return 0.0
+    return min(remaining, STAMP_WAIT_MAX)
 
 
 def _is_ours_to_clear(payload: str | None, *, player: str | None) -> bool:
