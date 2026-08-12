@@ -441,7 +441,7 @@ two requests at the same instant.
 
 ## What the harness clears
 
-Before every launch it deletes the five unsuffixed REPLY-side names, both
+Before every launch it deletes the five unsuffixed game-written names, both
 sides, and — when a player is given — that launch's own per-player names. A
 heartbeat or a command list left by a previous run is exactly what lets a
 readiness check pass against a process that is no longer there. A DIFFERENT

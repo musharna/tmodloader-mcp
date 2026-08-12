@@ -424,6 +424,51 @@ def test_launch_leaves_a_pending_request_addressed_to_another_player_alone(tmp_p
     )
 
 
+def test_a_pending_request_is_read_the_way_the_mod_reads_it(tmp_path):
+    """The two sides must agree on what "unreadable" means, byte for byte.
+
+    `_is_ours_to_clear` treats an unreadable payload as this session's, and
+    that is sound ONLY while the mod agrees it is unreadable too - the whole
+    justification is "no client will ever consume it". But the mod does not
+    have this side's failure mode: `File.ReadAllText` never throws on bad
+    UTF-8, it substitutes U+FFFD and parses what is left. So a payload with an
+    invalid byte in its VERB and a clean target decodes to a perfectly good
+    request over there, gets consumed by the client it names - and read here
+    as unreadable, hence as ours, hence deleted out from under them.
+
+    Nothing this harness writes can produce it (it writes UTF-8), which is why
+    this went unnoticed; a request typed from a shell, PowerShell, or an editor
+    with the wrong encoding can. Reading with `errors="replace"` is not error
+    tolerance for its own sake - it is this side agreeing to make the same
+    substitution the mod makes, so both reach the same verdict on the same
+    bytes.
+    """
+    cfg = cfg_for(tmp_path)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    # Invalid as UTF-8, but only in the verb: latin-1 "é" in "café". The mod
+    # substitutes it and still parses the target "big-bird" out of the rest.
+    trigger.write_bytes(b"shot:caf\xe9@big-bird")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+
+    assert trigger.exists(), (
+        "a launch deleted a request whose target the mod can still read - "
+        "that client will consume it, or would have, and is now waiting on a "
+        "request this side threw away for being undecodable to this side only"
+    )
+
+    # POSITIVE CONTROL, same test, same bad byte: substituting instead of
+    # giving up must not turn into "never clear anything". A payload that
+    # really is ours after substitution still goes.
+    trigger.write_bytes(b"shot:caf\xe9@n43n")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+
+    assert not trigger.exists(), (
+        "a launch left its OWN request wedged in the shared slot because one "
+        "byte of the verb was not UTF-8"
+    )
+
+
 def _fake_launch_world(monkeypatch, *, existing, after, ready_raises):
     """Wire launch()'s dependencies so no game is started.
 

@@ -240,15 +240,25 @@ def _claim_atomically(path: Path, text: str) -> None:
 
 
 def _pending_payload(trigger: Path) -> str | None:
-    """What the trigger holds, or None if nothing readable is there.
+    """What the trigger holds, or None if there is nothing there.
 
-    None covers both "no such file" and "a file this side could not read",
-    which every caller treats the same way: neither is a request some client
-    is waiting on an answer to.
+    None means "no such file", and only that: a request some client is waiting
+    on an answer to is exactly what it is not.
+
+    READ THE WAY THE MOD READS, which is what `errors="replace"` is doing here
+    and it is not error tolerance. `_is_ours_to_clear` treats an unreadable
+    payload as this session's to delete, justified entirely by "the mod cannot
+    read it either, so no client will ever consume it" - and the mod's
+    `File.ReadAllText` does not have this side's failure mode. It never throws
+    on bad UTF-8; it substitutes U+FFFD and parses what is left. Bytes that
+    are invalid only inside the VERB therefore still yield a clean target over
+    there. Giving up on them here would call another client's live request
+    ours and delete it. Substituting the same way they do is what makes the
+    two sides reach the same verdict on the same bytes.
     """
     try:
-        return trigger.read_text()
-    except (OSError, UnicodeDecodeError):
+        return trigger.read_text(errors="replace")
+    except OSError:
         return None
 
 
