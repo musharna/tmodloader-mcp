@@ -743,9 +743,10 @@ class Session:
                     raise TriggerError(
                         self._capture_busy_message(lock, timeout)
                     ) from None
+                # No sleep after a break: that branch freed the name itself, so
+                # it retries at once rather than sleeping on a lock it knows is
+                # no longer there.
                 if age is None:
-                    # A break freed the name, so retry at once. Sleeping would
-                    # be sleeping on a lock that is no longer there.
                     time.sleep(min(CLAIM_POLL, remaining))
                 continue
             break
