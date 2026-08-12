@@ -71,7 +71,15 @@ def player_token(name: str | None) -> str | None:
 
 @dataclass(frozen=True)
 class Artifacts:
-    """The five filenames this harness and the mod have to agree on.
+    """The eight filenames a session works with: six agreed with the mod, two
+    agreed only with another session.
+
+    `capture_lock` and `capture_stamp` are the two. The mod neither reads nor
+    writes either of them - they are held entirely between two of this
+    harness's own sessions, to keep them from capturing in the same wall-clock
+    second, and a mod author implementing this protocol implements the other
+    six. They live here anyway because they are named off the same prefix and
+    because `all` is what clears a save directory between runs.
 
     These were constants spelling `biomancy-`, which is how a tool for one mod
     stays a tool for one mod. They are DERIVED from the mod's internal name
