@@ -347,7 +347,7 @@ def test_a_claim_refuses_a_slot_that_is_already_taken(cfg):
     session_mod._claim_atomically(trigger, "diag@n43n")
     assert trigger.read_text() == "diag@n43n", "the free slot was not claimed"
 
-    with pytest.raises(session_mod.TriggerBusy):
+    with pytest.raises(session_mod.SlotBusy):
         session_mod._claim_atomically(trigger, "diag@tst2")
 
     assert trigger.read_text() == "diag@n43n", (
@@ -368,7 +368,7 @@ def test_a_claim_leaves_no_staging_file_behind(cfg):
     session_mod._claim_atomically(trigger, "diag@n43n")
     assert not list(cfg.root.glob("*.staging")), "staging file left after a claim"
 
-    with pytest.raises(session_mod.TriggerBusy):
+    with pytest.raises(session_mod.SlotBusy):
         session_mod._claim_atomically(trigger, "diag@tst2")
     assert not list(cfg.root.glob("*.staging")), "staging file left after a refusal"
 
@@ -645,7 +645,7 @@ def _claim_worker(trigger: str, payload: str, result_path: str) -> None:
 
     try:
         worker_session_mod._claim_atomically(Path(trigger), payload)
-    except worker_session_mod.TriggerBusy:
+    except worker_session_mod.SlotBusy:
         Path(result_path).write_text("busy")
     else:
         Path(result_path).write_text("ok")
@@ -660,7 +660,7 @@ def test_a_claim_under_real_process_contention_admits_exactly_one(tmp_path):
     `os.link` onto the same name, with the KERNEL - not this codebase -
     deciding which one wins. This runs several real OS processes against one
     trigger path and checks that exactly one wins and every other gets
-    `TriggerBusy`.
+    `SlotBusy`.
 
     `tmp_path` here is a real (if ordinary) filesystem, not the production
     save directory, which is DrvFs under WSL2 - `os.link`'s atomicity there

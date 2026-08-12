@@ -145,12 +145,16 @@ class SessionError(RuntimeError):
     """The game could not be launched, reached, or shut down."""
 
 
-class TriggerBusy(RuntimeError):
-    """Another request is already pending at the trigger path.
+class SlotBusy(RuntimeError):
+    """Another request already holds the name being claimed.
 
-    Not an error the caller sees. `ask` catches it and waits, because a slot
-    held by a request the game is about to consume is a normal, sub-second
-    condition rather than a fault.
+    Not an error the caller sees. Both callers catch it and wait, because a
+    slot held by a request the game is about to consume is a normal,
+    sub-second condition rather than a fault.
+
+    Named for the SLOT rather than the trigger because there are two: the
+    trigger a request is written to, and the capture lock that keeps two
+    captures out of one wall-clock second.
     """
 
 
@@ -231,7 +235,7 @@ def _claim_atomically(path: Path, text: str) -> None:
         try:
             os.link(staged, path)
         except FileExistsError as taken:
-            raise TriggerBusy(str(path)) from taken
+            raise SlotBusy(str(path)) from taken
     finally:
         # `os.replace` consumed the staging name; `os.link` leaves it as a
         # second name for the same inode, so this is now the ordinary path
@@ -513,7 +517,7 @@ class Session:
         while True:
             try:
                 _claim_atomically(trigger, payload)
-            except TriggerBusy:
+            except SlotBusy:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TriggerError(self._busy_message(trigger, timeout)) from None
