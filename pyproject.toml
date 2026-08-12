@@ -1,6 +1,6 @@
 [project]
 name = "tmodloader-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Drive a running tModLoader instance: launch it, ask it questions, photograph it, and read its state back."
 readme = "README.md"
 requires-python = ">=3.12"
