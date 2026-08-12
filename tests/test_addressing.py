@@ -1023,6 +1023,52 @@ def test_a_caller_whose_capture_broke_a_stale_lock_is_told(sess, cfg, monkeypatc
     assert sess.ask("diag", timeout=5.0).note is None
 
 
+def test_a_lock_that_keeps_coming_back_stale_still_honours_the_deadline(
+    sess, cfg, monkeypatch
+):
+    """The break path used to `continue` straight past the deadline check.
+
+    A lock that keeps reappearing stale - a crashed run whose supervisor
+    restarts it, two harnesses breaking each other's - would then spin here
+    for as long as it kept happening, with the caller's timeout consulted on
+    no cycle at all. `_claim` checks on every cycle; this now does too.
+    """
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+    breaks = 0
+
+    def always_taken(path, text):
+        raise session_mod.SlotBusy(str(path))
+
+    def always_stale(path):
+        nonlocal breaks
+        breaks += 1
+        if breaks > 200:
+            # Nothing the fix needs - a bound, so the unfixed loop ends in a
+            # failure that names itself rather than hanging the suite. At the
+            # sleep below, 200 breaks is 2s against a 0.2s budget.
+            raise RuntimeError("the claim loop never looked at its deadline")
+        time.sleep(0.01)
+        return session_mod.CAPTURE_LOCK_STALE + 1
+
+    monkeypatch.setattr(session_mod, "_claim_atomically", always_taken)
+    monkeypatch.setattr(session_mod, "_break_stale_lock", always_stale)
+
+    started = time.monotonic()
+    with pytest.raises(session_mod.TriggerError) as gave_up:
+        sess._claim_capture(lock, stamp, timeout=0.2)
+    spent = time.monotonic() - started
+
+    assert breaks > 1, "the break path was never taken, so nothing was exercised"
+    assert spent < 1.0, f"a 0.2s budget spent {spent:.1f}s breaking locks"
+
+    # The lock is gone - this call broke it - so the message must not name a
+    # session holding it. That claim is the one `_busy_message` refuses to
+    # make about the trigger for the same reason.
+    assert "another session is capturing" not in str(gave_up.value)
+    assert "contended for" in str(gave_up.value)
+
+
 # ---- wiring: `ask` and the capture lock -------------------------------------
 
 
