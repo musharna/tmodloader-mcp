@@ -17,6 +17,7 @@ Removing the ambiguity is what broke it.
 
 from __future__ import annotations
 
+import math
 import multiprocessing
 import os
 import struct
@@ -1085,6 +1086,70 @@ def test_the_capture_lock_is_released_even_when_the_reply_never_comes(
         "this second - and Terraria may well have written a PNG regardless "
         "of whether the reply arrived"
     )
+
+
+def test_a_budget_eaten_by_the_boundary_wait_leaves_no_request_behind(
+    sess, cfg, monkeypatch
+):
+    """The boundary wait must not buy a capture nobody is serialising.
+
+    Reproduced with ONE session and no contention at all: a stamp from a
+    capture that just finished, then `ask("capture", timeout=0.4)`. The
+    boundary wait ate the whole budget, `_claim_capture` handed back a 0.0
+    remainder anyway, and `_claim(timeout=0.0)` wrote the request to the
+    trigger and only THEN raised for having no time to wait on it. The
+    `finally` released the capture lock with that request still sitting on
+    the trigger - and the mod deletes a trigger before dispatching it, so the
+    game goes on to serve it and Terraria writes a PNG WITH NO LOCK HELD.
+    Another session can take the freed lock, wait out a stamp written before
+    that PNG existed, and land in the same second: the exact collision this
+    branch exists to remove, reached through the branch's own mechanism.
+
+    The assertion that matters is the trigger one. A test that only checked
+    for a raise passed on the broken code, because the broken code raised.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    # A capture that finished at the top of this second, so the boundary wait
+    # is most of a second - more than the budget below.
+    session_mod._write_stamp(stamp, math.floor(time.time()))
+
+    with pytest.raises(session_mod.TriggerError) as spent:
+        sess.ask("capture", timeout=0.4)
+
+    assert not trigger.exists(), (
+        f"the trigger holds {trigger.read_text()!r} after a capture that "
+        "reported failure - the game will serve it with no capture lock held, "
+        "which is the unserialised capture this branch removed"
+    )
+    assert not lock.exists(), "the capture lock outlived the request it was taken for"
+
+    message = str(spent.value)
+    assert "NOTHING OF THIS REQUEST IS ON DISK" in message
+    assert "may still answer" not in message, (
+        "this borrowed `_claimed_out_of_time_message`, which promises the game "
+        "may still serve a request that was never written"
+    )
+
+    # POSITIVE CONTROL, same test: with a budget that outlasts the boundary
+    # wait the same call succeeds, so this cannot pass by every capture
+    # having become an error.
+    served = []
+
+    def answer(self, result, *, timeout, what):
+        served.append(trigger.read_text())
+        trigger.unlink(missing_ok=True)
+        return "PNG: C:\\x.png"
+
+    monkeypatch.setattr(session_mod.Session, "_await_text", answer)
+    session_mod._write_stamp(stamp, math.floor(time.time()))
+    reply = sess.ask("capture", timeout=5.0)
+
+    assert reply.text == "PNG: C:\\x.png"
+    assert served and "capture" in served[0]
 
 
 def test_a_session_waiting_for_the_capture_lock_holds_no_trigger(
