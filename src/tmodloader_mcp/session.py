@@ -615,6 +615,67 @@ class Session:
                 raise TriggerError(self._claimed_out_of_time_message(trigger, timeout))
             return remaining
 
+    def _capture_busy_message(self, lock: Path, timeout: float) -> str:
+        try:
+            age = time.time() - lock.stat().st_mtime
+            held = f", {age:.0f}s old"
+        except OSError:
+            held = ""
+
+        return (
+            f"another session is capturing and holds {lock}{held}, and the "
+            f"{timeout:g}s timeout ran out waiting for it. Captures are "
+            "serialised because Terraria names the file it writes after the "
+            "second it wrote it in, so two at once produce one picture and "
+            "two callers told it is theirs. Retry with a longer timeout."
+        )
+
+    def _claim_capture(self, lock: Path, stamp: Path, *, timeout: float) -> float:
+        """Take the capture lock, wait out the previous capture's second, and
+        return what is LEFT of `timeout`.
+
+        TAKEN BEFORE THE TRIGGER, always, and that ordering is the whole
+        reason two locks are safe: a session waiting here is by construction
+        not holding the trigger, so whoever does hold the trigger always
+        finishes. Claiming them the other way round would let A hold the
+        trigger while waiting for the lock B holds while waiting for the
+        trigger.
+
+        The stamp wait happens HERE rather than in the caller because it must
+        happen under the lock - it is the previous holder's second being
+        waited out, and a second claimant arriving mid-wait would otherwise
+        skip it.
+
+        Deliberately does NOT do what `_claim` does when the remaining budget
+        runs thin: `_claim` raises there because a trigger claim with no
+        budget left leaves a REQUEST ON DISK that the caller must be told
+        about. A capture lock with no budget left is released moments later
+        by `ask`'s `finally` and leaves nothing behind, so the ordinary
+        out-of-time path in `_await_text` is the honest report - there is
+        nothing here for an early raise to warn about.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                _claim_atomically(lock, str(os.getpid()))
+            except SlotBusy:
+                if _break_stale_lock(lock) is not None:
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TriggerError(
+                        self._capture_busy_message(lock, timeout)
+                    ) from None
+                time.sleep(min(CLAIM_POLL, remaining))
+                continue
+            break
+
+        wait = _stamp_wait(stamp, now=time.time())
+        if wait:
+            time.sleep(wait)
+
+        return max(0.0, deadline - time.monotonic())
+
     def ask(
         self,
         command: str,
