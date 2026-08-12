@@ -11,6 +11,47 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two clients capturing in the same wall-clock second no longer collide.**
+  Terraria's own capture camera names the output PNG and stamps that name to
+  the second before the mod ever sees it, so two captures inside one second
+  produced ONE file and both callers were told it was theirs — shipped as
+  Known in 0.3.0 after a live two-client run reproduced it. Neither addressing
+  nor namespacing could have fixed this: each client lists the captures
+  directory into its own `_before` snapshot, so each sees that single written
+  file as new, and there is no name here the harness or the mod chooses.
+
+  The fix is a second claim, harness-side and taken BEFORE the trigger:
+  `<mod>-capture.lock`, shared like the trigger and carrying no player token
+  on purpose. It is claimed with the same `os.link` primitive the trigger
+  uses, and taking it first is what makes deadlock impossible — a session
+  waiting on the lock holds no trigger, so the trigger's holder always
+  finishes. It is released in a `finally`, so a timeout or a refusal cannot
+  wedge captures for both sessions.
+
+  Serialising the requests is not sufficient on its own — a capture that
+  finishes at `18:12:01.05` and one whose reply lands at `18:12:01.95` never
+  overlap and would still collide. On release the holder writes
+  `<mod>-capture.stamp` with the time its reply arrived and returns
+  immediately; the NEXT claimant waits out whatever remains of that second,
+  capped at one second (`STAMP_WAIT_MAX`). The cost lands on the contender
+  rather than on a session working alone, which pays nothing.
+
+  A lock older than `CAPTURE_LOCK_STALE` (60s — four times the mod's own
+  ~15s settle window) cannot belong to a live capture, so it is broken, and
+  the caller is told via a new optional `note` field on the reply — breaking
+  is a judgement made from age alone, worth saying out loud. Breaking wrongly
+  costs only a collision, which is 0.3.0's shipped behaviour; the same rule is
+  deliberately NOT applied to the trigger claim, where breaking wrongly would
+  destroy somebody's in-flight request.
+
+  Client side only: the mod refuses `capture` on a dedicated server, so a
+  server-side lock would serialise against nothing. The lock and stamp are
+  both in `Artifacts.all` and excluded from the launch-time clear the same way
+  the trigger is — see
+  [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#what-the-harness-clears).
+
 ## [0.3.0] - 2026-08-12
 
 The release where two people can drive one game directory at once. 0.2.0 gave
