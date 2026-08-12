@@ -222,11 +222,15 @@ shot:topleft@n43n    both
 
 Two constraints that are not optional:
 
-**The harness writes it atomically** — staged under another name and renamed
+**The harness writes it atomically** — staged under another name and _linked_
 into place — because a polled file can otherwise be read half-written, and a
 truncated command word is not an error on your side. It parses as unknown, you
 do nothing, and the harness waits out its timeout for a reply to a request that
-was thrown away. A hang, reported as a hang, caused by a partial write.
+was thrown away. A hang, reported as a hang, caused by a partial write. The
+link is also the claim: it succeeds only when the name is free, so the same
+operation that makes the write atomic is what refuses to overwrite a pending
+request — see the rule below. The staging name is removed once the link lands,
+whether it wins the name or not.
 
 **A command you do not serve must be refused, not guessed at.** Falling back to
 some default action makes a typo look like a success.
@@ -235,13 +239,38 @@ This is the one artifact that stays a **single shared name even with two
 clients** — see [What deliberately stays shared](#what-deliberately-stays-shared)
 for why an addressed trigger still has to be one file both clients poll.
 
-**One name means one slot: it holds a single request, not a queue.** A second
-request written before the first has been read replaces it, and the one that
-lost is gone with no trace — its caller waits out the full timeout while
-nothing anywhere explains why. Measured with two clients capturing at the same
-instant: one answered in 1.2s, the other timed out at 120s having never had a
-request on disk to find. Stagger concurrent requests, or address the two
-clients from one caller that serialises them.
+**One name means one slot: it holds a single request, not a queue.** So the
+harness CLAIMS it rather than writing it — an exclusive create (`os.link`, or
+`O_CREAT|O_EXCL`) that fails when the name is taken, retried until the slot
+frees or the caller's timeout is spent. Two rules follow, and both are
+load-bearing:
+
+- **A claim that finds the slot occupied must not delete what is there.** That
+  request may belong to another session, and deleting it is the overwrite this
+  rule exists to prevent, wearing a friendlier name. Report it instead — naming
+  the pending payload and its age, since neither the caller's own request nor
+  the game is what is wrong.
+
+  **Report only what the trigger shows.** The address it carries is the only
+  evidence of who is waiting on it, and nothing validates that an address names
+  a live client — so a message asserting "another session's request is pending"
+  is a guess, and about a caller's own typo'd `target` it is a wrong guess that
+  sends them hunting a session that does not exist. A payload addressed to the
+  reporting session's OWN player is the one case that is certain, and it comes
+  with a remedy: see [What the harness clears](#what-the-harness-clears).
+- **The claim and the reply share one budget.** A caller asking for an answer
+  within N seconds did not ask for N waiting to ask plus N waiting to hear, so
+  the claim returns what is left of the timeout and a claim that consumed the
+  whole budget fails as a claim rather than reporting a game that was never
+  involved.
+
+  Scoped to ONE request, which is what this rule can promise: a tool that
+  issues a request and then waits for a SECOND file — the state dump, the drop
+  box — spends its timeout on the trigger-plus-reply round trip and then waits
+  up to that timeout again for the file, so an end-to-end call can take roughly
+  twice what it was given. Documented rather than tightened, because the second
+  wait is for a file the mod writes after answering and the reply is not
+  evidence it has landed.
 
 ## The reply
 
@@ -362,21 +391,47 @@ and after that a dead one, and neither ever existed. It is also **shared**:
 the second client to boot overwrites it, so N clients produce ONE phantom,
 belonging to whoever started most recently.
 
-**An untargeted request is a coin flip — so address them.** `IsFor` returns
-true for every client when no `@player` is given, so all of them qualify and
-whichever polls first deletes the shared trigger and answers. Run twice in a
-row, it was answered by a different client each time. A caller waiting on its
-own player's answer file therefore times out roughly half the time, with a
-perfectly good answer sitting on disk under somebody else's name. **Pass a
-target whenever more than one client is up.**
+**An untargeted request was a coin flip, and this harness no longer sends one.**
+`IsFor` returns true for every client when no `@player` is given, so all of them
+qualify and whichever polls first deletes the shared trigger and answers. Run
+twice in a row, a different client answered each time. **The mod's behaviour is
+unchanged and is still the rule above** — a client must accept an unaddressed
+request, because another harness may still send one. What changed is on this
+side: every client request now carries the session's own player, so the race is
+unreachable from here. A client that has not yet loaded a character has an empty
+name, matches no target, and is therefore not askable; `heartbeat` answers for
+it instead, off disk, without the game's cooperation.
 
-**Two requests cannot be in flight at once.** The trigger is one file and one
-slot, so a second request written while the first is still unread simply
-replaces it — the loser is lost silently and its caller waits out the full
-timeout. This is what stops the `capture` verb's attribution question from
-being answerable at all: two near-simultaneous captures are not something the
-protocol can carry, so whether it would report the wrong client's picture
-remains **unreachable rather than open**. Stagger concurrent requests.
+**The trigger holds one request, and it is CLAIMED rather than written.** One
+name is one slot, so a second request arriving before the first is read cannot
+also be there. It used to overwrite it: both payloads reached disk intact, the
+second replaced the first, and the loser's caller waited out its full timeout
+with nothing on disk to explain why — measured as one capture answering in 1.2s
+while the other timed out at 120s. A harness must now take the slot with an
+exclusive create that fails when it is occupied, and wait for it to free rather
+than replacing what is there.
+
+**`capture` still collides, and this run watched it happen.** With the trigger
+claimed rather than overwritten, two simultaneous captures both answered —
+1.2s and 1.3s, neither timing out — but both `n43n` and `tst2` reported the
+same picture: `PNG: C:\Users\...\Captures\Capture 2026-08-11 18_12_01.png`,
+and only one file existed on disk at that timestamp. `capture` finds its
+result the way [The drop box](#the-drop-box) already says: Terraria's own
+capture camera writes into a directory the mod does not name, so `Begin()`
+lists that directory before queueing `QuickScreenshot()` and `Settle()` lists
+it again once the wait is over; `CaptureFind.PickNew` reports whichever `.png`
+is both new and, if more than one is, largest. Nothing in that comparison
+looks at which client asked — it cannot, because Terraria's camera does not
+tell the mod who it was writing for, only a path. Two clients capturing
+inside the same wall-clock second therefore contend for one filename, since
+that camera stamps its own name to the second: whichever client's poll runs
+after the write sees exactly one new file and reports it as its own, and the
+other client is told about a picture it did not take, with nothing on disk to
+say so. `shot` does not have this failure mode, and the reason is upstream of
+anything a token could fix: its drop box is a name the mod itself picks
+(`AnswerName(Names.Shot)`, suffixed per player — see
+[The drop box](#the-drop-box)), while `capture`'s filename is chosen by
+Terraria before the mod ever sees it, which leaves nothing here to namespace.
 
 Whether the trigger should become a queue is a real question and a separate
 one. [What deliberately stays shared](#what-deliberately-stays-shared) argues
@@ -386,10 +441,34 @@ two requests at the same instant.
 
 ## What the harness clears
 
-Before every launch it deletes the six unsuffixed names, both sides, and —
-when a player is given — that launch's own per-player names. A heartbeat or a
-command list left by a previous run is exactly what lets a readiness check
-pass against a process that is no longer there. A DIFFERENT player's leftover
-files are deliberately left alone: they are not this launch's to delete, and
-`heartbeat` reports their age rather than treating their mere existence as
-"live", so a stale one reads as stale rather than as a phantom client.
+Before every launch it deletes the five unsuffixed game-written names, both
+sides, and — when a player is given — that launch's own per-player names. A
+heartbeat or a command list left by a previous run is exactly what lets a
+readiness check pass against a process that is no longer there. A DIFFERENT
+player's leftover files are deliberately left alone: they are not this launch's
+to delete, and `heartbeat` reports their age rather than treating their mere
+existence as "live", so a stale one reads as stale rather than as a phantom
+client.
+
+**The trigger is not one of them.** It is the sixth name, and the only one
+shared with the OTHER session rather than merely with a previous run of this
+one — so deleting it on the way in or out is the same overwrite the
+[claim rule](#modcapturetrigger--the-request) exists to prevent, committed by
+the housekeeping instead of by the write. `launch` and `stop` both used to do
+it unconditionally, which meant one developer starting a game destroyed the
+other's in-flight request while their game was still polling for it.
+
+So both RELEASE it rather than delete it: the file goes only when what it holds
+is that session's to take back — a request addressed to that session's own
+player, one carrying no address at all, or one no parser can read. A request
+addressed to anybody else stays exactly where it is, which is the same rule the
+mod itself follows when it declines to consume a request it is not addressed
+by. An unreadable or unaddressed payload counts as the session's own because
+nothing will ever collect it either way, and a slot that holds one request
+cannot afford to hold it forever.
+
+That release is also the only way an UNCONSUMABLE request leaves the slot.
+Nothing validates that a target names a live client, so a typo — or a client
+that has not loaded a character, whose name is empty and matches no target —
+parks a request no client will ever take. A fresh `launch` from the session
+that addressed it clears it; deleting the file by hand always works.

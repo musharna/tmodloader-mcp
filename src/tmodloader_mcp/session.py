@@ -37,6 +37,7 @@ from .triggers import (
     artifacts_for,
     compose,
     heartbeat_is_live,
+    parse,
     world_is_ready,
 )
 
@@ -134,9 +135,23 @@ KILL_SETTLE = 10.0
 #: bound it asked for rather than one poll's worth of overshoot.
 SETTLE_POLL = 0.5
 
+#: How often a blocked claim retries for the trigger slot. Much shorter than
+#: SETTLE_POLL: a slot is normally freed within one of the mod's poll ticks, so
+#: this is the resolution at which "already gone" is noticed, not a settle.
+CLAIM_POLL = 0.1
+
 
 class SessionError(RuntimeError):
     """The game could not be launched, reached, or shut down."""
+
+
+class TriggerBusy(RuntimeError):
+    """Another request is already pending at the trigger path.
+
+    Not an error the caller sees. `ask` catches it and waits, because a slot
+    held by a request the game is about to consume is a normal, sub-second
+    condition rather than a fault.
+    """
 
 
 def _tml_pids(cfg: Config) -> set[int]:
@@ -175,8 +190,9 @@ def _next_capture_index(drop: Path) -> int:
     return highest + 1
 
 
-def _write_atomically(path: Path, text: str) -> None:
-    """Put `text` at `path` without `path` ever holding a fragment of it.
+def _claim_atomically(path: Path, text: str) -> None:
+    """Put `text` at `path` without `path` ever holding a fragment of it, and
+    ONLY IF NOBODY ELSE HAS IT.
 
     The game POLLS the trigger path, so a write in place is readable by it
     half-finished, and a truncated command word is not an error on that side:
@@ -184,9 +200,9 @@ def _write_atomically(path: Path, text: str) -> None:
     nothing at all. The harness then waits out its timeout for a reply to a
     request that was thrown away, and reports a hang.
 
-    Staged under a name nothing watches and renamed into place, so the polled
+    Staged under a name nothing watches and linked into place, so the polled
     name only ever refers to a finished payload. The staging file is a sibling
-    deliberately: a rename is only a rename within one filesystem, and the save
+    deliberately: a hard link only works within one filesystem, and the save
     directory is on /mnt/c while a temp dir would not be.
 
     THE STAGING NAME IS UNIQUE PER WRITE, and it has to be. It used to be
@@ -201,17 +217,100 @@ def _write_atomically(path: Path, text: str) -> None:
     not produce until two clients could run at once. Per-write rather than
     per-session, because two threads driving one session collide identically
     and a per-player name would fix only the case that happened to be found.
+
+    THE CLAIM IS THE POINT, and it is free. `os.replace` succeeded whatever was
+    already there, so two sessions sharing this path meant the second silently
+    replaced the first: measured as one capture answering in 1.2s while the
+    other timed out at 120s having never had a request on disk. `os.link` is
+    atomic in exactly the same way and refuses an occupied name, so exclusivity
+    costs no second file to keep consistent with this one.
     """
     staged = path.with_name(f"{path.name}.{uuid.uuid4().hex[:12]}.staging")
     try:
         staged.write_text(text)
-        os.replace(staged, path)
+        try:
+            os.link(staged, path)
+        except FileExistsError as taken:
+            raise TriggerBusy(str(path)) from taken
     finally:
-        # A throw between the write and the rename would otherwise leave the
-        # payload behind under a name nothing will ever collect, in the same
-        # directory the game is reading. `missing_ok` because the ordinary path
-        # through here is a successful rename, after which it is already gone.
+        # `os.replace` consumed the staging name; `os.link` leaves it as a
+        # second name for the same inode, so this is now the ordinary path
+        # rather than only the failure path.
         staged.unlink(missing_ok=True)
+
+
+def _pending_payload(trigger: Path) -> str | None:
+    """What the trigger holds, or None if there is nothing there.
+
+    None means "no such file", and only that: a request some client is waiting
+    on an answer to is exactly what it is not.
+
+    READ THE WAY THE MOD READS, which is what `errors="replace"` is doing here
+    and it is not error tolerance. `_is_ours_to_clear` treats an unreadable
+    payload as this session's to delete, justified entirely by "the mod cannot
+    read it either, so no client will ever consume it" - and the mod's
+    `File.ReadAllText` does not have this side's failure mode. It never throws
+    on bad UTF-8; it substitutes U+FFFD and parses what is left. Bytes that
+    are invalid only inside the VERB therefore still yield a clean target over
+    there. Giving up on them here would call another client's live request
+    ours and delete it. Substituting the same way they do is what makes the
+    two sides reach the same verdict on the same bytes.
+    """
+    try:
+        return trigger.read_text(errors="replace")
+    except OSError:
+        return None
+
+
+def _is_ours_to_clear(payload: str | None, *, player: str | None) -> bool:
+    """Whether a trigger holding `payload` is this session's to delete.
+
+    THE SHARED SLOT IS NOT THIS SESSION'S PROPERTY. One trigger file is polled
+    by every client sharing a save directory - deliberately, because seeing a
+    request is how a client learns one is aimed at somebody else - so deleting
+    it wholesale is the same lost update `_claim_atomically` exists to prevent,
+    committed by the housekeeping rather than by the write. `launch` and `stop`
+    both did exactly that, which meant one developer starting a game destroyed
+    the other's in-flight request while their game was still polling for it.
+
+    The rule is the mod's own, and stating it identically on both sides is the
+    point: `DevResponder` leaves a request it is not addressed by exactly where
+    it is, so the intended client finds it on its own next poll. This side
+    leaves alone precisely what that client would still collect.
+
+    AN UNREADABLE OR MALFORMED PAYLOAD IS OURS, and that is not a shortcut. The
+    mod's parser will not get a target out of it either, so no client will ever
+    consume it - and a request nobody can consume, sitting in a slot that holds
+    one request, wedges that slot for everybody. Same for one carrying no
+    address: it belongs to whoever polls first, and this session is a whoever.
+
+    Compared case-insensitively, because the mod compares a target to its own
+    name that way - `n43n` and `N43N` are one client, however it was typed.
+
+    THE ADDRESS IS THE ONLY SIGNAL, which bounds this: two sessions each driving
+    a DEDICATED SERVER out of one save directory write unaddressed requests to
+    the server-side trigger and are indistinguishable here. Nothing on disk
+    separates them; the client side, where two sessions actually is the
+    supported arrangement, carries a player and does separate.
+    """
+    if payload is None:
+        return True
+    request = parse(payload)
+    if request is None or request.target is None:
+        return True
+    return player is not None and request.target.casefold() == player.casefold()
+
+
+def _release_trigger(cfg: Config, *, player: str | None) -> None:
+    """Give up the shared trigger on both sides, where it is ours to give up.
+
+    Called instead of unlinking it, by everything that used to unlink it. See
+    `_is_ours_to_clear` for which of the two cases each side falls into.
+    """
+    for server in (False, True):
+        trigger = cfg.artifact(cfg.artifacts.trigger, server=server)
+        if _is_ours_to_clear(_pending_payload(trigger), player=player):
+            trigger.unlink(missing_ok=True)
 
 
 @dataclass
@@ -307,6 +406,124 @@ class Session:
 
     # ---- driving ---------------------------------------------------------
 
+    def _busy_message(self, trigger: Path, timeout: float) -> str:
+        """Why a claim gave up, describing ONLY what is observable.
+
+        The caller's own request is fine and so is the game, so a timeout that
+        described either would send them to check the two things that are not
+        wrong.
+
+        IT USED TO SAY "Another session's request is pending", WHICH IS AN
+        OWNERSHIP CLAIM THIS SIDE NEVER CHECKED. Nothing validates that an
+        addressed target names a live client, and the mod deliberately leaves a
+        request it is not addressed by exactly where it is - so a typo'd
+        `target`, or a client that has not loaded a character (its name is
+        empty, so it matches no target), parks a request no client will ever
+        consume. Every later call from BOTH sessions then failed with that
+        sentence, which about the caller's own typo names the wrong culprit and
+        sends them looking for a session that may not exist. Under `os.replace`
+        the next request simply flattened it; the claim removed that accident,
+        and this message is where the missing remedy is handed back.
+
+        So: the payload, its age, and - when it is addressed to this session's
+        own player - that it is theirs and how to be rid of it. That case is
+        the self-inflicted one and the only one this side can be sure about.
+        """
+        try:
+            pending = trigger.read_text().strip()
+            age = time.time() - trigger.stat().st_mtime
+            held = f"{pending!r}, {age:.0f}s old"
+        except (OSError, UnicodeDecodeError):
+            pending = None
+            held = "a request that vanished while it was being read"
+
+        request = parse(pending) if pending is not None else None
+        addressed_to_me = (
+            request is not None
+            and request.target is not None
+            and request.target.casefold() == self.player.casefold()
+        )
+
+        if addressed_to_me:
+            tail = (
+                f"It is addressed to this session's own player ({self.player!r}), "
+                "so it is nobody else's to collect - and nothing has collected "
+                "it, which means no client of that name is polling: either none "
+                "is running, or one is running without a loaded character, whose "
+                "name is empty and matches no target. A fresh `launch` clears a "
+                "pending request addressed to this session's player; so does "
+                "deleting the file."
+            )
+        else:
+            tail = (
+                "Whose request that is cannot be read off the trigger beyond the "
+                "address it carries, so this session will not delete it - it may "
+                "belong to another session still waiting for the answer, and "
+                "deleting it would be the overwrite this claim exists to "
+                "prevent. If the client it names is gone, remove the file by hand."
+            )
+
+        return f"the trigger at {trigger} still holds {held} after {timeout:g}s. {tail}"
+
+    def _claimed_out_of_time_message(self, trigger: Path, timeout: float) -> str:
+        """Why a claim that WON still has to fail: the game may still answer it.
+
+        Deliberately not `_busy_message`. That one describes a request the
+        caller never got - another session's, still in the way, safe to leave
+        alone and safe to retry against immediately. This one describes a
+        request the caller DID get: it is this session's own, it is sitting on
+        the trigger the game polls, and the game will most likely serve it.
+        What ran out was this call's own time to keep waiting, not the game's
+        silence - so the fix is a longer timeout, not a check on the game or a
+        deletion of anything.
+
+        The trigger is left claimed rather than withdrawn - see `_claim` - so a
+        retry issued right away may find this same request of its own still
+        sitting there. That is the expected shape of a retry here, not a stall.
+        """
+        try:
+            pending = trigger.read_text().strip()
+            held = f"{pending!r}"
+        except (OSError, UnicodeDecodeError):
+            held = "its own request"
+
+        return (
+            f"the trigger at {trigger} now holds {held}, this session's own "
+            f"claim, with none of the {timeout:g}s timeout left to wait for a "
+            "reply. The game may still answer it - what ran out was this "
+            "call's own time, not the game's silence. Retry with a longer "
+            "timeout; a retry started right away may find this same request "
+            "of its own still pending, which is expected rather than stuck."
+        )
+
+    def _claim(self, trigger: Path, payload: str, *, timeout: float) -> float:
+        """Take the trigger slot, and return what is LEFT of `timeout`.
+
+        Returning the remainder rather than swallowing it is the whole point:
+        the caller asked for an answer within `timeout`, not for `timeout`
+        waiting to ask plus `timeout` waiting to hear.
+
+        A claim that only succeeds once the budget is essentially gone is
+        still a WIN, not a loss - the trigger now holds the caller's own
+        request rather than somebody else's. Handing that case `_busy_message`
+        would tell the caller to go remove their own live request by hand, so
+        it gets its own message and its own trigger is left exactly as claimed.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                _claim_atomically(trigger, payload)
+            except TriggerBusy:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TriggerError(self._busy_message(trigger, timeout)) from None
+                time.sleep(min(CLAIM_POLL, remaining))
+                continue
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining < CLAIM_POLL:
+                raise TriggerError(self._claimed_out_of_time_message(trigger, timeout))
+            return remaining
+
     def ask(
         self,
         command: str,
@@ -329,6 +546,22 @@ class Session:
         server for a client-only command is refused with the server's list
         rather than a client's.
         """
+        # ADDRESSED BY DEFAULT, because unaddressed means "whoever polls
+        # first". The mod accepts an untargeted request at every client, so
+        # with two clients up the answer went to a race - measured as a
+        # different client answering on each of two consecutive attempts. This
+        # side knows its own player, so leaving that to chance was a choice.
+        #
+        # NOT for the dedicated server: it has no local player, so any target
+        # matches nothing and it would fall silent for good.
+        #
+        # A client that has not yet loaded a character has an EMPTY name, so
+        # it matches no target either and cannot be asked anything through
+        # this path. `heartbeat` is how that client is reached instead - it
+        # reads off disk and needs no cooperation from the game.
+        if not server and target is None:
+            target = self.player
+
         payload = compose(
             command,
             target=target,
@@ -340,9 +573,9 @@ class Session:
         result = self.path(self._names(server, target).result, server=server)
 
         result.unlink(missing_ok=True)
-        _write_atomically(trigger, payload)
+        remaining = self._claim(trigger, payload, timeout=timeout)
 
-        text = self._await_text(result, timeout=timeout, what=f"reply to {payload!r}")
+        text = self._await_text(result, timeout=remaining, what=f"reply to {payload!r}")
         return Reply(command=command, text=text.strip())
 
     def diag(
@@ -521,6 +754,14 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
     otherwise survive into this one, which is the exact scenario the original
     comment describes and Task 2's per-player naming made reachable.
 
+    THE TRIGGER IS EXCLUDED FROM BOTH LOOPS and released separately, because
+    it is the one artifact shared with the OTHER session rather than merely
+    with a previous run of this one. Deleting it here destroyed a request that
+    another developer's game was still polling for - the lost update this
+    branch removed from the write path, reintroduced by the cleanup. See
+    `_release_trigger`, which deletes it only where it holds a request this
+    session may take back.
+
     Other players' files are left alone, deliberately: they are not this
     session's to delete. That holds because of WHO reads them next: the
     `heartbeat` tool hands a human an `age_seconds` to judge, so a leftover
@@ -533,12 +774,22 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
     the names it looks at, however fresh it is.
     """
     for name in cfg.artifacts.all:
+        if name == cfg.artifacts.trigger:
+            continue
         for server in (False, True):
             cfg.artifact(name, server=server).unlink(missing_ok=True)
 
     if player is not None:
         for name in artifacts_for(cfg.mod_name, player).all:
+            # The trigger is NOT per player, so this is the same shared name
+            # again and the same exclusion applies. Skipped by name rather than
+            # by trusting that, because `Artifacts.trigger` deciding to carry a
+            # token one day must not silently reopen the hole.
+            if name == cfg.artifacts.trigger:
+                continue
             cfg.artifact(name, server=False).unlink(missing_ok=True)
+
+    _release_trigger(cfg, player=player)
 
 
 def world_problem(world: str) -> str | None:
@@ -592,6 +843,36 @@ def launch(
     if mode not in {"server", "server_client"}:
         raise SessionError(
             f"unknown mode {mode!r} - expected 'server' or 'server_client'"
+        )
+
+    # EVERY request is now addressed, so a name `parse` cannot read back
+    # intact fails on every call rather than only on targeted ones. Asked
+    # once, here, where the answer names the character instead of arriving as
+    # a refusal on a request the caller thought was simple.
+    #
+    # WHAT THIS ACTUALLY CATCHES: whitespace, not `@` or `:`. `player` is only
+    # ever placed in the TARGET position, the payload's terminal field -
+    # `parse` takes everything after the first `@` as the target VERBATIM and
+    # never re-splits it, so a name holding `@` or `:` reads back unchanged.
+    # Measured against both this module's `parse` and the mod's own
+    # `DevCommands.Parse` (responder/DevCommands.cs), which use the identical
+    # rule - a first hypothesis for this guard checked those two characters
+    # directly and was wrong, because neither one actually breaks anything.
+    # What `parse` DOES change is whitespace: both sides trim the target, so a
+    # name with a leading or trailing space - or one that is empty or
+    # whitespace-only - reads back shorter than it was typed, or as no name at
+    # all. That is indistinguishable from an ordinary name in a log or a
+    # config file, which is exactly why it is worth catching once here rather
+    # than as a silent mystery on every request this session ever sends.
+    heard = parse(f"diag@{player}")
+    if heard is None or heard.target != player:
+        raise SessionError(
+            f"the character name {player!r} is not the name a request will "
+            f"carry: a payload naming it reads back as {heard}, not as typed. "
+            "`parse` trims whitespace from the target, so a name padded with "
+            "spaces - or one that is empty or all whitespace - is addressed "
+            "shorter than it was typed, or to nobody at all, on every request "
+            "this session sends."
         )
 
     existing = _tml_pids(cfg)
@@ -904,9 +1185,10 @@ def stop(
         time.sleep(min(SETTLE_POLL, remaining))
         survivors = set(aimed) & _tml_pids(cfg)
 
-    for name in (cfg.artifacts.trigger,):
-        for server in (False, True):
-            cfg.artifact(name, server=server).unlink(missing_ok=True)
+    # NOT an unconditional unlink. The trigger is shared with the other
+    # session, and a teardown that deleted it took that session's in-flight
+    # request with it - see `_release_trigger`.
+    _release_trigger(cfg, player=session.player)
 
     session.started = survivors
 
