@@ -1054,7 +1054,12 @@ def test_a_session_waiting_for_the_capture_lock_holds_no_trigger(
 
     session_mod._claim_atomically(lock, "held by somebody else")
 
-    with pytest.raises(session_mod.TriggerError):
+    # Matched against `_capture_busy_message`'s own wording, not just
+    # `TriggerError` - any early refusal (an unpublished command, a bad
+    # target) raises the same exception type, and would let this test pass
+    # having never reached the lock at all. Pinning the message pins the
+    # test to the lock-contention path specifically.
+    with pytest.raises(session_mod.TriggerError, match="another session is capturing"):
         sess.ask("capture", timeout=0.3)
 
     assert not trigger.exists(), (
