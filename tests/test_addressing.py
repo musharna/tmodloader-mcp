@@ -927,3 +927,47 @@ def test_a_stamp_that_cannot_be_trusted_never_blocks_a_capture(tmp_path):
     # this cannot pass by the function having become "always zero".
     session_mod._write_stamp(stamp, 1000.5)
     assert session_mod._stamp_wait(stamp, now=1000.5) == pytest.approx(0.5)
+
+
+# ---- claiming the capture lock ---------------------------------------------
+
+
+def test_a_held_capture_lock_blocks_a_second_capture_until_it_is_released(sess, cfg):
+    """The claim waits rather than failing, exactly as the trigger claim does.
+
+    One behaviour to learn, and a capture round trip was 1.2s live - so a
+    waiting caller usually gets its picture instead of an error.
+    """
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+
+    session_mod._claim_atomically(lock, "held")
+
+    with pytest.raises(session_mod.TriggerError) as blocked:
+        sess._claim_capture(lock, stamp, timeout=0.3)
+
+    assert "another session" in str(blocked.value).lower()
+    assert lock.exists(), (
+        "a blocked claim removed the lock it lost - the holder is mid-capture "
+        "and just had its exclusivity taken away"
+    )
+
+    # POSITIVE CONTROL, same test: released, the same call succeeds. Without
+    # it, a `_claim_capture` that always raised would pass everything above.
+    lock.unlink()
+    assert sess._claim_capture(lock, stamp, timeout=5.0) > 0
+    assert lock.exists()
+
+
+def test_claiming_the_capture_lock_spends_the_callers_budget(sess, cfg):
+    """N seconds asked for is N seconds spent, not N to claim plus N to hear."""
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+
+    session_mod._write_stamp(stamp, time.time())
+    remaining = sess._claim_capture(lock, stamp, timeout=5.0)
+
+    assert 0 < remaining < 5.0, (
+        "the claim handed back the full budget, so the boundary wait it just "
+        "slept through will be spent a second time by the reply"
+    )
