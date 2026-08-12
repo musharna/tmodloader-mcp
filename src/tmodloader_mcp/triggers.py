@@ -109,6 +109,25 @@ class Artifacts:
         return f"{self.prefix}-capture.trigger"
 
     @property
+    def capture_lock(self) -> str:
+        # NOT per player, for the trigger's reason and one of its own: the
+        # thing being serialised is Terraria's choice of output filename,
+        # which is per SAVE DIRECTORY. A lock only one session can contend
+        # for would serialise nothing.
+        return f"{self.prefix}-capture.lock"
+
+    @property
+    def capture_stamp(self) -> str:
+        """When the last capture's reply arrived, so the next one can miss it.
+
+        Separate from the lock rather than written into it because it must
+        OUTLIVE the lock: the holder releases immediately and the waiting is
+        done by whoever comes next, which is what keeps a solo session from
+        paying for a contention that never happened.
+        """
+        return f"{self.prefix}-capture.stamp"
+
+    @property
     def result(self) -> str:
         return self._named("capture", "txt")
 
@@ -145,6 +164,8 @@ class Artifacts:
         """
         return (
             self.trigger,
+            self.capture_lock,
+            self.capture_stamp,
             self.result,
             self.diag,
             self.heartbeat,

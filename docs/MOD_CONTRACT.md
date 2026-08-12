@@ -258,6 +258,7 @@ load-bearing:
   sends them hunting a session that does not exist. A payload addressed to the
   reporting session's OWN player is the one case that is certain, and it comes
   with a remedy: see [What the harness clears](#what-the-harness-clears).
+
 - **The claim and the reply share one budget.** A caller asking for an answer
   within N seconds did not ask for N waiting to ask plus N waiting to hear, so
   the claim returns what is left of the timeout and a claim that consumed the
@@ -472,3 +473,15 @@ Nothing validates that a target names a live client, so a typo — or a client
 that has not loaded a character, whose name is empty and matches no target —
 parks a request no client will ever take. A fresh `launch` from the session
 that addressed it clears it; deleting the file by hand always works.
+
+**`<mod>-capture.lock` and `<mod>-capture.stamp` are excluded the same way,
+for the trigger's reason.** Both are shared with the OTHER session rather than
+with a previous run of this one — the lock while a capture is in flight, the
+stamp for a short while after — so an unconditional launch-time delete would
+take the lock out from under a session capturing right now: the same lost
+update the trigger exclusion exists to prevent, arriving through a second
+file. Telling a lock a DEAD run left behind from one a LIVE session holds
+needs a signal a launch does not have, its age, which is separate work.
+Neither file is ever written or read by the mod — both are held entirely
+between two of this harness's OWN sessions, to keep them from capturing in the
+same wall-clock second, before either one writes a trigger.
