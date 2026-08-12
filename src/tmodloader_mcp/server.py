@@ -126,6 +126,10 @@ class ReplyOut(TypedDict):
     ok: bool
     refused: bool
     text: str
+    # Always present, never omitted - see `StatusOut`'s docstring for why an
+    # optional key here would fail the round trip instead of merely being
+    # absent. Null on every reply but a capture that broke a stale lock.
+    note: str | None
 
 
 class DiagOut(TypedDict):
@@ -378,7 +382,11 @@ def trigger(
         command, target=target, argument=argument, server=server, timeout=timeout
     )
     return ReplyOut(
-        command=reply.command, ok=reply.ok, refused=reply.refused, text=reply.text
+        command=reply.command,
+        ok=reply.ok,
+        refused=reply.refused,
+        text=reply.text,
+        note=reply.note,
     )
 
 
