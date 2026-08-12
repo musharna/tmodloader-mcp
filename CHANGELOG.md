@@ -52,6 +52,37 @@ keeping, not because they broke a released API.
   the trigger is — see
   [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#what-the-harness-clears).
 
+  One residual is stated rather than removed: a capture whose reply times out
+  releases the lock in its `finally` while Terraria may still be writing the
+  PNG. Holding the lock until a reply that may never come would wedge captures
+  for both sessions on every timed-out request — a certain outage traded
+  against a rare collision.
+
+- **A capture whose whole budget went on the boundary wait no longer leaves a
+  request on the trigger.** Found in review of the work above and reproduced
+  with ONE session and no contention: a stamp from a capture that had just
+  finished, then `trigger("capture", timeout=0.4)`. `_claim_capture` charged
+  the boundary sleep after its last look at the deadline and handed back a
+  `0.0` remainder anyway; `_claim` then took that as its budget, wrote the
+  request to the trigger, and raised for having no time to wait on it. The
+  `finally` released the capture lock with that request still sitting there.
+
+  The mod deletes a trigger before dispatching it, so the game went on to
+  serve the request and Terraria wrote a PNG WITH NO LOCK HELD — another
+  session could take the freed lock, wait out a stamp written before that PNG
+  existed, and land in the same second. The collision this release removes,
+  reached through the mechanism that removes it.
+
+  `_claim_capture` now applies to its own return the rule `_claim` already
+  applied to itself: with less than `CLAIM_POLL` left, raise rather than hand
+  on a remainder that cannot fund the next step. It releases the lock on that
+  path itself, since `ask` only knows to release what this call RETURNED, and
+  it reports in its own words — the borrowed message promised that "the game
+  may still answer it", which named a request that was never written. Two
+  neighbours in the same loop went with it: a stale-lock break skipped the
+  deadline check every other cycle performs, and the contention message named
+  a holder on a path where the lock had just been unlinked.
+
 ## [0.3.0] - 2026-08-12
 
 The release where two people can drive one game directory at once. 0.2.0 gave
