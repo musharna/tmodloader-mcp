@@ -632,16 +632,47 @@ class Session:
     def _capture_busy_message(self, lock: Path, timeout: float) -> str:
         try:
             age = time.time() - lock.stat().st_mtime
-            held = f", {age:.0f}s old"
+            contention = (
+                f"another session is capturing and holds {lock}, {age:.0f}s old"
+            )
         except OSError:
-            held = ""
+            # No lock to describe. Either the holder released between the loop
+            # giving up and this message being built, or this call had just
+            # broken a stale one - and naming a holder that is demonstrably not
+            # there is a guess of exactly the kind `_busy_message` refuses to
+            # make about the trigger.
+            contention = f"the capture lock at {lock} was contended for"
 
         return (
-            f"another session is capturing and holds {lock}{held}, and the "
-            f"{timeout:g}s timeout ran out waiting for it. Captures are "
-            "serialised because Terraria names the file it writes after the "
-            "second it wrote it in, so two at once produce one picture and "
-            "two callers told it is theirs. Retry with a longer timeout."
+            f"{contention}, and the {timeout:g}s timeout ran out waiting for it. "
+            "Captures are serialised because Terraria names the file it writes "
+            "after the second it wrote it in, so two at once produce one picture "
+            "and two callers told it is theirs. Retry with a longer timeout."
+        )
+
+    def _capture_out_of_time_message(self, timeout: float, waited: float) -> str:
+        """Why a capture lock that WAS taken still has to fail.
+
+        Deliberately not `_claimed_out_of_time_message`. That one describes a
+        request the caller's own claim put on the trigger, which the game will
+        most likely still serve - so it says "the game may still answer it"
+        and leaves the file alone. Here nothing was ever asked: the budget
+        went on the lock and the previous capture's second, the trigger was
+        never written, and the lock is released on the way out. Reusing that
+        message would promise an answer to a request that does not exist.
+        """
+        boundary = (
+            f", {waited:.2f}s of it waiting out the previous capture's second"
+            if waited
+            else ""
+        )
+        return (
+            f"the {timeout:g}s timeout went on taking the capture lock{boundary}, "
+            "leaving nothing to ask the game with. NOTHING OF THIS REQUEST IS ON "
+            "DISK: no trigger was written, no picture was taken, and the capture "
+            "lock has been released. Retry with a longer timeout - a capture needs "
+            "one big enough for the lock, up to a second of boundary wait, and the "
+            "round trip after that."
         )
 
     def _claim_capture(
@@ -662,13 +693,30 @@ class Session:
         waited out, and a second claimant arriving mid-wait would otherwise
         skip it.
 
-        Deliberately does NOT do what `_claim` does when the remaining budget
-        runs thin: `_claim` raises there because a trigger claim with no
-        budget left leaves a REQUEST ON DISK that the caller must be told
-        about. A capture lock with no budget left is released moments later
-        by `ask`'s `finally` and leaves nothing behind, so the ordinary
-        out-of-time path in `_await_text` is the honest report - there is
-        nothing here for an early raise to warn about.
+        RAISES WHEN THE SURVIVING BUDGET IS BELOW `CLAIM_POLL`, the same rule
+        `_claim` applies to itself, because the remainder returned here is
+        what funds the trigger claim that comes next. This paragraph used to
+        argue the opposite - that a lock with no budget left "is released
+        moments later by `ask`'s `finally` and leaves nothing behind". Both
+        halves were false, and one session with a stamp and no contention at
+        all was enough to show it: `ask` sets `held` from this function's
+        RETURN, so a raise here reaches no `finally`; and a 0.0 remainder
+        leaves plenty behind, because `_claim(timeout=0.0)` writes the
+        request to the trigger and only THEN raises for having no time to
+        wait on it. The caller got an error, the game got the request anyway,
+        and the PNG was written with the lock already released - the
+        unserialised capture this whole function exists to prevent.
+
+        The stamp wait is charged AFTER the loop's last deadline check, which
+        is why the check has to be repeated here rather than trusted from up
+        there.
+
+        THE ASYMMETRY WITH `_claim` IS REAL AND IS ABOUT THE SLOT, not about
+        whether to raise. `_claim` leaves the trigger claimed on its way out,
+        because a request already on disk is one the game may still serve and
+        withdrawing it would be the lost update. This one unlinks the lock,
+        because nothing was asked: a lock held for a request that does not
+        exist blocks the other session for nothing.
 
         THE NOTE IS EARNED, NOT INFERRED FROM `SlotBusy`. Only
         `_break_stale_lock` returning an age means THIS call broke a lock; a
@@ -685,13 +733,20 @@ class Session:
                 age = _break_stale_lock(lock)
                 if age is not None:
                     broke = age
-                    continue
+                # EVERY cycle checks the deadline, including one that just
+                # broke a lock. The break used to `continue` straight past
+                # this: a lock somebody kept recreating stale would then loop
+                # here for as long as they kept doing it, with the caller's
+                # timeout never consulted again.
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TriggerError(
                         self._capture_busy_message(lock, timeout)
                     ) from None
-                time.sleep(min(CLAIM_POLL, remaining))
+                if age is None:
+                    # A break freed the name, so retry at once. Sleeping would
+                    # be sleeping on a lock that is no longer there.
+                    time.sleep(min(CLAIM_POLL, remaining))
                 continue
             break
 
@@ -699,13 +754,22 @@ class Session:
         if wait:
             time.sleep(wait)
 
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining < CLAIM_POLL:
+            # Released HERE rather than by `ask`'s `finally`, which only runs
+            # for a lock this function RETURNED. Nothing was written to the
+            # trigger, so the caller gets one honest error instead of an error
+            # plus a capture nothing is serialising.
+            lock.unlink(missing_ok=True)
+            raise TriggerError(self._capture_out_of_time_message(timeout, wait))
+
         note = (
             f"a stale capture lock ({broke:.0f}s old, past the "
             f"{CAPTURE_LOCK_STALE:g}s bound) was broken to take this capture"
             if broke is not None
             else None
         )
-        return max(0.0, deadline - time.monotonic()), note
+        return remaining, note
 
     def ask(
         self,
