@@ -11,6 +11,19 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-12
+
+The release where two people can drive one game directory at once. 0.2.0 gave
+another mod the responder; this one stops two sessions using it from erasing
+each other. Both halves of that were needed and neither is much use alone: a
+client's ANSWERS had to stop sharing one filename, and the shared trigger had
+to stop being a slot anyone could overwrite.
+
+Verified with two real tModLoader clients rather than argued from the code —
+which is how the sharpest defects here were found, several of them regressions
+this work introduced and none of them visible to a suite that only ever ran
+one client.
+
 ### Added
 
 - **`responder/SHA256SUMS` — a fingerprint that ships with the folder.** The
