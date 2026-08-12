@@ -90,29 +90,75 @@ repository had ever been able to express.
   addressed rather than of who asked.
 
 - **Two requests in flight no longer share one staging file.** The trigger is
-  written atomically — staged beside the polled path and renamed into place —
+  written atomically — staged beside the polled path and linked into place —
   but the staging name was derived FROM that shared path, so two concurrent
-  writers shared it. The last write won the contents, the first rename carried
-  them, and the second raised `FileNotFoundError` having already lost its
-  payload: one request silently replaced by another's, in the one place this
-  project exists to make unambiguous. The staging name is now unique per
-  write, and a `finally` clears it so a throw between write and rename stops
-  leaving the payload in the directory the game reads.
+  writers shared it. The write was still a _rename_ when this was found: the
+  last write won the contents, the first rename carried them away, and the
+  second rename raised `FileNotFoundError` having already lost its payload —
+  one request silently replaced by another's, in the one place this project
+  exists to make unambiguous. The staging name is now unique per write, and a
+  `finally` clears it on every write — not only a failed one — so nothing is
+  left behind in the directory the game reads.
+
+- **Two sessions can now issue requests at the same time.** The trigger is
+  claimed rather than written: `os.link` is atomic exactly as `os.replace` was
+  and additionally refuses an occupied name, so a second request waits for the
+  slot instead of silently replacing what is in it. Measured before the fix as
+  one capture answering in 1.2s while the other timed out at 120s having never
+  had a request on disk.
+
+  A blocked claim never deletes the request in its way — that would be the same
+  overwrite under a friendlier name — so a trigger held by a client that will
+  never consume it is reported, naming the pending request and its age. It does
+  not name an OWNER: nothing validates that an address belongs to a live
+  client, so a caller's own typo'd `target` used to be reported as "another
+  session's request", which is the wrong culprit and the wrong remedy.
+
+  `launch` and `stop` no longer delete the trigger unconditionally either. That
+  was the same lost update arriving through the housekeeping — one developer
+  starting a game destroyed the other's in-flight request while their game was
+  still polling for it. Both now release it only where it holds a request
+  addressed to their own player, unaddressed, or unparseable, which is also the
+  only way a request nobody can consume ever leaves the shared slot.
+
+- **An untargeted request is no longer a coin flip.** Every client request now
+  carries the session's own player. The mod accepts an unaddressed request at
+  any client, so with two clients up the answer went to whichever polled
+  first — a different one on each of two consecutive attempts.
+
+  **Behaviour change:** a client that has not yet loaded a character has an
+  empty name, matches no target, and can no longer be asked anything. Use
+  `heartbeat`, which reads off disk and needs no cooperation from the game.
+
+- **A save directory that cannot support an exclusive claim is refused at
+  startup**, naming the filesystem's reason, rather than falling back to the
+  write that loses requests.
+
+- **A pending request is now read the way the mod reads it.** The decision to
+  delete a request out of the shared trigger treats an unreadable payload as
+  this session's own, justified entirely by "the mod cannot read it either, so
+  nobody will ever consume it". But `File.ReadAllText` has no such failure
+  mode — it substitutes U+FFFD and parses on — so bytes invalid only inside the
+  VERB still yield a clean target over there. This side gave up on them and
+  called another client's live request its own. Reading with `errors="replace"`
+  is this side making the same substitution, so both reach the same verdict on
+  the same bytes; nothing this harness writes can produce such a payload, but a
+  request typed from a shell or an editor with the wrong encoding can.
 
 ### Known
 
-- **An untargeted request with two clients up is a coin flip.** The mod's
-  addressing check accepts any client when no `@player` is given, so whichever
-  polls first deletes the shared trigger and answers; run twice in a row, a
-  different client answered each time. Pass a `target` when more than one
-  client is running.
-- **The trigger is one slot, not a queue.** A second request written before
-  the first is read replaces it, and the loser's caller waits out its full
-  timeout with nothing on disk to explain why. Stagger concurrent requests.
-  This is also why the `capture` verb's attribution question is unreachable
-  rather than open — two simultaneous captures are not something the protocol
-  can carry. See
-  [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#what-a-live-two-client-run-found).
+- **Two simultaneous `capture` requests can collide on one filename.** Once
+  requests could actually be concurrent, a live two-client run produced it: two
+  captures inside the same wall-clock second both answered with the identical
+  path — `PNG: C:\Users\...\Captures\Capture 2026-08-11 18_12_01.png` from both
+  `n43n` and `tst2` — and only one file existed on disk at that timestamp.
+  Terraria's own capture camera names the file, stamped to the second, into a
+  directory the mod does not control; `CaptureFind.PickNew` reports whichever
+  new `.png` it finds, with no way to know which client's request produced it.
+  `shot` does not share this failure — its drop box is a name the mod itself
+  picks and suffixes per player. See
+  [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#two-clients-at-once). This is
+  mod-side (`responder/`) and out of scope for this repository's harness.
 
 ## [0.2.0] - 2026-08-10
 

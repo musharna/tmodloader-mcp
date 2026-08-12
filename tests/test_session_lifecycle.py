@@ -376,6 +376,99 @@ def test_launch_leaves_another_players_stale_files_alone(tmp_path):
     )
 
 
+def test_launch_leaves_a_pending_request_addressed_to_another_player_alone(tmp_path):
+    """FIX ROUND 3, IMPORTANT 1: the cleanup undid the claim it was shipped with.
+
+    The trigger is the ONE artifact deliberately shared between sessions - it
+    is how a client learns a request is aimed at somebody else - and it was in
+    `cfg.artifacts.all`, so every launch deleted it. Developer A launching a
+    game therefore destroyed developer B's claimed, in-flight request while
+    B's game was still running and still polling for it: exactly the silent
+    loss `os.link` was introduced to remove, arriving by a different door.
+
+    The rule is the mod's own (`DevResponder`: a request it is not addressed
+    by is left exactly where it is), so this deletes only what is this
+    session's to delete.
+    """
+    cfg = cfg_for(tmp_path)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    trigger.write_text("diag@big-bird")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+
+    assert trigger.exists() and trigger.read_text() == "diag@big-bird", (
+        "a launch deleted a request addressed to another player - that client "
+        "is still polling for it and will now wait out its whole timeout"
+    )
+
+    # POSITIVE CONTROL, in the same test: a cleanup that had simply stopped
+    # touching the trigger at all would pass the assertion above while
+    # leaving this session's own dead request wedged in the shared slot
+    # forever - which is the only escape hatch an unaddressable target has.
+    trigger.write_text("diag@n43n")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+
+    assert not trigger.exists(), (
+        "a launch left behind a pending request addressed to its OWN player - "
+        "nothing else will ever collect it, so the shared slot stays wedged"
+    )
+
+    # And the third case, for the same reason: a payload the mod's parser
+    # cannot read is addressed to nobody and will be answered by nobody.
+    trigger.write_text("@@@")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+
+    assert not trigger.exists(), (
+        "a malformed request survived a launch - no client can parse it, so "
+        "leaving it in place wedges the slot on nobody's behalf"
+    )
+
+
+def test_a_pending_request_is_read_the_way_the_mod_reads_it(tmp_path):
+    """The two sides must agree on what "unreadable" means, byte for byte.
+
+    `_is_ours_to_clear` treats an unreadable payload as this session's, and
+    that is sound ONLY while the mod agrees it is unreadable too - the whole
+    justification is "no client will ever consume it". But the mod does not
+    have this side's failure mode: `File.ReadAllText` never throws on bad
+    UTF-8, it substitutes U+FFFD and parses what is left. So a payload with an
+    invalid byte in its VERB and a clean target decodes to a perfectly good
+    request over there, gets consumed by the client it names - and read here
+    as unreadable, hence as ours, hence deleted out from under them.
+
+    Nothing this harness writes can produce it (it writes UTF-8), which is why
+    this went unnoticed; a request typed from a shell, PowerShell, or an editor
+    with the wrong encoding can. Reading with `errors="replace"` is not error
+    tolerance for its own sake - it is this side agreeing to make the same
+    substitution the mod makes, so both reach the same verdict on the same
+    bytes.
+    """
+    cfg = cfg_for(tmp_path)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    # Invalid as UTF-8, but only in the verb: latin-1 "é" in "café". The mod
+    # substitutes it and still parses the target "big-bird" out of the rest.
+    trigger.write_bytes(b"shot:caf\xe9@big-bird")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+
+    assert trigger.exists(), (
+        "a launch deleted a request whose target the mod can still read - "
+        "that client will consume it, or would have, and is now waiting on a "
+        "request this side threw away for being undecodable to this side only"
+    )
+
+    # POSITIVE CONTROL, same test, same bad byte: substituting instead of
+    # giving up must not turn into "never clear anything". A payload that
+    # really is ours after substitution still goes.
+    trigger.write_bytes(b"shot:caf\xe9@n43n")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+
+    assert not trigger.exists(), (
+        "a launch left its OWN request wedged in the shared slot because one "
+        "byte of the verb was not UTF-8"
+    )
+
+
 def _fake_launch_world(monkeypatch, *, existing, after, ready_raises):
     """Wire launch()'s dependencies so no game is started.
 
@@ -723,7 +816,7 @@ def test_the_trigger_file_is_never_written_where_the_game_is_watching(
         "game can read it half-written"
     )
     assert written, "nothing was written at all - the test is not exercising ask()"
-    assert trigger.read_text() == "diag", "the trigger never arrived intact"
+    assert trigger.read_text() == "diag@n43n", "the trigger never arrived intact"
 
     staged = written[-1]
     assert staged.parent == trigger.parent, (
@@ -986,6 +1079,42 @@ def test_stop_still_leaves_alone_a_game_it_did_not_start(monkeypatch):
 
     assert windows.aimed == [4808], "it aimed at a process it had not started"
     assert 31337 in windows.live, "it killed a game that was not its to kill"
+
+
+def test_stop_leaves_a_pending_request_addressed_to_another_player_alone(
+    tmp_path, monkeypatch
+):
+    """The same defect on the teardown path, and stated separately because it
+    is a separate deletion: `stop` unlinked the trigger unconditionally.
+
+    Less destructive than the launch case only because the stopping session's
+    own game is on its way out - the OTHER developer's game is not, and its
+    request vanishing from under it is the identical loss.
+    """
+    windows = FakeWindows(set())
+    windows.install(monkeypatch)
+    cfg = cfg_for(tmp_path)
+    session = Session(cfg=cfg, mode="server_client", port=1, player="n43n")
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    trigger.write_text("shot:full@big-bird")
+    session_mod.stop(cfg, session, settle=TEST_SETTLE)
+
+    assert trigger.exists() and trigger.read_text() == "shot:full@big-bird", (
+        "stop deleted a request addressed to another player - the client it "
+        "names is still running and still polling for it"
+    )
+
+    # POSITIVE CONTROL, in the same test: stop must still clear what IS its
+    # own, or a teardown leaves its own dead request holding the shared slot
+    # against the next session.
+    trigger.write_text("shot:full@n43n")
+    session_mod.stop(cfg, session, settle=TEST_SETTLE)
+
+    assert not trigger.exists(), (
+        "stop left its own session's pending request behind - the game that "
+        "would have answered it is the one being killed"
+    )
 
 
 def test_a_spawn_that_fails_halfway_does_not_leak_the_half_that_started(monkeypatch):

@@ -354,8 +354,10 @@ def trigger(
             here. A word it does not serve is refused before anything is
             written to disk: a game that does not recognise one does nothing,
             and from outside that is indistinguishable from a hang.
-        target: Address the request to one player by name. Two clients on one
-            machine share a trigger file and would otherwise race for it.
+        target: Address the request to one player by name. Every request is
+            already addressed to this session's own player by default, so pass
+            this only to ask a DIFFERENT client — one another session drives on
+            the same machine.
         argument: Only some commands read one — `commands` says which. Passing
             one to a command that takes none is refused here, because the mod
             would refuse it too and that costs a round trip.

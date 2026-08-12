@@ -17,6 +17,7 @@ Removing the ambiguity is what broke it.
 
 from __future__ import annotations
 
+import multiprocessing
 import struct
 import zlib
 from pathlib import Path
@@ -25,7 +26,7 @@ import pytest
 
 from tmodloader_mcp import session as session_mod
 from tmodloader_mcp.session import Session
-from tmodloader_mcp.triggers import Reply, artifacts_for
+from tmodloader_mcp.triggers import Reply, TriggerError, artifacts_for
 
 #: The session's own player, and somebody else entirely. Both are real names
 #: run through the real token rule rather than hand-spelled filenames, so these
@@ -127,13 +128,13 @@ def _replies_when_triggered(monkeypatch, path: Path, text: str) -> None:
     fixture hangs off the trigger write, which is where a real game's answer
     comes from too.
     """
-    real = session_mod._write_atomically
+    real = session_mod._claim_atomically
 
     def answering(trigger: Path, payload: str) -> None:
         real(trigger, payload)
         path.write_text(text)
 
-    monkeypatch.setattr(session_mod, "_write_atomically", answering)
+    monkeypatch.setattr(session_mod, "_claim_atomically", answering)
 
 
 # ---- site 1: ask(), the reply file -------------------------------------
@@ -248,14 +249,19 @@ def test_an_unaddressed_shot_still_uses_this_sessions_drop_box(sess, cfg, monkey
 
 
 def test_two_requests_in_flight_do_not_share_one_staging_file(cfg, monkeypatch):
-    """THE LOST UPDATE, found by firing two `shot`s at once.
+    """THE LOST UPDATE, found by firing two `shot`s at once - what this guards
+    now that `_claim_atomically` refuses a taken slot instead of overwriting it.
 
-    `_write_atomically` staged at `<trigger>.staging`, and the trigger path is
+    `_claim_atomically` staged at `<trigger>.staging`, and the trigger path is
     shared by every client BY DESIGN — so two sessions writing at once shared
-    one staging file. The last write won its contents, the first rename carried
-    them, and the second rename raised `FileNotFoundError`. One request was
-    silently replaced by the other's payload, which is the failure this whole
-    project exists to prevent, arriving from the other end.
+    one staging file. Under the old `os.replace`, the last write won its
+    contents, the first rename carried them, and the second rename raised
+    `FileNotFoundError`: one request silently replaced by the other's payload.
+    `os.link` closes that by refusing the second claim outright rather than by
+    racing it, which is why this test now frees the slot itself between the
+    two requests - see below - instead of letting a second stage-and-rename
+    happen unopposed. What still has to hold, and what this test still checks,
+    is the property underneath: no two writers may ever stage at the same path.
 
     Asserted as a property rather than by racing threads: two sessions ask for
     two different things, and no staging path may be written twice. A thread
@@ -276,6 +282,14 @@ def test_two_requests_in_flight_do_not_share_one_staging_file(cfg, monkeypatch):
     monkeypatch.setattr(Path, "write_text", spy)
 
     Session(cfg=cfg, mode="server_client", port=1, player=SELF).ask("diag")
+
+    # THE MOD CONSUMES A REQUEST BEFORE THE NEXT ONE ARRIVES, and the trigger
+    # is now CLAIMED rather than overwritten, so the second session can only
+    # reach its staged write once the slot is free. Simulating that consumption
+    # is more faithful to the protocol than the old version, which could stage
+    # twice only because `os.replace` destroyed the first request.
+    cfg.artifact(cfg.artifacts.trigger, server=False).unlink()
+
     Session(cfg=cfg, mode="server_client", port=1, player=OTHER).ask("diag")
 
     assert len(staged) == 2, "the test is not exercising two staged writes"
@@ -312,3 +326,481 @@ def test_addressing_this_sessions_own_player_survives_a_different_case(
     )
 
     assert sess.ask("diag", target=SELF.upper(), timeout=1.0).text == "mine"
+
+
+# ---- the claim itself ----------------------------------------------------
+
+
+def test_a_claim_refuses_a_slot_that_is_already_taken(cfg):
+    """THE LOST UPDATE, at the primitive that allowed it.
+
+    `os.replace` succeeds unconditionally, so the second of two concurrent
+    requests overwrote the first and its caller waited out a full timeout with
+    nothing on disk to explain why. `os.link` is atomic in exactly the same way
+    and additionally refuses an occupied name.
+
+    The positive control is in the same test deliberately: a claim that refused
+    EVERYTHING would pass the first assertion while making the tool useless.
+    """
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    session_mod._claim_atomically(trigger, "diag@n43n")
+    assert trigger.read_text() == "diag@n43n", "the free slot was not claimed"
+
+    with pytest.raises(session_mod.TriggerBusy):
+        session_mod._claim_atomically(trigger, "diag@tst2")
+
+    assert trigger.read_text() == "diag@n43n", (
+        "the pending request was overwritten - which is the entire defect"
+    )
+
+
+def test_a_claim_leaves_no_staging_file_behind(cfg):
+    """`os.replace` CONSUMED the staging name; `os.link` does not - it leaves a
+    second name for the same inode. Forgetting the unlink would litter the
+    directory the game reads with one file per request.
+
+    Checked after both a successful claim and a refused one, because the
+    refused path is the one that returns early.
+    """
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    session_mod._claim_atomically(trigger, "diag@n43n")
+    assert not list(cfg.root.glob("*.staging")), "staging file left after a claim"
+
+    with pytest.raises(session_mod.TriggerBusy):
+        session_mod._claim_atomically(trigger, "diag@tst2")
+    assert not list(cfg.root.glob("*.staging")), "staging file left after a refusal"
+
+
+def test_a_claim_never_writes_into_the_polled_path(cfg, monkeypatch):
+    """The guarantee that must SURVIVE the change: the game polls the trigger,
+    so a payload written there in place is readable half-finished, and a
+    truncated command word is not an error on that side - it parses as unknown
+    and is discarded, and the harness then waits out its timeout for a reply to
+    a request the game threw away.
+    """
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    written: list[Path] = []
+    real_write_text = Path.write_text
+
+    def spy(self, *args, **kwargs):
+        written.append(Path(self))
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", spy)
+    session_mod._claim_atomically(trigger, "diag@n43n")
+
+    assert written, "nothing was written - the test is not exercising the claim"
+    assert trigger not in written, (
+        "the payload was written straight into the file the game polls"
+    )
+    assert written[-1].parent == trigger.parent, (
+        "staged outside the trigger's directory - a link only works within one "
+        "filesystem, and the save directory is on /mnt/c"
+    )
+
+
+def test_a_blocked_claim_waits_for_the_slot_rather_than_failing(sess, cfg, monkeypatch):
+    """Contention is NORMAL and sub-second, not a fault.
+
+    Two developers on one machine will collide routinely, and the slot frees
+    within one of the mod's poll ticks. Failing on contact would turn an
+    invisible wait into a visible error for a condition that resolves itself.
+
+    The slot is freed from inside the sleep, which is where a real consumption
+    would land, and makes the test deterministic instead of racing a thread.
+    """
+    _publish(cfg)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(trigger, "diag@somebody-else")
+
+    def freeing_sleep(_seconds):
+        trigger.unlink(missing_ok=True)
+
+    monkeypatch.setattr(session_mod.time, "sleep", freeing_sleep)
+    _replies_when_triggered(
+        monkeypatch,
+        cfg.artifact(artifacts_for(cfg.mod_name, SELF).result, server=False),
+        "mine",
+    )
+
+    assert sess.ask("diag", timeout=5.0).text == "mine"
+
+
+def test_a_claim_that_never_clears_names_what_is_holding_it(sess, cfg, monkeypatch):
+    """A NEGATIVE RESULT NEEDS A POSITIVE CONTROL, and the control here is the
+    test above: the wait must end, but only when the slot genuinely never frees.
+
+    The message has to name the pending request, because the caller's own
+    request is fine and the game is fine - neither of the things they would
+    otherwise go and check.
+    """
+    _publish(cfg)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(trigger, "shot:full@somebody-else")
+
+    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+
+    with pytest.raises(TriggerError) as refused:
+        sess.ask("diag", timeout=0.2)
+
+    message = str(refused.value)
+    assert "somebody-else" in message, f"does not name what is holding it: {message}"
+    assert trigger.read_text() == "shot:full@somebody-else", (
+        "the blocked claim deleted another session's request, which is the "
+        "overwrite this whole change removes"
+    )
+
+
+def test_a_blocked_claim_does_not_assert_an_ownership_it_cannot_know(
+    sess, cfg, monkeypatch
+):
+    """FIX ROUND 3, IMPORTANT 2: the message named a culprit it never checked.
+
+    Nothing validates that an addressed target names a LIVE client, and the
+    mod leaves a request it is not addressed by exactly where it is - so one
+    typo'd `target`, or a client that has not loaded a character, parks a
+    request no client will ever consume. Every later call from BOTH sessions
+    then failed with "Another session's request is pending", which about a
+    caller's own typo is simply false, and sends them to look at a session
+    that may not exist.
+
+    What is observable is the payload and its age. That is what it may say.
+    """
+    _publish(cfg)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(trigger, "diag@nobody-by-that-name")
+
+    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+
+    with pytest.raises(TriggerError) as refused:
+        sess.ask("diag", timeout=0.2)
+
+    message = str(refused.value)
+    assert "Another session's request is pending" not in message, (
+        f"asserts whose request it is, which nothing here checked: {message}"
+    )
+    # POSITIVE CONTROL, in the same test: a message that had gone vague to
+    # satisfy the assertion above would be worse than the one it replaced.
+    # What IS observable still has to be in it.
+    assert "nobody-by-that-name" in message, (
+        f"does not name the payload that is actually in the way: {message}"
+    )
+
+
+def test_a_blocked_claim_on_this_sessions_own_request_names_the_remedy(
+    sess, cfg, monkeypatch
+):
+    """The self-inflicted half, which the caller can actually act on.
+
+    A request addressed to THIS session's own player that no client has taken
+    means no client of that name is polling - the commonest cause being a
+    client that has not loaded a character, whose name is empty and matches no
+    target. Saying "another session's" about that is the wrong owner AND the
+    wrong remedy.
+    """
+    _publish(cfg)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(trigger, f"diag@{SELF}")
+
+    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+
+    with pytest.raises(TriggerError) as refused:
+        sess.ask("diag", timeout=0.2)
+
+    message = str(refused.value)
+    assert "this session's own player" in message, (
+        f"does not say the pending request is the caller's own: {message}"
+    )
+    assert "`launch`" in message, (
+        f"does not name the remedy - a fresh launch clears this session's own "
+        f"pending request, and nothing else in the message tells them so: "
+        f"{message}"
+    )
+    assert "may belong to another session" not in message, (
+        f"hedges about an owner it can see is the caller themselves: {message}"
+    )
+
+
+def test_the_claim_wait_spends_the_callers_timeout_not_a_second_budget(
+    sess, cfg, monkeypatch
+):
+    """A caller passing timeout=N asked for an ANSWER within N seconds.
+
+    Giving the claim its own N and the reply another N would mean a caller
+    blocked for the whole budget then waits the whole budget again - and the
+    error they finally get names a silent game, when the game was never
+    involved.
+    """
+    _publish(cfg)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(trigger, "diag@somebody-else")
+
+    slept: list[float] = []
+
+    def counting_sleep(seconds):
+        slept.append(seconds)
+        if len(slept) >= 3:
+            trigger.unlink(missing_ok=True)
+
+    monkeypatch.setattr(session_mod.time, "sleep", counting_sleep)
+
+    seen: list[float] = []
+    real_await = Session._await_text
+
+    def spy(self, path, *, timeout, what):
+        seen.append(timeout)
+        return real_await(self, path, timeout=timeout, what=what)
+
+    monkeypatch.setattr(Session, "_await_text", spy)
+    _replies_when_triggered(
+        monkeypatch,
+        cfg.artifact(artifacts_for(cfg.mod_name, SELF).result, server=False),
+        "mine",
+    )
+
+    sess.ask("diag", timeout=5.0)
+
+    assert seen, "the reply was never awaited"
+    assert seen[0] < 5.0, (
+        f"the reply got the full {seen[0]}s after the claim had already spent "
+        "part of the budget - that is two budgets, not one"
+    )
+
+
+def test_a_claim_that_succeeds_on_its_last_tick_still_fails_as_a_claim(
+    sess, cfg, monkeypatch
+):
+    """A claim can SUCCEED and still have nothing left to wait with.
+
+    `_claim` used to return whatever was left of `timeout` unconditionally, so
+    a claim that only went through on the final poll returned ~0s of budget
+    for the reply. `_await_text(timeout=0)` then failed on its first check and
+    raised a message about the GAME not polling - which was never asked, and
+    was never what was slow. The budget was spent entirely by contention for
+    the slot, and the failure has to say so.
+
+    A first fix reused `_busy_message` here, which is wrong in a different way:
+    by the time the floor fires the claim has ALREADY SUCCEEDED, so the
+    trigger holds this session's own request, not somebody else's. Telling the
+    caller "another session's request is pending... remove the file by hand"
+    describes a request that is neither - it is theirs, it is live, and
+    deleting it would destroy the very thing they just asked for. The message
+    under test here has to say the opposite: the claim went through, the game
+    may still answer it, and the remedy is a longer timeout - not a deletion.
+
+    The clock is faked rather than raced: `time.monotonic` and `time.sleep`
+    are both replaced with a hand-advanced counter, so the claim succeeds at a
+    deterministic instant with less than one `CLAIM_POLL` of budget left,
+    rather than hoping real wall-clock timing lands there.
+    """
+    _publish(cfg)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(trigger, "diag@somebody-else")
+
+    clock = [0.0]
+    calls = [0]
+
+    def advancing_sleep(seconds):
+        calls[0] += 1
+        clock[0] += seconds
+        if calls[0] >= 2:
+            trigger.unlink(missing_ok=True)
+
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(session_mod.time, "sleep", advancing_sleep)
+
+    with pytest.raises(TriggerError) as refused:
+        sess.ask("diag", timeout=0.25)
+
+    message = str(refused.value)
+    assert "polling" not in message, (
+        f"blamed the game for a budget the claim spent: {message}"
+    )
+    assert "Another session's request is pending" not in message, (
+        f"describes the caller's own live claim as somebody else's: {message}"
+    )
+    assert "remove the file by hand" not in message, (
+        f"told the caller to delete a request that is their own and still "
+        f"live: {message}"
+    )
+    assert "may still answer" in message, (
+        f"does not say the claim went through and the game may still serve "
+        f"it: {message}"
+    )
+    assert "retry" in message.lower(), (
+        f"does not point the caller at the actual remedy - a longer timeout: {message}"
+    )
+
+
+def _claim_worker(trigger: str, payload: str, result_path: str) -> None:
+    """Multiprocessing target: attempt one real claim, record the outcome.
+
+    Module-level so it can be sent to a child process (`multiprocessing`
+    pickles the target by qualified name), and so it works the same way under
+    both `fork` and `spawn`.
+    """
+    from tmodloader_mcp import session as worker_session_mod
+
+    try:
+        worker_session_mod._claim_atomically(Path(trigger), payload)
+    except worker_session_mod.TriggerBusy:
+        Path(result_path).write_text("busy")
+    else:
+        Path(result_path).write_text("ok")
+
+
+def test_a_claim_under_real_process_contention_admits_exactly_one(tmp_path):
+    """Real kernel-level exclusion, not a mocked clock.
+
+    Every other test in this module fakes `time.sleep` and reasons about
+    `_claim_atomically` from a single process, which never actually exercises
+    the guarantee the whole design rests on: several processes racing
+    `os.link` onto the same name, with the KERNEL - not this codebase -
+    deciding which one wins. This runs several real OS processes against one
+    trigger path and checks that exactly one wins and every other gets
+    `TriggerBusy`.
+
+    `tmp_path` here is a real (if ordinary) filesystem, not the production
+    save directory, which is DrvFs under WSL2 - `os.link`'s atomicity there
+    was separately confirmed to hold when `_claim_atomically` was written.
+
+    The payload left on disk is checked against the recorded winner in the
+    same test, so a harness bug that let every worker report failure (and
+    thus vacuously pass a "not more than one winner" check) could not pass
+    this one: nothing would be on disk to match against.
+    """
+    trigger = tmp_path / "biomancy-capture.trigger"
+    workers = 8
+    procs: list[multiprocessing.Process] = []
+    result_paths: list[Path] = []
+
+    for i in range(workers):
+        result_path = tmp_path / f"result-{i}.txt"
+        result_paths.append(result_path)
+        proc = multiprocessing.Process(
+            target=_claim_worker,
+            args=(str(trigger), f"diag@worker-{i}", str(result_path)),
+        )
+        procs.append(proc)
+
+    try:
+        for proc in procs:
+            proc.start()
+        for proc in procs:
+            proc.join(timeout=10)
+
+        assert all(not proc.is_alive() for proc in procs), "a worker never finished"
+    finally:
+        # A hung or crashed child must not outlive a failing run - terminate
+        # whatever is still alive rather than leaking a background process.
+        for proc in procs:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5)
+
+    outcomes = [p.read_text() for p in result_paths]
+    assert outcomes.count("ok") == 1, f"expected exactly one winner, got {outcomes}"
+    assert outcomes.count("busy") == workers - 1, (
+        f"expected every other worker refused, got {outcomes}"
+    )
+
+    winner = outcomes.index("ok")
+    assert trigger.read_text() == f"diag@worker-{winner}", (
+        "the payload on disk does not belong to the recorded winner - a run "
+        "where every worker failed could not have produced this either"
+    )
+    assert not list(tmp_path.glob("*.staging")), "a staging file was left behind"
+
+
+def test_an_unaddressed_request_is_addressed_to_this_sessions_player(
+    sess, cfg, monkeypatch
+):
+    """THE COIN FLIP, removed at its source.
+
+    `IsFor` returns true for EVERY client when a payload names no `@player`, so
+    with two clients up whichever polled first deleted the shared trigger and
+    answered. Measured: run twice in a row, a different client answered each
+    time. The harness knows its own session's player, so leaving the payload
+    unaddressed delegated the choice to a race.
+    """
+    _publish(cfg)
+    seen: list[str] = []
+    real = session_mod._claim_atomically
+
+    def spy(path, text):
+        seen.append(text)
+        return real(path, text)
+
+    monkeypatch.setattr(session_mod, "_claim_atomically", spy)
+    _replies_when_triggered(
+        monkeypatch,
+        cfg.artifact(artifacts_for(cfg.mod_name, SELF).result, server=False),
+        "mine",
+    )
+
+    sess.ask("diag", timeout=1.0)
+
+    assert seen == [f"diag@{SELF}"], f"composed {seen}, not an addressed payload"
+
+
+def test_the_server_side_is_never_addressed(sess, cfg, monkeypatch):
+    """POSITIVE CONTROL, and a real hazard.
+
+    A dedicated server has no local player, so `IsFor` returns FALSE for any
+    non-empty target - addressing it would mean it never answers anything
+    again. It also writes a `-server` suffixed trigger, so it was never
+    contended and has nothing to gain here.
+    """
+    _publish(cfg, server=True)
+    seen: list[str] = []
+    real = session_mod._claim_atomically
+
+    def spy(path, text):
+        seen.append(text)
+        return real(path, text)
+
+    monkeypatch.setattr(session_mod, "_claim_atomically", spy)
+    _replies_when_triggered(
+        monkeypatch, cfg.artifact(cfg.artifacts.result, server=True), "server says"
+    )
+
+    sess.ask("diag", server=True, timeout=1.0)
+
+    assert seen == ["diag"], f"the server was addressed: {seen}"
+
+
+def test_launch_refuses_a_character_name_padded_with_whitespace(monkeypatch):
+    """`parse` TRIMS the target, so a name padded with whitespace is not the
+    name a request will actually carry.
+
+    `@` and `:` were the first hypothesis for what this guard needed to catch,
+    and they were wrong - measured, not assumed: `player` is only ever placed
+    in the payload's TERMINAL field, and `parse` takes everything after the
+    first `@` verbatim with no further splitting, so those two characters
+    survive the round trip intact, in both this module's `parse` and the
+    mod's own `DevCommands.Parse`. What `parse` actually changes is
+    whitespace: a leading or trailing space reads back trimmed, which looks
+    identical to a valid name in any log or config - exactly why catching it
+    once at launch beats failing on every request this session ever sends.
+
+    The positive control is in the same test deliberately: a guard that
+    refused every name would pass the assertion below while making `launch`
+    unusable for anybody.
+    """
+    cfg = FakeCfg(Path("/nonexistent"))
+    monkeypatch.setattr(session_mod, "_tml_pids", lambda c: set())
+
+    # An ordinary name has nothing for `parse` to trim, so the guard must let
+    # it through - what stops `launch` here is `FakeCfg` lacking the rest of a
+    # real `Config` (`world_win` and friends), not the character name.
+    with pytest.raises(AttributeError):
+        session_mod.launch(cfg, "server_client", player=SELF)
+
+    with pytest.raises(session_mod.SessionError) as refused:
+        session_mod.launch(cfg, "server_client", player="n43n ")
+
+    assert "n43n " in str(refused.value), (
+        f"refused without naming the character: {refused.value}"
+    )
