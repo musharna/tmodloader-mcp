@@ -764,7 +764,12 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
     another developer's game was still polling for - the lost update this
     branch removed from the write path, reintroduced by the cleanup. See
     `_release_trigger`, which deletes it only where it holds a request this
-    session may take back.
+    session may take back. THE CAPTURE LOCK AND STAMP ARE EXCLUDED FOR THE
+    SAME REASON - both are shared with the other session, not owned by a
+    previous run of this one - plus one of their own: a lock left by a DEAD
+    run is told apart from one a LIVE run is holding by its age, not by a
+    launch's optimism, which is the only signal that can make that call (see
+    Task 4).
 
     Other players' files are left alone, deliberately: they are not this
     session's to delete. That holds because of WHO reads them next: the
@@ -777,19 +782,25 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
     THIS launch was given, so another player's leftover is simply not one of
     the names it looks at, however fresh it is.
     """
+    shared = (
+        cfg.artifacts.trigger,
+        cfg.artifacts.capture_lock,
+        cfg.artifacts.capture_stamp,
+    )
+
     for name in cfg.artifacts.all:
-        if name == cfg.artifacts.trigger:
+        if name in shared:
             continue
         for server in (False, True):
             cfg.artifact(name, server=server).unlink(missing_ok=True)
 
     if player is not None:
         for name in artifacts_for(cfg.mod_name, player).all:
-            # The trigger is NOT per player, so this is the same shared name
+            # None of `shared` is per player, so this is the same shared names
             # again and the same exclusion applies. Skipped by name rather than
-            # by trusting that, because `Artifacts.trigger` deciding to carry a
-            # token one day must not silently reopen the hole.
-            if name == cfg.artifacts.trigger:
+            # by trusting that, because a member of `shared` deciding to carry
+            # a token one day must not silently reopen the hole.
+            if name in shared:
                 continue
             cfg.artifact(name, server=False).unlink(missing_ok=True)
 

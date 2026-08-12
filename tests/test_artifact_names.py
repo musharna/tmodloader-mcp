@@ -192,5 +192,14 @@ def test_all_covers_every_artifact_including_the_per_player_ones():
     # `all` is what clears artifacts between runs. A name missing from it is a
     # stale file that survives a run and reads as this run's answer.
     a = artifacts_for("Biomancy", player="n43n")
-    assert set(a.all) == {a.trigger, a.result, a.diag, a.heartbeat, a.shot, a.commands}
-    assert len(a.all) == 6
+    assert set(a.all) == {
+        a.trigger,
+        a.capture_lock,
+        a.capture_stamp,
+        a.result,
+        a.diag,
+        a.heartbeat,
+        a.shot,
+        a.commands,
+    }
+    assert len(a.all) == 8
