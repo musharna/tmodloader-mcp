@@ -804,3 +804,35 @@ def test_launch_refuses_a_character_name_padded_with_whitespace(monkeypatch):
     assert "n43n " in str(refused.value), (
         f"refused without naming the character: {refused.value}"
     )
+
+
+def test_what_counts_as_a_capture_is_asked_of_the_parser():
+    """The lock has to cover what the MOD will do, not what the caller typed.
+
+    `DevResponder.cs:428`: an unreadable or bare payload is "the historical
+    bare-trigger behaviour, a capture". Matching the literal string "capture"
+    would miss it. Matching the parser cannot.
+    """
+    assert session_mod._will_capture("capture")
+    assert session_mod._will_capture("capture@n43n")
+    assert session_mod._will_capture("  CAPTURE  ")  # trimmed and lowercased
+
+    # The bare payload. `compose` will not let this session EMIT one - every
+    # command is validated against the published set - so this is the
+    # predicate being right rather than a path being reachable. It is written
+    # down because the rule belongs to the mod, and the mod can be driven by
+    # something other than this harness.
+    assert session_mod._will_capture("")
+    assert session_mod._will_capture("   ")
+
+    # POSITIVE CONTROL: the predicate must also say NO, or a lock taken
+    # around every request would pass every assertion above while
+    # serialising the entire protocol.
+    assert not session_mod._will_capture("diag")
+    assert not session_mod._will_capture("shot:full@n43n")
+
+    # Malformed is not a capture: `DevCommands.Parse` maps what it cannot
+    # read to Unknown and does nothing, so nothing is written and nothing
+    # collides.
+    assert not session_mod._will_capture("capture@")
+    assert not session_mod._will_capture("@n43n")

@@ -266,6 +266,20 @@ def _pending_payload(trigger: Path) -> str | None:
         return None
 
 
+def _will_capture(payload: str) -> bool:
+    """Whether this payload makes the game take a picture.
+
+    Asked of `parse` rather than of the string, because the answer is the
+    mod's and `parse` is this side's model of the mod's parser. Two rules
+    come free that a string comparison would get wrong: a bare payload IS a
+    capture (`DevResponder.cs:428` - the behaviour predates commands), and a
+    malformed one is not, since `DevCommands.Parse` maps what it cannot read
+    to Unknown and does nothing at all.
+    """
+    request = parse(payload)
+    return request is not None and request.command == "capture"
+
+
 def _is_ours_to_clear(payload: str | None, *, player: str | None) -> bool:
     """Whether a trigger holding `payload` is this session's to delete.
 
