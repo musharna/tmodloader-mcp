@@ -1113,3 +1113,57 @@ def test_a_session_waiting_for_the_capture_lock_holds_no_trigger(
         "a session blocked on the capture lock had already claimed the "
         "trigger - two captures in this order deadlock"
     )
+
+
+def _grab_capture_lock(save_dir, results, index):
+    """One OS process trying to hold the capture lock, reporting what it saw."""
+    from tmodloader_mcp import session as worker_session_mod
+
+    lock = Path(save_dir) / "biomancy-capture.lock"
+    try:
+        worker_session_mod._claim_atomically(lock, str(index))
+    except worker_session_mod.SlotBusy:
+        results.append(("blocked", index))
+        return
+
+    # Held. If exclusion is real, no other process is inside this window.
+    results.append(("held", index))
+    time.sleep(0.2)
+    lock.unlink(missing_ok=True)
+
+
+def test_eight_processes_contend_for_the_capture_lock_and_one_wins(tmp_path):
+    """Eight real processes, not eight threads.
+
+    The GIL can hide a race that two OS processes expose, and two OS
+    processes is exactly the arrangement this feature exists for.
+    """
+    procs = []
+    with multiprocessing.Manager() as manager:
+        results = manager.list()
+        try:
+            for i in range(8):
+                p = multiprocessing.Process(
+                    target=_grab_capture_lock, args=(str(tmp_path), results, i)
+                )
+                procs.append(p)
+            # Every one started before any is joined, or they serialise
+            # themselves and the test proves nothing.
+            for p in procs:
+                p.start()
+            for p in procs:
+                p.join(timeout=30)
+        finally:
+            for p in procs:
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=5)
+
+        outcomes = list(results)
+
+    held = [i for kind, i in outcomes if kind == "held"]
+    assert len(outcomes) == 8, f"a process died without reporting: {outcomes}"
+    assert len(held) == 1, (
+        f"{len(held)} processes held the capture lock at once ({held}) - "
+        "which is the collision this feature exists to prevent"
+    )
