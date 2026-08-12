@@ -134,6 +134,17 @@ repository had ever been able to express.
   startup**, naming the filesystem's reason, rather than falling back to the
   write that loses requests.
 
+- **A pending request is now read the way the mod reads it.** The decision to
+  delete a request out of the shared trigger treats an unreadable payload as
+  this session's own, justified entirely by "the mod cannot read it either, so
+  nobody will ever consume it". But `File.ReadAllText` has no such failure
+  mode — it substitutes U+FFFD and parses on — so bytes invalid only inside the
+  VERB still yield a clean target over there. This side gave up on them and
+  called another client's live request its own. Reading with `errors="replace"`
+  is this side making the same substitution, so both reach the same verdict on
+  the same bytes; nothing this harness writes can produce such a payload, but a
+  request typed from a shell or an editor with the wrong encoding can.
+
 ### Known
 
 - **Two simultaneous `capture` requests can collide on one filename.** Once
