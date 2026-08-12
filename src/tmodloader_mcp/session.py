@@ -286,7 +286,7 @@ def _will_capture(payload: str) -> bool:
     Asked of `parse` rather than of the string, because the answer is the
     mod's and `parse` is this side's model of the mod's parser. Two rules
     come free that a string comparison would get wrong: a bare payload IS a
-    capture (`DevResponder.cs:428` - the behaviour predates commands), and a
+    capture (`DevResponder.cs:429` - the behaviour predates commands), and a
     malformed one is not, since `DevCommands.Parse` maps what it cannot read
     to Unknown and does nothing at all.
     """
