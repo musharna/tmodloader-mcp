@@ -39,12 +39,21 @@ keeping, not because they broke a released API.
   rather than on a session working alone, which pays nothing.
 
   A lock older than `CAPTURE_LOCK_STALE` (60s — four times the mod's own
-  ~15s settle window) cannot belong to a live capture, so it is broken, and
-  the caller is told via a new optional `note` field on the reply — breaking
-  is a judgement made from age alone, worth saying out loud. Breaking wrongly
-  costs only a collision, which is 0.3.0's shipped behaviour; the same rule is
-  deliberately NOT applied to the trigger claim, where breaking wrongly would
-  destroy somebody's in-flight request.
+  ~15s settle window) is assumed to have no live capture behind it, so it is
+  broken, and the caller is told via a new optional `note` field on the
+  reply — breaking is a judgement made from age alone, worth saying out loud.
+  Breaking wrongly costs only a collision, which is 0.3.0's shipped behaviour;
+  the same rule is deliberately NOT applied to the trigger claim, where
+  breaking wrongly would destroy somebody's in-flight request.
+
+  The assumption holds only while the round trip fits inside
+  `CAPTURE_LOCK_STALE`. The lock's mtime is set once, at claim time, and never
+  refreshed while it is held; a caller may pass `ask` a `timeout` above 60s,
+  and a capture legitimately spending most of it on contention can still be
+  LIVE with a lock older than the bound — a second session then breaks it and
+  captures into the same window this whole feature exists to close, through a
+  supported parameter, with no error or warning. Not fixed here; see
+  [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#two-clients-at-once).
 
   Client side only: the mod refuses `capture` on a dedicated server, so a
   server-side lock would serialise against nothing. The lock and stamp are
