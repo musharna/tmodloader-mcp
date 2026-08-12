@@ -15,6 +15,7 @@ exits immediately.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import subprocess
@@ -139,6 +140,12 @@ SETTLE_POLL = 0.5
 #: SETTLE_POLL: a slot is normally freed within one of the mod's poll ticks, so
 #: this is the resolution at which "already gone" is noticed, not a settle.
 CLAIM_POLL = 0.1
+
+#: When a held capture lock stops being believable. A capture is bounded by
+#: the mod's own settle window - `SettleTicks = 900`, about 15s at 60fps -
+#: plus the round trip; the observed live capture took 1.2s. Four times the
+#: WORST case, not the observed one, because the observed one was lucky.
+CAPTURE_LOCK_STALE = 60.0
 
 
 class SessionError(RuntimeError):
@@ -278,6 +285,32 @@ def _will_capture(payload: str) -> bool:
     """
     request = parse(payload)
     return request is not None and request.command == "capture"
+
+
+def _break_stale_lock(lock: Path) -> float | None:
+    """Remove a capture lock no live capture could still be holding, and say
+    how old it was. `None` when there was nothing to break.
+
+    A capture's duration is bounded, so age is a real signal here in a way it
+    is not for the trigger - and the two failure modes are not comparable.
+    Breaking this wrongly costs a collision, which is exactly what shipped in
+    0.3.0; breaking the trigger claim wrongly destroys a request somebody is
+    waiting on. Do not carry this over.
+
+    The unlink is guarded because the holder may release between the stat and
+    the unlink, which is a race this function WINS by doing nothing.
+    """
+    try:
+        age = time.time() - lock.stat().st_mtime
+    except OSError:
+        return None
+
+    if age <= CAPTURE_LOCK_STALE:
+        return None
+
+    with contextlib.suppress(OSError):
+        lock.unlink()
+    return age
 
 
 def _is_ours_to_clear(payload: str | None, *, player: str | None) -> bool:
@@ -817,6 +850,13 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
             if name in shared:
                 continue
             cfg.artifact(name, server=False).unlink(missing_ok=True)
+
+    # The lock is excluded from both loops above because it may belong to a
+    # LIVE session - but a launch is exactly when a lock left by a DEAD run
+    # should go, and age is the one signal that tells the two apart. Both
+    # sides, because either could be the one that crashed.
+    for server in (False, True):
+        _break_stale_lock(cfg.artifact(cfg.artifacts.capture_lock, server=server))
 
     _release_trigger(cfg, player=player)
 

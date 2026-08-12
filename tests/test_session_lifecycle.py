@@ -454,6 +454,27 @@ def test_launch_leaves_the_capture_lock_and_stamp_alone(tmp_path):
     assert not heartbeat.exists()
 
 
+def test_launch_breaks_a_capture_lock_left_by_a_dead_run(tmp_path):
+    """Task 2 stopped a launch deleting the lock unconditionally, which was
+    right and left the dead-run case unhandled. Age is what separates them.
+    """
+    cfg = cfg_for(tmp_path)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+
+    lock.write_text("from a run that died")
+    old = time.time() - (session_mod.CAPTURE_LOCK_STALE + 5)
+    os.utime(lock, (old, old))
+
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+    assert not lock.exists()
+
+    # POSITIVE CONTROL: a fresh lock still survives a launch, which is the
+    # invariant Task 2 established and this must not undo.
+    lock.write_text("another session, capturing right now")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+    assert lock.exists()
+
+
 def test_a_pending_request_is_read_the_way_the_mod_reads_it(tmp_path):
     """The two sides must agree on what "unreadable" means, byte for byte.
 

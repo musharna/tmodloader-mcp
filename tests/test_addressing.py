@@ -18,7 +18,9 @@ Removing the ambiguity is what broke it.
 from __future__ import annotations
 
 import multiprocessing
+import os
 import struct
+import time
 import zlib
 from pathlib import Path
 
@@ -836,3 +838,40 @@ def test_what_counts_as_a_capture_is_asked_of_the_parser():
     # collides.
     assert not session_mod._will_capture("capture@")
     assert not session_mod._will_capture("@n43n")
+
+
+# ---- the capture lock's age -----------------------------------------------
+
+
+def test_a_lock_older_than_any_real_capture_is_broken(tmp_path):
+    """A crash mid-capture must not wedge captures for everybody.
+
+    Seen failing before the fix: the assertion below is that the stale lock
+    is GONE, and nothing removed it.
+
+    Breaking this lock wrongly costs a collision, which is the behaviour that
+    shipped in 0.3.0 - so the downside of being wrong here is bounded at "no
+    worse than before". That does NOT hold for the trigger claim, where
+    breaking wrongly destroys a request, and this rule must not be carried
+    over to it.
+    """
+    lock = tmp_path / "biomancy-capture.lock"
+    lock.write_text("")
+    old = time.time() - (session_mod.CAPTURE_LOCK_STALE + 5)
+    os.utime(lock, (old, old))
+
+    broke = session_mod._break_stale_lock(lock)
+
+    assert broke is not None and broke > session_mod.CAPTURE_LOCK_STALE
+    assert not lock.exists()
+
+    # POSITIVE CONTROL, same test: a fresh lock survives. Without this, an
+    # implementation that unlinked unconditionally would pass everything
+    # above while destroying every live capture on the machine.
+    lock.write_text("")
+    assert session_mod._break_stale_lock(lock) is None
+    assert lock.exists()
+
+    # And an absent lock is not an error - the ordinary case.
+    lock.unlink()
+    assert session_mod._break_stale_lock(lock) is None
