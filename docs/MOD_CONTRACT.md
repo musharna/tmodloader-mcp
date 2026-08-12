@@ -483,6 +483,28 @@ does NOT carry over to the trigger claim, where breaking wrongly destroys a
 request somebody is waiting on. Client side only: the mod refuses `capture`
 on a dedicated server, so a server-side lock would serialise against nothing.
 
+**A stated residual: a capture that times out releases its lock while a PNG
+may still be on its way.** The lock is released in a `finally`, so when the
+wait for the reply runs out the release happens then — but the game has the
+request, the mod deletes a trigger before dispatching it, and Terraria may
+write the picture seconds later with the lock already gone. Another session
+can take the freed lock in that window and land in the same second after all.
+This is deliberate and it is the safe side of the trade: holding a lock until
+a reply that may never come would wedge captures for both sessions on every
+timed-out request, which is a certain outage traded against a rare collision.
+The stamp is written on that path too, so the next claimant still misses the
+second the timeout happened in — it just cannot know about a write that had
+not happened yet. A capture given a timeout longer than the mod's own settle
+window does not reach this case; the residual belongs to a caller who cut the
+budget short. The timed-out caller is told nothing was confirmed, which is
+already true of any timeout here.
+
+Distinct from that, and not a residual: a capture whose budget is used up
+BEFORE anything is asked — by waiting for the lock, or by waiting out the
+previous capture's second — fails with the lock released and NOTHING on the
+trigger. There is no picture in flight in that case, and the error says so in
+those words.
+
 Whether the trigger should become a queue is a real question and a separate
 one. [What deliberately stays shared](#what-deliberately-stays-shared) argues
 for one trigger from ADDRESSING — every client must be able to see a request
@@ -500,9 +522,11 @@ to delete, and `heartbeat` reports their age rather than treating their mere
 existence as "live", so a stale one reads as stale rather than as a phantom
 client.
 
-**The trigger is not one of them.** It is the sixth name, and the only one
-shared with the OTHER session rather than merely with a previous run of this
-one — so deleting it on the way in or out is the same overwrite the
+**The trigger is not one of them.** It is one of three names shared with the
+OTHER session rather than merely with a previous run of this one — the trigger,
+`<mod>-capture.lock` and `<mod>-capture.stamp`, all three excluded from the
+clear for that reason and the other two covered below. Deleting the trigger on
+the way in or out is the same overwrite the
 [claim rule](#modcapturetrigger--the-request) exists to prevent, committed by
 the housekeeping instead of by the write. `launch` and `stop` both used to do
 it unconditionally, which meant one developer starting a game destroyed the
@@ -529,8 +553,12 @@ with a previous run of this one — the lock while a capture is in flight, the
 stamp for a short while after — so an unconditional launch-time delete would
 take the lock out from under a session capturing right now: the same lost
 update the trigger exclusion exists to prevent, arriving through a second
-file. Telling a lock a DEAD run left behind from one a LIVE session holds
-needs a signal a launch does not have, its age, which is separate work.
+file. A lock a DEAD run left behind is told from one a LIVE session holds by
+its AGE, which is the only signal that can make that call, and a launch makes
+it: after the two clears above, and for both sides, it breaks the capture lock
+if and only if it is older than `CAPTURE_LOCK_STALE`. So a crashed run's lock
+does not survive the next launch, and a lock a session is holding right now
+does. Nothing else about a launch is allowed to touch either file.
 Neither file is ever written or read by the mod — both are held entirely
 between two of this harness's OWN sessions, to keep them from capturing in the
 same wall-clock second, before either one writes a trigger.
