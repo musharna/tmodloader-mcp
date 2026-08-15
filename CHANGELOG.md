@@ -11,6 +11,118 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Added
+
+- **`tests/live_capture_check.py` — the collision, reproduced and closed
+  against the real capture camera.** No test in `tests/` could reach this
+  defect: Terraria names the PNG after the second it started writing it,
+  before the mod is involved, so the collision only exists where Terraria
+  does. Everything else here drives fakes or bare files and passes just as
+  happily with the serialisation deleted.
+
+  It launches a server and client, joins a second client, and fires `capture`
+  from two separate OS processes through a barrier — processes rather than
+  threads, because the lock under test is a filesystem claim BETWEEN sessions
+  and two threads in one interpreter share state the real case does not.
+
+  A pass proves nothing by itself, which is why the file documents its own
+  negative control: point `PYTHONPATH` at a pre-fix checkout and run it again.
+  Measured 2026-08-14 against `b2041a3` (0.3.0, serialisation absent), 0/6
+  rounds passed — both callers named one file every time, and SIX PNGs existed
+  on disk for TWELVE requests. Half the pictures were not misattributed but
+  overwritten and lost. Serialised, on the same clients minutes apart: 3/3,
+  one file per request.
+
+  It also settled why a pre-fix run is FASTER (1.2s against 5-8s). The PNG's
+  name is stamped when the capture starts and the write finishes seconds later
+  — `Capture ... 23_43_59.png` landed at 23:44:06 — so before the fix the
+  loser's `CaptureFind` returned the winner's file the moment it appeared. The
+  slower serialised number is the honest one: it is a session waiting for a
+  picture that is actually its own. The stamp is therefore conservative by a
+  wider margin than its design assumed, recording a reply that arrives after
+  the write completes, long after the name was chosen.
+
+### Fixed
+
+- **Two clients capturing in the same wall-clock second no longer collide.**
+  Terraria's own capture camera names the output PNG and stamps that name to
+  the second before the mod ever sees it, so two captures inside one second
+  produced ONE file and both callers were told it was theirs — shipped as
+  Known in 0.3.0 after a live two-client run reproduced it. Neither addressing
+  nor namespacing could have fixed this: each client lists the captures
+  directory into its own `_before` snapshot, so each sees that single written
+  file as new, and there is no name here the harness or the mod chooses.
+
+  The fix is a second claim, harness-side and taken BEFORE the trigger:
+  `<mod>-capture.lock`, shared like the trigger and carrying no player token
+  on purpose. It is claimed with the same `os.link` primitive the trigger
+  uses, and taking it first is what makes deadlock impossible — a session
+  waiting on the lock holds no trigger, so the trigger's holder always
+  finishes. It is released in a `finally`, so a timeout or a refusal cannot
+  wedge captures for both sessions.
+
+  Serialising the requests is not sufficient on its own — a capture that
+  finishes at `18:12:01.05` and one whose reply lands at `18:12:01.95` never
+  overlap and would still collide. On release the holder writes
+  `<mod>-capture.stamp` with the time its reply arrived and returns
+  immediately; the NEXT claimant waits out whatever remains of that second,
+  capped at one second (`STAMP_WAIT_MAX`). The cost lands on the contender
+  rather than on a session working alone, which pays nothing.
+
+  A lock older than `CAPTURE_LOCK_STALE` (60s — four times the mod's own
+  ~15s settle window) is assumed to have no live capture behind it, so it is
+  broken, and the caller is told via a new optional `note` field on the
+  reply — breaking is a judgement made from age alone, worth saying out loud.
+  Breaking wrongly costs only a collision, which is 0.3.0's shipped behaviour;
+  the same rule is deliberately NOT applied to the trigger claim, where
+  breaking wrongly would destroy somebody's in-flight request.
+
+  The assumption holds only while the round trip fits inside
+  `CAPTURE_LOCK_STALE`. The lock's mtime is set once, at claim time, and never
+  refreshed while it is held; a caller may pass `ask` a `timeout` above 60s,
+  and a capture legitimately spending most of it on contention can still be
+  LIVE with a lock older than the bound — a second session then breaks it and
+  captures into the same window this whole feature exists to close, through a
+  supported parameter, with no error or warning. Not fixed here; see
+  [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#two-clients-at-once).
+
+  Client side only: the mod refuses `capture` on a dedicated server, so a
+  server-side lock would serialise against nothing. The lock and stamp are
+  both in `Artifacts.all` and excluded from the launch-time clear the same way
+  the trigger is — see
+  [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#what-the-harness-clears).
+
+  One residual is stated rather than removed: a capture whose reply times out
+  releases the lock in its `finally` while Terraria may still be writing the
+  PNG. Holding the lock until a reply that may never come would wedge captures
+  for both sessions on every timed-out request — a certain outage traded
+  against a rare collision.
+
+- **A capture whose whole budget went on the boundary wait no longer leaves a
+  request on the trigger.** Found in review of the work above and reproduced
+  with ONE session and no contention: a stamp from a capture that had just
+  finished, then `trigger("capture", timeout=0.4)`. `_claim_capture` charged
+  the boundary sleep after its last look at the deadline and handed back a
+  `0.0` remainder anyway; `_claim` then took that as its budget, wrote the
+  request to the trigger, and raised for having no time to wait on it. The
+  `finally` released the capture lock with that request still sitting there.
+
+  The mod deletes a trigger before dispatching it, so the game went on to
+  serve the request and Terraria wrote a PNG WITH NO LOCK HELD — another
+  session could take the freed lock, wait out a stamp written before that PNG
+  existed, and land in the same second. The collision this release removes,
+  reached through the mechanism that removes it.
+
+  `_claim_capture` now applies to its own return the rule `_claim` already
+  applied to itself: with less than `CLAIM_POLL` left, raise rather than hand
+  on a remainder that cannot fund the next step. It releases the lock on that
+  path itself, since `ask` only knows to release what this call RETURNED, and
+  it reports in its own words — the borrowed message promised that "the game
+  may still answer it", which named a request that was never written. Two
+  neighbours in the same loop went with it: a stale-lock break skipped the
+  deadline check every other cycle performs, and the contention message named
+  a holder on a path where the lock had just been unlinked.
+
 ## [0.3.0] - 2026-08-12
 
 The release where two people can drive one game directory at once. 0.2.0 gave

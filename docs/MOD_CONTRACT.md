@@ -129,6 +129,12 @@ that is load-bearing rather than an oversight:
 - **The command list** describes the channel, not an answer on it. Both
   clients serve the same verbs from the same running mod, so a second copy
   would only be the first one repeated under a different name.
+- **`<mod>-capture.lock` and `<mod>-capture.stamp`** are shared the same way,
+  and for the same reason — but they are not part of this protocol at all.
+  The mod never writes or reads either; they exist purely between two of this
+  harness's own sessions, to keep one from capturing in the second the other
+  already claimed. See [What the harness clears](#what-the-harness-clears)
+  for what they do and why.
 
 ## `<mod>-commands.txt` — what you serve
 
@@ -258,6 +264,7 @@ load-bearing:
   sends them hunting a session that does not exist. A payload addressed to the
   reporting session's OWN player is the one case that is certain, and it comes
   with a remedy: see [What the harness clears](#what-the-harness-clears).
+
 - **The claim and the reply share one budget.** A caller asking for an answer
   within N seconds did not ask for N waiting to ask plus N waiting to hear, so
   the claim returns what is left of the timeout and a claim that consumed the
@@ -271,6 +278,14 @@ load-bearing:
   twice what it was given. Documented rather than tightened, because the second
   wait is for a file the mod writes after answering and the reply is not
   evidence it has landed.
+
+  `capture` spends that same one budget on more than the trigger-plus-reply
+  round trip: it must first take `<mod>-capture.lock` (see
+  [Two clients at once](#two-clients-at-once)), then possibly wait out
+  whatever remains of the previous capture's second — capped at one second,
+  `STAMP_WAIT_MAX` — before it ever claims the trigger. None of that doubles
+  the budget the way the second-file case above does; it is still the ONE
+  timeout the caller gave, spent across three phases instead of one.
 
 ## The reply
 
@@ -411,27 +426,108 @@ while the other timed out at 120s. A harness must now take the slot with an
 exclusive create that fails when it is occupied, and wait for it to free rather
 than replacing what is there.
 
-**`capture` still collides, and this run watched it happen.** With the trigger
-claimed rather than overwritten, two simultaneous captures both answered —
-1.2s and 1.3s, neither timing out — but both `n43n` and `tst2` reported the
-same picture: `PNG: C:\Users\...\Captures\Capture 2026-08-11 18_12_01.png`,
-and only one file existed on disk at that timestamp. `capture` finds its
-result the way [The drop box](#the-drop-box) already says: Terraria's own
-capture camera writes into a directory the mod does not name, so `Begin()`
-lists that directory before queueing `QuickScreenshot()` and `Settle()` lists
-it again once the wait is over; `CaptureFind.PickNew` reports whichever `.png`
-is both new and, if more than one is, largest. Nothing in that comparison
-looks at which client asked — it cannot, because Terraria's camera does not
-tell the mod who it was writing for, only a path. Two clients capturing
-inside the same wall-clock second therefore contend for one filename, since
-that camera stamps its own name to the second: whichever client's poll runs
-after the write sees exactly one new file and reports it as its own, and the
-other client is told about a picture it did not take, with nothing on disk to
-say so. `shot` does not have this failure mode, and the reason is upstream of
-anything a token could fix: its drop box is a name the mod itself picks
+**`capture` used to collide, and this run watched it happen before the fix.**
+With the trigger claimed rather than overwritten, two simultaneous captures
+both answered — 1.2s and 1.3s, neither timing out — but both `n43n` and
+`tst2` reported the same picture: `PNG: C:\Users\...\Captures\Capture
+2026-08-11 18_12_01.png`, and only one file existed on disk at that
+timestamp. `capture` finds its result the way [The drop box](#the-drop-box)
+already says: Terraria's own capture camera writes into a directory the mod
+does not name, so `Begin()` lists that directory before queueing
+`QuickScreenshot()` and `Settle()` lists it again once the wait is over;
+`CaptureFind.PickNew` reports whichever `.png` is both new and, if more than
+one is, largest. Nothing in that comparison looks at which client asked — it
+cannot, because Terraria's camera does not tell the mod who it was writing
+for, only a path. Two clients capturing inside the same wall-clock second
+therefore contended for one filename, since that camera stamps its own name
+to the second: whichever client's poll ran after the write saw exactly one
+new file and reported it as its own, and the other client was told about a
+picture it did not take, with nothing on disk to say so.
+
+**Neither addressing nor namespacing could have fixed this.** Each client
+lists the captures directory into its own `_before` snapshot, so each sees
+that single written file as new relative to itself, and there is no name
+here that the harness or the mod chooses — `capture`'s filename is Terraria's
+alone, stamped to the second before the mod ever sees it. `shot` does not
+have this failure mode, and the reason is the same one upstream of anything a
+token could fix: its drop box is a name the mod itself picks
 (`AnswerName(Names.Shot)`, suffixed per player — see
-[The drop box](#the-drop-box)), while `capture`'s filename is chosen by
-Terraria before the mod ever sees it, which leaves nothing here to namespace.
+[The drop box](#the-drop-box)), while `capture`'s filename is not.
+
+**What stops it is a second claim, harness-side, taken BEFORE the trigger.**
+`<mod>-capture.lock` is shared like the trigger and carries no player token —
+being shared is the point, since what it serialises is one save directory's
+worth of Terraria captures, not one player's. It is claimed with the same
+`os.link` primitive the trigger already uses (`_claim_atomically`): atomic,
+and it refuses an occupied name rather than overwriting it. Taking it before
+the trigger claim, always, is what makes deadlock impossible — a session
+waiting on the lock is by construction not holding the trigger, so whoever
+does hold the trigger always finishes and releases both. It is released in a
+`finally`, so a timeout or a refusal cannot wedge captures for either session.
+
+Serialising the requests is not sufficient by itself: a capture that finishes
+at `18:12:01.05` and one whose reply lands at `18:12:01.95` never overlap and
+would still collide. So on release the holder writes `<mod>-capture.stamp` —
+the time its reply arrived, no player token, shared like the lock — and
+returns immediately; the NEXT claimant waits out whatever is left of that
+second, capped at one second (`STAMP_WAIT_MAX`), before it captures. The cost
+of the boundary lands on the contender rather than on a session working
+alone, which pays nothing.
+
+A lock older than `CAPTURE_LOCK_STALE` (60s — four times the mod's own ~15s
+settle window) cannot belong to a live capture, so it is broken, and the
+caller is told via a `note` field on the reply, because breaking one is a
+judgement made from age alone and worth saying out loud. Breaking wrongly
+here costs only a collision, which is exactly 0.3.0's shipped behaviour — this
+does NOT carry over to the trigger claim, where breaking wrongly destroys a
+request somebody is waiting on. Client side only: the mod refuses `capture`
+on a dedicated server, so a server-side lock would serialise against nothing.
+
+**That claim assumes the round trip fits inside `CAPTURE_LOCK_STALE`, and
+nothing enforces it.** The lock's mtime is set once, at claim time, and is
+never refreshed while it is held — across the lock claim, the boundary wait,
+the trigger claim and the reply wait. `ask` defaults `timeout` to 60s, but a
+caller may pass more: a capture given, say, `timeout=120` that legitimately
+spends most of that on lock contention and a slow reply is still LIVE with a
+lock now older than the bound. A second session capturing at that moment
+cannot tell that from a dead run's lock — it breaks a lock that is still
+somebody's and captures into the window that breaking opens, which is the
+exact collision this mechanism exists to remove, reached through a supported
+parameter with no error and no warning. Not fixed here: writing the holder's
+own deadline into the lock file, so the bound holds by construction instead
+of by an assumption on the round trip's length, is the next piece of work.
+
+**A stated residual: a capture that times out releases its lock while a PNG
+may still be on its way.** The lock is released in a `finally`, so when the
+wait for the reply runs out the release happens then — but the game has the
+request, the mod deletes a trigger before dispatching it, and Terraria may
+write the picture seconds later with the lock already gone. Another session
+can take the freed lock in that window and land in the same second after all.
+This is deliberate and it is the safe side of the trade: holding a lock until
+a reply that may never come would wedge captures for both sessions on every
+timed-out request, which is a certain outage traded against a rare collision.
+The stamp is written on that path too, so the next claimant still misses the
+second the timeout happened in — it just cannot know about a write that had
+not happened yet. This case is reached whenever the reply wait runs out,
+whatever timeout the caller gave — see [the shared-budget
+rule](#modcapturetrigger--the-request): `capture` spends that ONE timeout
+across the lock claim, the boundary wait, the trigger claim and the reply
+wait, so contention on the lock alone can consume most of even a generous
+timeout before the reply wait ever starts. Worked case: `ask("capture",
+timeout=60)` while another session holds the lock for 56s reaches the trigger
+claim with roughly 4s left; if the reply is not in by then, the `finally`
+still releases the lock while the game may still be about to write the PNG —
+this same case, from a caller who gave four times the timeout of the caller
+who got there in 4s flat. A LONGER timeout does not exempt a caller from this
+residual, and can make it worse: the lock stays claimed for longer while the
+extra time is spent on contention the caller cannot see. The timed-out caller
+is told nothing was confirmed, which is already true of any timeout here.
+
+Distinct from that, and not a residual: a capture whose budget is used up
+BEFORE anything is asked — by waiting for the lock, or by waiting out the
+previous capture's second — fails with the lock released and NOTHING on the
+trigger. There is no picture in flight in that case, and the error says so in
+those words.
 
 Whether the trigger should become a queue is a real question and a separate
 one. [What deliberately stays shared](#what-deliberately-stays-shared) argues
@@ -450,9 +546,11 @@ to delete, and `heartbeat` reports their age rather than treating their mere
 existence as "live", so a stale one reads as stale rather than as a phantom
 client.
 
-**The trigger is not one of them.** It is the sixth name, and the only one
-shared with the OTHER session rather than merely with a previous run of this
-one — so deleting it on the way in or out is the same overwrite the
+**The trigger is not one of them.** It is one of three names shared with the
+OTHER session rather than merely with a previous run of this one — the trigger,
+`<mod>-capture.lock` and `<mod>-capture.stamp`, all three excluded from the
+clear for that reason and the other two covered below. Deleting the trigger on
+the way in or out is the same overwrite the
 [claim rule](#modcapturetrigger--the-request) exists to prevent, committed by
 the housekeeping instead of by the write. `launch` and `stop` both used to do
 it unconditionally, which meant one developer starting a game destroyed the
@@ -472,3 +570,18 @@ Nothing validates that a target names a live client, so a typo — or a client
 that has not loaded a character, whose name is empty and matches no target —
 parks a request no client will ever take. A fresh `launch` from the session
 that addressed it clears it; deleting the file by hand always works.
+
+**`<mod>-capture.lock` and `<mod>-capture.stamp` are excluded the same way,
+for the trigger's reason.** Both are shared with the OTHER session rather than
+with a previous run of this one — the lock while a capture is in flight, the
+stamp for a short while after — so an unconditional launch-time delete would
+take the lock out from under a session capturing right now: the same lost
+update the trigger exclusion exists to prevent, arriving through a second
+file. A lock a DEAD run left behind is told from one a LIVE session holds by
+its AGE, which is the only signal that can make that call, and a launch makes
+it: after the two clears above, and for both sides, it breaks the capture lock
+if and only if it is older than `CAPTURE_LOCK_STALE`. Nothing else about a
+launch is allowed to touch either file.
+Neither file is ever written or read by the mod — both are held entirely
+between two of this harness's OWN sessions, to keep them from capturing in the
+same wall-clock second, before either one writes a trigger.

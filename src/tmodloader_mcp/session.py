@@ -15,6 +15,8 @@ exits immediately.
 
 from __future__ import annotations
 
+import contextlib
+import math
 import os
 import re
 import subprocess
@@ -140,17 +142,33 @@ SETTLE_POLL = 0.5
 #: this is the resolution at which "already gone" is noticed, not a settle.
 CLAIM_POLL = 0.1
 
+#: When a held capture lock stops being believable. A capture is bounded by
+#: the mod's own settle window - `SettleTicks = 900`, about 15s at 60fps -
+#: plus the round trip; the observed live capture took 1.2s. Four times the
+#: WORST case, not the observed one, because the observed one was lucky.
+CAPTURE_LOCK_STALE = 60.0
+
+#: The most a stamp may ever delay a capture. Crossing one second boundary is
+#: all the rule needs; anything longer means the stamp is wrong - a clock that
+#: ran ahead, a hand-edited file - and a wrong stamp must cost a moment, not
+#: an outage.
+STAMP_WAIT_MAX = 1.0
+
 
 class SessionError(RuntimeError):
     """The game could not be launched, reached, or shut down."""
 
 
-class TriggerBusy(RuntimeError):
-    """Another request is already pending at the trigger path.
+class SlotBusy(RuntimeError):
+    """Another request already holds the name being claimed.
 
-    Not an error the caller sees. `ask` catches it and waits, because a slot
-    held by a request the game is about to consume is a normal, sub-second
-    condition rather than a fault.
+    Not an error the caller sees. Both callers catch it and wait, because a
+    slot held by a request the game is about to consume is a normal,
+    sub-second condition rather than a fault.
+
+    Named for the SLOT rather than the trigger because there are two: the
+    trigger a request is written to, and the capture lock that keeps two
+    captures out of one wall-clock second.
     """
 
 
@@ -231,7 +249,7 @@ def _claim_atomically(path: Path, text: str) -> None:
         try:
             os.link(staged, path)
         except FileExistsError as taken:
-            raise TriggerBusy(str(path)) from taken
+            raise SlotBusy(str(path)) from taken
     finally:
         # `os.replace` consumed the staging name; `os.link` leaves it as a
         # second name for the same inode, so this is now the ordinary path
@@ -260,6 +278,93 @@ def _pending_payload(trigger: Path) -> str | None:
         return trigger.read_text(errors="replace")
     except OSError:
         return None
+
+
+def _will_capture(payload: str) -> bool:
+    """Whether this payload makes the game take a picture.
+
+    Asked of `parse` rather than of the string, because the answer is the
+    mod's and `parse` is this side's model of the mod's parser. Two rules
+    come free that a string comparison would get wrong: a bare payload IS a
+    capture (`DevResponder.cs:429` - the behaviour predates commands), and a
+    malformed one is not, since `DevCommands.Parse` maps what it cannot read
+    to Unknown and does nothing at all.
+    """
+    request = parse(payload)
+    return request is not None and request.command == "capture"
+
+
+def _break_stale_lock(lock: Path) -> float | None:
+    """Remove a capture lock no live capture could still be holding, and say
+    how old it was. `None` when nothing was broken.
+
+    A capture's duration is bounded, so age is a real signal here in a way it
+    is not for the trigger - and the two failure modes are not comparable.
+    Breaking this wrongly costs a collision, which is exactly what shipped in
+    0.3.0; breaking the trigger claim wrongly destroys a request somebody is
+    waiting on. Do not carry this over.
+
+    THE RETURN IS "DID THIS CALL REMOVE IT", not merely "was it stale". The
+    holder may release between the stat and the unlink - a race this function
+    WINS by doing nothing further - and that race's `FileNotFoundError` used
+    to be swallowed the same way a permission failure is, with the age handed
+    back regardless of which happened. That age now reaches a caller: Task 8
+    turns it into "a stale capture lock was broken to take this capture", and
+    in that interleaving nothing here broke anything - the holder finished on
+    its own. Saying so anyway would be a false claim about a judgement call
+    nobody made. So the unlink's own outcome decides the answer, not just the
+    stat that preceded it.
+    """
+    try:
+        age = time.time() - lock.stat().st_mtime
+    except OSError:
+        return None
+
+    if age <= CAPTURE_LOCK_STALE:
+        return None
+
+    try:
+        lock.unlink()
+    except OSError:
+        # Gone already (the race above), or some other removal failure - either
+        # way this call did not perform the break, so it does not get to claim
+        # one. `_claim_capture`'s retry is unaffected: the lock is not held
+        # either way, so retrying is correct on both branches of this except.
+        return None
+    return age
+
+
+def _write_stamp(stamp: Path, when: float) -> None:
+    """Record when a capture's reply arrived, for whoever captures next.
+
+    Best effort on purpose: a stamp that cannot be written costs a possible
+    collision, and raising here would cost a capture that already succeeded.
+    """
+    with contextlib.suppress(OSError):
+        stamp.write_text(f"{when:.6f}")
+
+
+def _stamp_wait(stamp: Path, *, now: float) -> float:
+    """How long to wait before capturing, so as not to land in the stamped
+    second.
+
+    `now` is passed in rather than read here so the boundary arithmetic can
+    be tested without sleeping through it.
+
+    ZERO IS THE DEFAULT ANSWER for everything doubtful - no stamp, an
+    unreadable one, one that does not parse, one whose second has passed.
+    This is an optimisation for a case that has to be observed to matter, and
+    it is never a reason to refuse or to stall.
+    """
+    try:
+        recorded = float(stamp.read_text(errors="replace").strip())
+    except (OSError, ValueError):
+        return 0.0
+
+    remaining = (math.floor(recorded) + 1) - now
+    if remaining <= 0:
+        return 0.0
+    return min(remaining, STAMP_WAIT_MAX)
 
 
 def _is_ours_to_clear(payload: str | None, *, player: str | None) -> bool:
@@ -513,7 +618,7 @@ class Session:
         while True:
             try:
                 _claim_atomically(trigger, payload)
-            except TriggerBusy:
+            except SlotBusy:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TriggerError(self._busy_message(trigger, timeout)) from None
@@ -523,6 +628,149 @@ class Session:
             if remaining < CLAIM_POLL:
                 raise TriggerError(self._claimed_out_of_time_message(trigger, timeout))
             return remaining
+
+    def _capture_busy_message(self, lock: Path, timeout: float) -> str:
+        try:
+            age = time.time() - lock.stat().st_mtime
+            contention = (
+                f"another session is capturing and holds {lock}, {age:.0f}s old"
+            )
+        except OSError:
+            # No lock to describe. Either the holder released between the loop
+            # giving up and this message being built, or this call had just
+            # broken a stale one - and naming a holder that is demonstrably not
+            # there is a guess of exactly the kind `_busy_message` refuses to
+            # make about the trigger.
+            contention = f"the capture lock at {lock} was contended for"
+
+        return (
+            f"{contention}, and the {timeout:g}s timeout ran out waiting for it. "
+            "Captures are serialised because Terraria names the file it writes "
+            "after the second it wrote it in, so two at once produce one picture "
+            "and two callers told it is theirs. Retry with a longer timeout."
+        )
+
+    def _capture_out_of_time_message(self, timeout: float, waited: float) -> str:
+        """Why a capture lock that WAS taken still has to fail.
+
+        Deliberately not `_claimed_out_of_time_message`. That one describes a
+        request the caller's own claim put on the trigger, which the game will
+        most likely still serve - so it says "the game may still answer it"
+        and leaves the file alone. Here nothing was ever asked: the budget
+        went on the lock and the previous capture's second, the trigger was
+        never written, and the lock is released on the way out. Reusing that
+        message would promise an answer to a request that does not exist.
+        """
+        boundary = (
+            f", {waited:.2f}s of it waiting out the previous capture's second"
+            if waited
+            else ""
+        )
+        return (
+            f"the {timeout:g}s timeout went on taking the capture lock{boundary}, "
+            "leaving nothing to ask the game with. NOTHING OF THIS REQUEST IS ON "
+            "DISK: no trigger was written, no picture was taken, and the capture "
+            "lock has been released. Retry with a longer timeout - a capture needs "
+            "one big enough for the lock, up to a second of boundary wait, and the "
+            "round trip after that."
+        )
+
+    def _claim_capture(
+        self, lock: Path, stamp: Path, *, timeout: float
+    ) -> tuple[float, str | None]:
+        """Take the capture lock, wait out the previous capture's second, and
+        return what is LEFT of `timeout` and a note for the caller.
+
+        TAKEN BEFORE THE TRIGGER, always, and that ordering is the whole
+        reason two locks are safe: a session waiting here is by construction
+        not holding the trigger, so whoever does hold the trigger always
+        finishes. Claiming them the other way round would let A hold the
+        trigger while waiting for the lock B holds while waiting for the
+        trigger.
+
+        The stamp wait happens HERE rather than in the caller because it must
+        happen under the lock - it is the previous holder's second being
+        waited out, and a second claimant arriving mid-wait would otherwise
+        skip it.
+
+        RAISES WHEN THE SURVIVING BUDGET IS BELOW `CLAIM_POLL`, the same rule
+        `_claim` applies to itself, because the remainder returned here is
+        what funds the trigger claim that comes next. This paragraph used to
+        argue the opposite - that a lock with no budget left "is released
+        moments later by `ask`'s `finally` and leaves nothing behind". Both
+        halves were false, and one session with a stamp and no contention at
+        all was enough to show it: `ask` sets `held` from this function's
+        RETURN, so a raise here reaches no `finally`; and a 0.0 remainder
+        leaves plenty behind, because `_claim(timeout=0.0)` writes the
+        request to the trigger and only THEN raises for having no time to
+        wait on it. The caller got an error, the game got the request anyway,
+        and the PNG was written with the lock already released - the
+        unserialised capture this whole function exists to prevent.
+
+        The stamp wait is charged AFTER the loop's last deadline check, which
+        is why the check has to be repeated here rather than trusted from up
+        there.
+
+        THE ASYMMETRY WITH `_claim` IS REAL AND IS ABOUT THE SLOT, not about
+        whether to raise. `_claim` leaves the trigger claimed on its way out,
+        because a request already on disk is one the game may still serve and
+        withdrawing it would be the lost update. This one unlinks the lock,
+        because nothing was asked: a lock held for a request that does not
+        exist blocks the other session for nothing.
+
+        THE NOTE IS EARNED, NOT INFERRED FROM `SlotBusy`. Only
+        `_break_stale_lock` returning an age means THIS call broke a lock; a
+        `SlotBusy` that resolves any other way - the lock was never stale, or
+        it vanished under a race `_break_stale_lock` recognises as somebody
+        else's release - retries silently, same as before Task 8.
+        """
+        broke: float | None = None
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                _claim_atomically(lock, str(os.getpid()))
+            except SlotBusy:
+                age = _break_stale_lock(lock)
+                if age is not None:
+                    broke = age
+                # EVERY cycle checks the deadline, including one that just
+                # broke a lock. The break used to `continue` straight past
+                # this: a lock somebody kept recreating stale would then loop
+                # here for as long as they kept doing it, with the caller's
+                # timeout never consulted again.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TriggerError(
+                        self._capture_busy_message(lock, timeout)
+                    ) from None
+                # No sleep after a break: that branch freed the name itself, so
+                # it retries at once rather than sleeping on a lock it knows is
+                # no longer there.
+                if age is None:
+                    time.sleep(min(CLAIM_POLL, remaining))
+                continue
+            break
+
+        wait = _stamp_wait(stamp, now=time.time())
+        if wait:
+            time.sleep(wait)
+
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining < CLAIM_POLL:
+            # Released HERE rather than by `ask`'s `finally`, which only runs
+            # for a lock this function RETURNED. Nothing was written to the
+            # trigger, so the caller gets one honest error instead of an error
+            # plus a capture nothing is serialising.
+            lock.unlink(missing_ok=True)
+            raise TriggerError(self._capture_out_of_time_message(timeout, wait))
+
+        note = (
+            f"a stale capture lock ({broke:.0f}s old, past the "
+            f"{CAPTURE_LOCK_STALE:g}s bound) was broken to take this capture"
+            if broke is not None
+            else None
+        )
+        return remaining, note
 
     def ask(
         self,
@@ -573,10 +821,45 @@ class Session:
         result = self.path(self._names(server, target).result, server=server)
 
         result.unlink(missing_ok=True)
-        remaining = self._claim(trigger, payload, timeout=timeout)
 
-        text = self._await_text(result, timeout=remaining, what=f"reply to {payload!r}")
-        return Reply(command=command, text=text.strip())
+        # SERIALISED, because Terraria names the file it writes after the
+        # second it wrote it in and nothing downstream can undo that. Two
+        # captures inside one second produce ONE picture and two callers each
+        # told it is theirs - watched happen, live, with two clients.
+        #
+        # The lock comes BEFORE the trigger claim and that order is load
+        # bearing: a session waiting here holds no trigger, so the trigger's
+        # holder always finishes.
+        # Client side only: `CaptureNow` refuses on a dedicated server, and a
+        # server-side lock would be a DIFFERENT file (`-server` suffixed) that
+        # serialises against nothing.
+        capturing = _will_capture(payload) and not server
+        lock = self.path(self.cfg.artifacts.capture_lock, server=server)
+        stamp = self.path(self.cfg.artifacts.capture_stamp, server=server)
+
+        # Set before the `try`: a non-capture request never claims the lock,
+        # so nothing downstream ever assigns this, and `Reply` still needs a
+        # value to pass.
+        note = None
+        held = False
+        try:
+            if capturing:
+                timeout, note = self._claim_capture(lock, stamp, timeout=timeout)
+                held = True
+
+            remaining = self._claim(trigger, payload, timeout=timeout)
+            text = self._await_text(
+                result, timeout=remaining, what=f"reply to {payload!r}"
+            )
+        finally:
+            if held:
+                # Stamped even on failure: Terraria may have written a PNG
+                # whether or not the reply arrived, and a second nobody
+                # recorded is a second the next capture will land in.
+                _write_stamp(stamp, time.time())
+                lock.unlink(missing_ok=True)
+
+        return Reply(command=command, text=text.strip(), note=note)
 
     def diag(
         self, *, server: bool = False, target: str | None = None, timeout: float = 60.0
@@ -760,7 +1043,12 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
     another developer's game was still polling for - the lost update this
     branch removed from the write path, reintroduced by the cleanup. See
     `_release_trigger`, which deletes it only where it holds a request this
-    session may take back.
+    session may take back. THE CAPTURE LOCK AND STAMP ARE EXCLUDED FOR THE
+    SAME REASON - both are shared with the other session, not owned by a
+    previous run of this one - plus one of their own: a lock left by a DEAD
+    run is told apart from one a LIVE run is holding by its age, not by a
+    launch's optimism, which is the only signal that can make that call (see
+    Task 4).
 
     Other players' files are left alone, deliberately: they are not this
     session's to delete. That holds because of WHO reads them next: the
@@ -773,21 +1061,34 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
     THIS launch was given, so another player's leftover is simply not one of
     the names it looks at, however fresh it is.
     """
+    shared = (
+        cfg.artifacts.trigger,
+        cfg.artifacts.capture_lock,
+        cfg.artifacts.capture_stamp,
+    )
+
     for name in cfg.artifacts.all:
-        if name == cfg.artifacts.trigger:
+        if name in shared:
             continue
         for server in (False, True):
             cfg.artifact(name, server=server).unlink(missing_ok=True)
 
     if player is not None:
         for name in artifacts_for(cfg.mod_name, player).all:
-            # The trigger is NOT per player, so this is the same shared name
+            # None of `shared` is per player, so this is the same shared names
             # again and the same exclusion applies. Skipped by name rather than
-            # by trusting that, because `Artifacts.trigger` deciding to carry a
-            # token one day must not silently reopen the hole.
-            if name == cfg.artifacts.trigger:
+            # by trusting that, because a member of `shared` deciding to carry
+            # a token one day must not silently reopen the hole.
+            if name in shared:
                 continue
             cfg.artifact(name, server=False).unlink(missing_ok=True)
+
+    # The lock is excluded from both loops above because it may belong to a
+    # LIVE session - but a launch is exactly when a lock left by a DEAD run
+    # should go, and age is the one signal that tells the two apart. Both
+    # sides, because either could be the one that crashed.
+    for server in (False, True):
+        _break_stale_lock(cfg.artifact(cfg.artifacts.capture_lock, server=server))
 
     _release_trigger(cfg, player=player)
 

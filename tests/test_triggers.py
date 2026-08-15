@@ -40,6 +40,19 @@ def test_every_artifact_the_class_names_is_one_the_launcher_clears():
     )
 
 
+def test_the_capture_lock_and_stamp_carry_no_player_token():
+    """Shared on purpose, exactly like the trigger.
+
+    A per-player lock would lock a session against itself and against nobody
+    else, which is the one arrangement that needs no lock at all.
+    """
+    mine = triggers.artifacts_for("biomancy", "n43n")
+    theirs = triggers.artifacts_for("biomancy", "tst2")
+
+    assert mine.capture_lock == theirs.capture_lock == "biomancy-capture.lock"
+    assert mine.capture_stamp == theirs.capture_stamp == "biomancy-capture.stamp"
+
+
 #: What a running Biomancy publishes, as `compose` now receives it.
 #:
 #: A FIXTURE rather than a constant this module believes in. It used to be
