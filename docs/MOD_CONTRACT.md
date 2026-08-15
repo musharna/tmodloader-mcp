@@ -474,28 +474,51 @@ second, capped at one second (`STAMP_WAIT_MAX`), before it captures. The cost
 of the boundary lands on the contender rather than on a session working
 alone, which pays nothing.
 
-A lock older than `CAPTURE_LOCK_STALE` (60s — four times the mod's own ~15s
-settle window) cannot belong to a live capture, so it is broken, and the
-caller is told via a `note` field on the reply, because breaking one is a
-judgement made from age alone and worth saying out loud. Breaking wrongly
-here costs only a collision, which is exactly 0.3.0's shipped behaviour — this
-does NOT carry over to the trigger claim, where breaking wrongly destroys a
-request somebody is waiting on. Client side only: the mod refuses `capture`
-on a dedicated server, so a server-side lock would serialise against nothing.
+**The lock says when its holder will be gone, and that is the bound.** It
+carries two lines — the holder's pid, then the wall-clock moment its whole
+`ask` runs out:
 
-**That claim assumes the round trip fits inside `CAPTURE_LOCK_STALE`, and
-nothing enforces it.** The lock's mtime is set once, at claim time, and is
-never refreshed while it is held — across the lock claim, the boundary wait,
-the trigger claim and the reply wait. `ask` defaults `timeout` to 60s, but a
-caller may pass more: a capture given, say, `timeout=120` that legitimately
-spends most of that on lock contention and a slow reply is still LIVE with a
-lock now older than the bound. A second session capturing at that moment
-cannot tell that from a dead run's lock — it breaks a lock that is still
-somebody's and captures into the window that breaking opens, which is the
-exact collision this mechanism exists to remove, reached through a supported
-parameter with no error and no warning. Not fixed here: writing the holder's
-own deadline into the lock file, so the bound holds by construction instead
-of by an assumption on the round trip's length, is the next piece of work.
+```
+17244
+1755230489.271833
+```
+
+Once that moment passes (plus `CAPTURE_LOCK_GRACE`, ~2s of slop for the
+holder's own release and for DrvFs timestamp granularity, which has never
+been measured here) the lock may be broken. The deadline is true by
+construction rather than by assumption: `ask` spends ONE budget across the
+lock claim, the boundary wait, the trigger claim and the reply wait, so a
+lock taken now cannot outlive now plus the caller's `timeout`.
+
+Wall clock rather than monotonic, deliberately — the reader is a different
+process, and the two other things anyone compares against this file, the
+stamp and the lock's own mtime, are already wall clock.
+
+`CAPTURE_LOCK_STALE` (60s — four times the mod's own ~15s settle window)
+survives as the fallback for a lock that says nothing readable: one written
+by an older version carrying a bare pid, one caught mid-write, one edited by
+hand. The parse never raises and never accepts `nan` or `inf` as a promise —
+a NaN compares false against everything and would silently disable the bound,
+and an infinity would protect the lock forever.
+
+**This replaced a bound that was a guess in both directions.** Until
+2026-08-15 the rule was age alone, so a capture given `timeout=120` — which
+the `trigger` tool's own advice about large worlds encourages — was still
+LIVE with a lock past 60s, and a second session broke it and captured into
+the very window the lock exists to keep clear, through a supported parameter
+with no error and no warning. The same guess ran the other way too: a dead
+capture whose caller asked for five seconds wedged the other session for a
+full minute.
+
+The caller is told via a `note` field on the reply, and the note NAMES WHICH
+BOUND FIRED, because the two are worth different amounts. A holder that
+recorded a deadline and blew through it is a fact about that session; a lock
+broken on age alone said nothing at all, and 60s is a guess about how long a
+capture can take. Breaking wrongly here costs only a collision, which is
+exactly 0.3.0's shipped behaviour — this does NOT carry over to the trigger
+claim, where breaking wrongly destroys a request somebody is waiting on.
+Client side only: the mod refuses `capture` on a dedicated server, so a
+server-side lock would serialise against nothing.
 
 **A stated residual: a capture that times out releases its lock while a PNG
 may still be on its way.** The lock is released in a `finally`, so when the
@@ -578,10 +601,10 @@ stamp for a short while after — so an unconditional launch-time delete would
 take the lock out from under a session capturing right now: the same lost
 update the trigger exclusion exists to prevent, arriving through a second
 file. A lock a DEAD run left behind is told from one a LIVE session holds by
-its AGE, which is the only signal that can make that call, and a launch makes
-it: after the two clears above, and for both sides, it breaks the capture lock
-if and only if it is older than `CAPTURE_LOCK_STALE`. Nothing else about a
-launch is allowed to touch either file.
+the deadline the holder wrote into it — falling back to age for a lock that
+recorded none — and a launch makes that call: after the two clears above, and
+for both sides, it breaks the capture lock if and only if that rule says the
+holder is gone. Nothing else about a launch is allowed to touch either file.
 Neither file is ever written or read by the mod — both are held entirely
 between two of this harness's OWN sessions, to keep them from capturing in the
 same wall-clock second, before either one writes a trigger.
