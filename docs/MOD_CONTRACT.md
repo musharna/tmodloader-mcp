@@ -501,6 +501,16 @@ hand. The parse never raises and never accepts `nan` or `inf` as a promise —
 a NaN compares false against everything and would silently disable the bound,
 and an infinity would protect the lock forever.
 
+**A deadline is believed for at most `CAPTURE_LOCK_MAX` (10 minutes) past the
+claim it belongs to**, which is the same guard `STAMP_WAIT_MAX` puts on the
+stamp and exists for the same reason. A lock claimed while the clock ran
+ahead records a budget nobody meant; honouring it literally would protect
+that lock for as long as the error lasted, wedging captures for BOTH sessions
+until somebody deleted a file by hand. That trades this mechanism's bounded
+failure — a collision — for an unbounded one, which is a bad trade at any
+odds. The ceiling is anchored to the lock's mtime rather than to the reader's
+clock, because an anchor that moves with the reader can always be outrun.
+
 **This replaced a bound that was a guess in both directions.** Until
 2026-08-15 the rule was age alone, so a capture given `timeout=120` — which
 the `trigger` tool's own advice about large worlds encourages — was still

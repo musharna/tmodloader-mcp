@@ -163,6 +163,17 @@ STAMP_WAIT_MAX = 1.0
 #: what the deadline itself is for.
 CAPTURE_LOCK_GRACE = 2.0
 
+#: The longest a holder's own recorded deadline is believed. Ten minutes is
+#: far past any capture anybody has run - the slowest observed was 8s under
+#: contention - and it is a BACKSTOP rather than the rule: without it a lock
+#: claimed while the clock was running ahead records a budget nobody meant,
+#: and nothing would ever break it. That trades this feature's bounded
+#: failure, a collision, for an unbounded one: captures wedged for both
+#: sessions until somebody deletes a file by hand. Capped for the same reason
+#: STAMP_WAIT_MAX is capped, and the reasoning there is worth reading twice -
+#: a wrong value in a shared file must cost a moment, not an outage.
+CAPTURE_LOCK_MAX = 600.0
+
 
 class SessionError(RuntimeError):
     """The game could not be launched, reached, or shut down."""
@@ -353,7 +364,19 @@ def _break_stale_lock(lock: Path) -> Broken | None:
     if deadline is None:
         expired = age > CAPTURE_LOCK_STALE
     else:
-        expired = time.time() > deadline + CAPTURE_LOCK_GRACE
+        # CAPPED AGAINST THE LOCK'S OWN AGE, for the reason STAMP_WAIT_MAX is
+        # capped. The comparison itself needs no cap - both deadlines are
+        # written by harness processes on one kernel, reading one clock. What
+        # needs one is a deadline that is simply WRONG: claimed while the
+        # clock ran ahead, or edited by hand. Uncapped, such a lock is
+        # protected for as long as the error lasts and captures wedge for both
+        # sessions until somebody deletes a file - trading this mechanism's
+        # bounded failure, a collision, for an unbounded one. The cap is
+        # anchored to the mtime rather than to now, because an anchor that
+        # moves with the reader can always be outrun.
+        expired = time.time() > (
+            min(deadline, lock.stat().st_mtime + CAPTURE_LOCK_MAX) + CAPTURE_LOCK_GRACE
+        )
 
     if not expired:
         return None

@@ -42,6 +42,15 @@ keeping, not because they broke a released API.
   `CAPTURE_LOCK_GRACE` (~2s) covers the holder's own release and DrvFs
   timestamp granularity; it is documented as slop, not as safety.
 
+  A deadline is believed for at most `CAPTURE_LOCK_MAX` (10 minutes) past the
+  claim it belongs to — the same guard `STAMP_WAIT_MAX` already puts on the
+  stamp. Without it, a lock claimed while the clock ran ahead records a budget
+  nobody meant and is protected for as long as the error lasts, wedging
+  captures for both sessions until somebody deletes a file: this mechanism's
+  bounded failure traded for an unbounded one. The ceiling is anchored to the
+  lock's mtime rather than to the reader's clock, since an anchor that moves
+  with the reader can always be outrun.
+
   The reply's `note` now names WHICH bound fired. "The last holder promised to
   be gone and was not" and "your picture waited on a guess" send a reader to
   different places, and the old wording claimed the first while often meaning
