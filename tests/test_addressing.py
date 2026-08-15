@@ -865,7 +865,8 @@ def test_a_lock_older_than_any_real_capture_is_broken(tmp_path):
 
     broke = session_mod._break_stale_lock(lock)
 
-    assert broke is not None and broke > session_mod.CAPTURE_LOCK_STALE
+    assert broke is not None and broke.age > session_mod.CAPTURE_LOCK_STALE
+    assert not broke.by_deadline, "an empty lock records no deadline to blame"
     assert not lock.exists()
 
     # POSITIVE CONTROL, same test: a fresh lock survives. Without this, an
@@ -878,6 +879,127 @@ def test_a_lock_older_than_any_real_capture_is_broken(tmp_path):
     # And an absent lock is not an error - the ordinary case.
     lock.unlink()
     assert session_mod._break_stale_lock(lock) is None
+
+
+def test_a_lock_inside_its_holders_own_deadline_survives_the_age_bound(tmp_path):
+    """A live capture must not be broken just for taking longer than 60s.
+
+    THIS IS THE DEFECT. `trigger`'s own docstring tells a caller to raise the
+    timeout for work on a large world, and doing so used to make their lock
+    breakable while they were still holding it - a second session would take
+    it and capture into the same second, which is the collision the lock
+    exists to prevent, reached through a supported parameter with no warning.
+
+    Seen failing before the fix: the lock was unlinked and `_break_stale_lock`
+    returned an age, because age was the only thing it looked at.
+    """
+    lock = tmp_path / "biomancy-capture.lock"
+    lock.write_text(session_mod._lock_payload(time.time() + 60))
+    old = time.time() - (session_mod.CAPTURE_LOCK_STALE + 30)
+    os.utime(lock, (old, old))
+
+    assert session_mod._break_stale_lock(lock) is None
+    assert lock.exists(), "a holder still inside its own deadline was broken"
+
+
+def test_a_lock_past_its_holders_deadline_goes_before_the_age_bound(tmp_path):
+    """The bound tightens as well as loosens, and that is the point.
+
+    A capture given a short timeout that dies used to wedge the other session
+    for a full minute regardless. The holder said when it would be gone; once
+    that moment passes there is nothing left to protect.
+
+    Seen failing before the fix: the lock survived, because 5 seconds is not
+    60 and nothing else was consulted.
+    """
+    lock = tmp_path / "biomancy-capture.lock"
+    lock.write_text(session_mod._lock_payload(time.time() - 10))
+    recent = time.time() - 5
+    os.utime(lock, (recent, recent))
+
+    broke = session_mod._break_stale_lock(lock)
+
+    assert broke is not None
+    assert not lock.exists()
+
+    # POSITIVE CONTROL, same test: a deadline still in the future survives at
+    # the same age, so this cannot pass by an implementation that stopped
+    # checking anything at all.
+    lock.write_text(session_mod._lock_payload(time.time() + 30))
+    os.utime(lock, (recent, recent))
+    assert session_mod._break_stale_lock(lock) is None
+    assert lock.exists()
+
+
+def test_the_grace_margin_is_honoured_either_side_of_the_deadline(tmp_path):
+    """A holder gets its `finally` finished before anybody takes the name.
+
+    The margin is slop rather than safety - see `CAPTURE_LOCK_GRACE` - so
+    what is pinned here is only that it exists in both directions: just past
+    the deadline is still protected, well past it is not.
+    """
+    lock = tmp_path / "biomancy-capture.lock"
+    ancient = time.time() - 3600
+
+    lock.write_text(session_mod._lock_payload(time.time() - 0.1))
+    os.utime(lock, (ancient, ancient))
+    assert session_mod._break_stale_lock(lock) is None, "inside the grace"
+
+    lock.write_text(
+        session_mod._lock_payload(time.time() - session_mod.CAPTURE_LOCK_GRACE - 1)
+    )
+    os.utime(lock, (ancient, ancient))
+    assert session_mod._break_stale_lock(lock) is not None, "past the grace"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "",
+        "17244",
+        "17244\n",
+        "17244\nnot-a-number",
+        "17244\nnan",
+        "17244\ninf",
+        "\udcff\udcfe",
+    ],
+    ids=[
+        "empty",
+        "pid-only",
+        "trailing-newline",
+        "garbage",
+        "nan",
+        "inf",
+        "undecodable",
+    ],
+)
+def test_a_deadline_nobody_can_read_falls_back_to_the_age_bound(tmp_path, content):
+    """Every way the content can be wrong lands on the OLD contract.
+
+    A lock written by an older version holds a bare pid; one caught mid-write
+    holds half a line; one edited by hand holds anything at all. `nan` and
+    `inf` are singled out because `float()` accepts both: a NaN compares false
+    against everything and would silently disable the bound, and an infinity
+    would protect the lock forever.
+
+    None of these may raise, and none may be treated as a promise - they mean
+    "this holder said nothing", which is exactly the situation
+    `CAPTURE_LOCK_STALE` was written for.
+    """
+    lock = tmp_path / "biomancy-capture.lock"
+    lock.write_bytes(content.encode("utf-8", "surrogateescape"))
+    old = time.time() - (session_mod.CAPTURE_LOCK_STALE + 5)
+    os.utime(lock, (old, old))
+
+    assert session_mod._break_stale_lock(lock) is not None
+    assert not lock.exists()
+
+    # POSITIVE CONTROL, same test: the same unreadable content on a FRESH
+    # lock survives. Without it, an implementation that unlinked whenever it
+    # failed to parse would pass everything above.
+    lock.write_bytes(content.encode("utf-8", "surrogateescape"))
+    assert session_mod._break_stale_lock(lock) is None
+    assert lock.exists()
 
 
 # ---- the capture stamp -----------------------------------------------------
@@ -1007,8 +1129,27 @@ def test_a_caller_whose_capture_broke_a_stale_lock_is_told(sess, cfg, monkeypatc
 
     reply = sess.ask("capture", timeout=5.0)
 
-    assert reply.note is not None and "stale" in reply.note.lower()
+    # The lock above holds "a dead session" - no deadline anybody can read -
+    # so the AGE bound is what decided it, and the note has to say so rather
+    # than imply the holder made and broke a promise.
+    assert reply.note is not None
+    assert "no deadline" in reply.note
+    assert f"{session_mod.CAPTURE_LOCK_STALE:g}s age bound" in reply.note
     assert reply.text == "PNG: C:\\x.png", "the note leaked into the reply body"
+
+    # THE OTHER BOUND, same test, because a note that always said the same
+    # thing would satisfy every assertion above. A holder that recorded a
+    # deadline and blew through it is a stronger claim, and it reads
+    # differently.
+    session_mod._claim_atomically(lock, session_mod._lock_payload(time.time() - 30))
+    stale = time.time() - (session_mod.CAPTURE_LOCK_STALE + 5)
+    os.utime(lock, (stale, stale))
+
+    deadline_note = sess.ask("capture", timeout=5.0).note
+
+    assert deadline_note is not None
+    assert "its holder's own deadline had passed" in deadline_note
+    assert "no deadline" not in deadline_note
 
     # POSITIVE CONTROL, same test: an ordinary capture carries no note, so
     # this cannot pass by every reply having grown one.
