@@ -484,8 +484,8 @@ carries two lines — the holder's pid, then the wall-clock moment its whole
 ```
 
 Once that moment passes (plus `CAPTURE_LOCK_GRACE`, ~2s of slop for the
-holder's own release and for DrvFs timestamp granularity, which has never
-been measured here) the lock may be broken. The deadline is true by
+holder's own release and for the offset between the two clocks involved) the
+lock may be broken. The deadline is true by
 construction rather than by assumption: `ask` spends ONE budget across the
 lock claim, the boundary wait, the trigger claim and the reply wait, so a
 lock taken now cannot outlive now plus the caller's `timeout`.

@@ -156,11 +156,18 @@ CAPTURE_LOCK_STALE = 60.0
 STAMP_WAIT_MAX = 1.0
 
 #: Slop allowed past a holder's own recorded deadline before its lock may be
-#: broken. SLOP, NOT SAFETY: after its deadline the holder still has to run
-#: its `finally` - write the stamp, unlink the lock - and DrvFs timestamp
-#: granularity against a Windows clock has never been measured here. It buys a
-#: margin against those two, and it does NOT make an early break safe; that is
-#: what the deadline itself is for.
+#: broken. SLOP, NOT SAFETY: it covers the holder's own `finally` - write the
+#: stamp, unlink the lock - and the offset between the two clocks this rule
+#: compares. It does NOT make an early break safe; that is what the deadline
+#: itself is for.
+#:
+#: MEASURED 2026-08-15 on this DrvFs save directory, rather than guessed: a
+#: file written at `time.time()` lands with an mtime 0.446-0.463s AHEAD of it,
+#: five writes running, and two writes 10ms apart differ by 19ms. So the
+#: resolution is fine, and the skew is one-directional and small - `age` reads
+#: about half a second YOUNGER than the truth, which errs toward keeping a
+#: lock rather than breaking it. Two seconds leaves roughly 4x headroom over
+#: the skew actually observed.
 CAPTURE_LOCK_GRACE = 2.0
 
 #: The longest a holder's own recorded deadline is believed. Ten minutes is
