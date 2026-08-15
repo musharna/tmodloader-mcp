@@ -424,6 +424,57 @@ def test_launch_leaves_a_pending_request_addressed_to_another_player_alone(tmp_p
     )
 
 
+def test_launch_leaves_the_capture_lock_and_stamp_alone(tmp_path):
+    """They are in `all` so the inventory guard still sees them, and skipped
+    where `all` gets deleted - the trigger's arrangement, for the trigger's
+    reason.
+
+    A launch that deleted the lock would take it from a session that is
+    capturing right now, which is the same lost update `_release_trigger`
+    exists to prevent, arriving by a third door. A lock left by a DEAD run is
+    distinguished by its age instead, not by a launch's optimism.
+    """
+    cfg = cfg_for(tmp_path)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+
+    lock.write_text("another session, capturing right now")
+    stamp.write_text("1000.0")
+
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+
+    assert lock.exists(), "a launch took the capture lock from a live session"
+    assert stamp.exists()
+
+    # POSITIVE CONTROL, same test: the cleanup still clears what it should,
+    # so this cannot pass by `_clear_stale_artifacts` having stopped working.
+    heartbeat = cfg.artifact(cfg.artifacts.heartbeat, server=False)
+    heartbeat.write_text("from a previous run")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+    assert not heartbeat.exists()
+
+
+def test_launch_breaks_a_capture_lock_left_by_a_dead_run(tmp_path):
+    """Task 2 stopped a launch deleting the lock unconditionally, which was
+    right and left the dead-run case unhandled. Age is what separates them.
+    """
+    cfg = cfg_for(tmp_path)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+
+    lock.write_text("from a run that died")
+    old = time.time() - (session_mod.CAPTURE_LOCK_STALE + 5)
+    os.utime(lock, (old, old))
+
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+    assert not lock.exists()
+
+    # POSITIVE CONTROL: a fresh lock still survives a launch, which is the
+    # invariant Task 2 established and this must not undo.
+    lock.write_text("another session, capturing right now")
+    session_mod._clear_stale_artifacts(cfg, player="n43n")
+    assert lock.exists()
+
+
 def test_a_pending_request_is_read_the_way_the_mod_reads_it(tmp_path):
     """The two sides must agree on what "unreadable" means, byte for byte.
 

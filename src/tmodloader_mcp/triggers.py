@@ -71,7 +71,15 @@ def player_token(name: str | None) -> str | None:
 
 @dataclass(frozen=True)
 class Artifacts:
-    """The five filenames this harness and the mod have to agree on.
+    """The eight filenames a session works with: six agreed with the mod, two
+    agreed only with another session.
+
+    `capture_lock` and `capture_stamp` are the two. The mod neither reads nor
+    writes either of them - they are held entirely between two of this
+    harness's own sessions, to keep them from capturing in the same wall-clock
+    second, and a mod author implementing this protocol implements the other
+    six. They live here anyway because they are named off the same prefix and
+    because `all` is what clears a save directory between runs.
 
     These were constants spelling `biomancy-`, which is how a tool for one mod
     stays a tool for one mod. They are DERIVED from the mod's internal name
@@ -107,6 +115,25 @@ class Artifacts:
         # finds it on its own next poll. Per-player triggers would delete the
         # one part of multi-client that already worked.
         return f"{self.prefix}-capture.trigger"
+
+    @property
+    def capture_lock(self) -> str:
+        # NOT per player, for the trigger's reason and one of its own: the
+        # thing being serialised is Terraria's choice of output filename,
+        # which is per SAVE DIRECTORY. A lock only one session can contend
+        # for would serialise nothing.
+        return f"{self.prefix}-capture.lock"
+
+    @property
+    def capture_stamp(self) -> str:
+        """When the last capture's reply arrived, so the next one can miss it.
+
+        Separate from the lock rather than written into it because it must
+        OUTLIVE the lock: the holder releases immediately and the waiting is
+        done by whoever comes next, which is what keeps a solo session from
+        paying for a contention that never happened.
+        """
+        return f"{self.prefix}-capture.stamp"
 
     @property
     def result(self) -> str:
@@ -145,6 +172,8 @@ class Artifacts:
         """
         return (
             self.trigger,
+            self.capture_lock,
+            self.capture_stamp,
             self.result,
             self.diag,
             self.heartbeat,
@@ -186,6 +215,13 @@ class Reply:
 
     command: str
     text: str
+
+    #: Something that happened on the way to this reply which the caller could
+    #: not otherwise learn - currently only "a stale capture lock was broken".
+    #: Deliberately NOT folded into `text`: `ok` and `refused` are decided by
+    #: what `text` starts with, so anything prepended there changes how the
+    #: game's own answer is read.
+    note: str | None = None
 
     @property
     def ok(self) -> bool:

@@ -126,6 +126,10 @@ class ReplyOut(TypedDict):
     ok: bool
     refused: bool
     text: str
+    # Always present, never omitted - see `StatusOut`'s docstring for why an
+    # optional key here would fail the round trip instead of merely being
+    # absent. Null on every reply but a capture that broke a stale lock.
+    note: str | None
 
 
 class DiagOut(TypedDict):
@@ -365,11 +369,22 @@ def trigger(
             commands are server-authoritative and refuse on a client, and each
             side publishes its own list.
         timeout: Seconds to wait for the game's reply. A command that does real
-            work on a large world can outlast the default.
+            work on a large world can outlast the default — but for `capture`
+            specifically, going past 60s (`CAPTURE_LOCK_STALE`) risks a second
+            session mistaking this call's still-held lock for a dead run's,
+            breaking it, and capturing into the same window; see
+            `docs/MOD_CONTRACT.md#two-clients-at-once`.
 
     `refused` is reported separately from `ok`: a refusal is the mod
     deliberately saying no, and treating it as success is how a rejected action
     reads as a completed one.
+
+    `note` is usually null and is the one field with no other way to reach you:
+    something that happened on the way to this reply which the reply itself
+    cannot show. Currently it says a stale capture lock was broken to take this
+    picture — captures are serialised across sessions sharing a save directory,
+    and a lock held past 60s is assumed to belong to a run that died. That is a
+    judgement made from age alone, so it is reported rather than done quietly.
     """
     if _session is None:
         raise RuntimeError("no session — call `launch` first")
@@ -378,7 +393,11 @@ def trigger(
         command, target=target, argument=argument, server=server, timeout=timeout
     )
     return ReplyOut(
-        command=reply.command, ok=reply.ok, refused=reply.refused, text=reply.text
+        command=reply.command,
+        ok=reply.ok,
+        refused=reply.refused,
+        text=reply.text,
+        note=reply.note,
     )
 
 

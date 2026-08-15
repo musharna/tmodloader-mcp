@@ -17,8 +17,11 @@ Removing the ambiguity is what broke it.
 
 from __future__ import annotations
 
+import math
 import multiprocessing
+import os
 import struct
+import time
 import zlib
 from pathlib import Path
 
@@ -73,7 +76,9 @@ def _publish(cfg: FakeCfg, *, server: bool = False) -> None:
     addressing.
     """
     cfg.artifact(cfg.artifacts.commands, server=server).write_text(
-        "diag\tnoarg\tstate dump\nshot\targ\tone region of the frame\n"
+        "diag\tnoarg\tstate dump\n"
+        "shot\targ\tone region of the frame\n"
+        "capture\tnoarg\tsave a screenshot\n"
     )
 
 
@@ -347,7 +352,7 @@ def test_a_claim_refuses_a_slot_that_is_already_taken(cfg):
     session_mod._claim_atomically(trigger, "diag@n43n")
     assert trigger.read_text() == "diag@n43n", "the free slot was not claimed"
 
-    with pytest.raises(session_mod.TriggerBusy):
+    with pytest.raises(session_mod.SlotBusy):
         session_mod._claim_atomically(trigger, "diag@tst2")
 
     assert trigger.read_text() == "diag@n43n", (
@@ -368,7 +373,7 @@ def test_a_claim_leaves_no_staging_file_behind(cfg):
     session_mod._claim_atomically(trigger, "diag@n43n")
     assert not list(cfg.root.glob("*.staging")), "staging file left after a claim"
 
-    with pytest.raises(session_mod.TriggerBusy):
+    with pytest.raises(session_mod.SlotBusy):
         session_mod._claim_atomically(trigger, "diag@tst2")
     assert not list(cfg.root.glob("*.staging")), "staging file left after a refusal"
 
@@ -645,7 +650,7 @@ def _claim_worker(trigger: str, payload: str, result_path: str) -> None:
 
     try:
         worker_session_mod._claim_atomically(Path(trigger), payload)
-    except worker_session_mod.TriggerBusy:
+    except worker_session_mod.SlotBusy:
         Path(result_path).write_text("busy")
     else:
         Path(result_path).write_text("ok")
@@ -660,7 +665,7 @@ def test_a_claim_under_real_process_contention_admits_exactly_one(tmp_path):
     `os.link` onto the same name, with the KERNEL - not this codebase -
     deciding which one wins. This runs several real OS processes against one
     trigger path and checks that exactly one wins and every other gets
-    `TriggerBusy`.
+    `SlotBusy`.
 
     `tmp_path` here is a real (if ordinary) filesystem, not the production
     save directory, which is DrvFs under WSL2 - `os.link`'s atomicity there
@@ -803,4 +808,473 @@ def test_launch_refuses_a_character_name_padded_with_whitespace(monkeypatch):
 
     assert "n43n " in str(refused.value), (
         f"refused without naming the character: {refused.value}"
+    )
+
+
+def test_what_counts_as_a_capture_is_asked_of_the_parser():
+    """The lock has to cover what the MOD will do, not what the caller typed.
+
+    `DevResponder.cs:429`: an unreadable or bare payload is "the historical
+    bare-trigger behaviour, a capture". Matching the literal string "capture"
+    would miss it. Matching the parser cannot.
+    """
+    assert session_mod._will_capture("capture")
+    assert session_mod._will_capture("capture@n43n")
+    assert session_mod._will_capture("  CAPTURE  ")  # trimmed and lowercased
+
+    # The bare payload. `compose` will not let this session EMIT one - every
+    # command is validated against the published set - so this is the
+    # predicate being right rather than a path being reachable. It is written
+    # down because the rule belongs to the mod, and the mod can be driven by
+    # something other than this harness.
+    assert session_mod._will_capture("")
+    assert session_mod._will_capture("   ")
+
+    # POSITIVE CONTROL: the predicate must also say NO, or a lock taken
+    # around every request would pass every assertion above while
+    # serialising the entire protocol.
+    assert not session_mod._will_capture("diag")
+    assert not session_mod._will_capture("shot:full@n43n")
+
+    # Malformed is not a capture: `DevCommands.Parse` maps what it cannot
+    # read to Unknown and does nothing, so nothing is written and nothing
+    # collides.
+    assert not session_mod._will_capture("capture@")
+    assert not session_mod._will_capture("@n43n")
+
+
+# ---- the capture lock's age -----------------------------------------------
+
+
+def test_a_lock_older_than_any_real_capture_is_broken(tmp_path):
+    """A crash mid-capture must not wedge captures for everybody.
+
+    Seen failing before the fix: the assertion below is that the stale lock
+    is GONE, and nothing removed it.
+
+    Breaking this lock wrongly costs a collision, which is the behaviour that
+    shipped in 0.3.0 - so the downside of being wrong here is bounded at "no
+    worse than before". That does NOT hold for the trigger claim, where
+    breaking wrongly destroys a request, and this rule must not be carried
+    over to it.
+    """
+    lock = tmp_path / "biomancy-capture.lock"
+    lock.write_text("")
+    old = time.time() - (session_mod.CAPTURE_LOCK_STALE + 5)
+    os.utime(lock, (old, old))
+
+    broke = session_mod._break_stale_lock(lock)
+
+    assert broke is not None and broke > session_mod.CAPTURE_LOCK_STALE
+    assert not lock.exists()
+
+    # POSITIVE CONTROL, same test: a fresh lock survives. Without this, an
+    # implementation that unlinked unconditionally would pass everything
+    # above while destroying every live capture on the machine.
+    lock.write_text("")
+    assert session_mod._break_stale_lock(lock) is None
+    assert lock.exists()
+
+    # And an absent lock is not an error - the ordinary case.
+    lock.unlink()
+    assert session_mod._break_stale_lock(lock) is None
+
+
+# ---- the capture stamp -----------------------------------------------------
+
+
+def test_the_stamp_pushes_the_next_capture_out_of_the_recorded_second(tmp_path):
+    """Serialising the requests is not enough on its own.
+
+    A completes at 18:12:01.05 and B writes at 18:12:01.95: they never
+    overlap and they still collide, because Terraria stamps the filename to
+    the second. The wait is what makes the second differ.
+    """
+    stamp = tmp_path / "biomancy-capture.stamp"
+    session_mod._write_stamp(stamp, 1000.25)
+
+    # Same second as the stamp: wait out what is left of it.
+    assert session_mod._stamp_wait(stamp, now=1000.25) == pytest.approx(0.75)
+    assert session_mod._stamp_wait(stamp, now=1000.90) == pytest.approx(0.10)
+
+    # POSITIVE CONTROL: a stamp whose second has already passed costs
+    # nothing. Without this a solo session would pay on every capture, which
+    # is the whole reason the wait was pushed onto the contender.
+    assert session_mod._stamp_wait(stamp, now=1001.0) == 0.0
+    assert session_mod._stamp_wait(stamp, now=9999.0) == 0.0
+
+
+def test_a_stamp_that_cannot_be_trusted_never_blocks_a_capture(tmp_path):
+    """The stamp is an optimisation, and an optimisation may not become an
+    outage.
+
+    A clock that ran ahead - or a file somebody edited - would otherwise park
+    every future capture for as long as the difference. One second is all
+    this wait can ever legitimately need, so one second is the cap.
+    """
+    stamp = tmp_path / "biomancy-capture.stamp"
+
+    assert session_mod._stamp_wait(stamp, now=1000.0) == 0.0  # absent
+
+    stamp.write_text("not a number")
+    assert session_mod._stamp_wait(stamp, now=1000.0) == 0.0
+
+    stamp.write_text("")
+    assert session_mod._stamp_wait(stamp, now=1000.0) == 0.0
+
+    # From the future, by a lot. Capped, not obeyed.
+    session_mod._write_stamp(stamp, 50_000.0)
+    assert session_mod._stamp_wait(stamp, now=1000.0) == session_mod.STAMP_WAIT_MAX
+
+    # POSITIVE CONTROL: a legitimate stamp still produces a real wait, so
+    # this cannot pass by the function having become "always zero".
+    session_mod._write_stamp(stamp, 1000.5)
+    assert session_mod._stamp_wait(stamp, now=1000.5) == pytest.approx(0.5)
+
+
+# ---- claiming the capture lock ---------------------------------------------
+
+
+def test_a_held_capture_lock_blocks_a_second_capture_until_it_is_released(sess, cfg):
+    """The claim waits rather than failing, exactly as the trigger claim does.
+
+    One behaviour to learn, and a capture round trip was 1.2s live - so a
+    waiting caller usually gets its picture instead of an error.
+    """
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+
+    session_mod._claim_atomically(lock, "held")
+
+    with pytest.raises(session_mod.TriggerError) as blocked:
+        sess._claim_capture(lock, stamp, timeout=0.3)
+
+    assert "another session" in str(blocked.value).lower()
+    assert lock.exists(), (
+        "a blocked claim removed the lock it lost - the holder is mid-capture "
+        "and just had its exclusivity taken away"
+    )
+
+    # POSITIVE CONTROL, same test: released, the same call succeeds. Without
+    # it, a `_claim_capture` that always raised would pass everything above.
+    lock.unlink()
+    remaining, note = sess._claim_capture(lock, stamp, timeout=5.0)
+    assert remaining > 0
+    assert note is None, "nothing was stale here - there is nothing to report"
+    assert lock.exists()
+
+
+def test_claiming_the_capture_lock_spends_the_callers_budget(sess, cfg):
+    """N seconds asked for is N seconds spent, not N to claim plus N to hear."""
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+
+    session_mod._write_stamp(stamp, time.time())
+    remaining, _note = sess._claim_capture(lock, stamp, timeout=5.0)
+
+    assert 0 < remaining < 5.0, (
+        "the claim handed back the full budget, so the boundary wait it just "
+        "slept through will be spent a second time by the reply"
+    )
+
+
+def test_a_caller_whose_capture_broke_a_stale_lock_is_told(sess, cfg, monkeypatch):
+    """Silence here would hand back a picture taken after clearing somebody
+    else's wreckage, with nothing to say a lock was ever broken.
+
+    That matters because breaking is a JUDGEMENT - the lock was assumed dead
+    from its age alone - and a judgement nobody records is one nobody can
+    check afterwards.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    session_mod._claim_atomically(lock, "a dead session")
+    old = time.time() - (session_mod.CAPTURE_LOCK_STALE + 5)
+    os.utime(lock, (old, old))
+
+    def answer(self, result, *, timeout, what):
+        # Stands in for the game reading and discarding the trigger it just
+        # answered - see `test_a_capture_holds_the_lock_and_a_diag_does_not`,
+        # which names why: nothing else in this fake environment ever does,
+        # and without it the second `ask` below finds the first request still
+        # on disk and times out claiming a slot that is, in reality, this
+        # session's own abandoned one.
+        trigger.unlink(missing_ok=True)
+        return "PNG: C:\\x.png"
+
+    monkeypatch.setattr(session_mod.Session, "_await_text", answer)
+
+    reply = sess.ask("capture", timeout=5.0)
+
+    assert reply.note is not None and "stale" in reply.note.lower()
+    assert reply.text == "PNG: C:\\x.png", "the note leaked into the reply body"
+
+    # POSITIVE CONTROL, same test: an ordinary capture carries no note, so
+    # this cannot pass by every reply having grown one.
+    lock.unlink(missing_ok=True)
+    assert sess.ask("capture", timeout=5.0).note is None
+
+    # SECOND POSITIVE CONTROL: a non-capture request never even reaches the
+    # code that could set a note - `note` is assigned only inside `ask`'s
+    # `if capturing:` branch - and until now nothing in the suite asserted
+    # that beyond inspection. Every other `.ask("diag", ...)` call in this
+    # file ignores `.note` entirely, so this is the one place it is pinned.
+    assert sess.ask("diag", timeout=5.0).note is None
+
+
+def test_a_lock_that_keeps_coming_back_stale_still_honours_the_deadline(
+    sess, cfg, monkeypatch
+):
+    """The break path used to `continue` straight past the deadline check.
+
+    A lock that keeps reappearing stale - a crashed run whose supervisor
+    restarts it, two harnesses breaking each other's - would then spin here
+    for as long as it kept happening, with the caller's timeout consulted on
+    no cycle at all. `_claim` checks on every cycle; this now does too.
+    """
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+    breaks = 0
+
+    def always_taken(path, text):
+        raise session_mod.SlotBusy(str(path))
+
+    def always_stale(path):
+        nonlocal breaks
+        breaks += 1
+        if breaks > 200:
+            # Nothing the fix needs - a bound, so the unfixed loop ends in a
+            # failure that names itself rather than hanging the suite. At the
+            # sleep below, 200 breaks is 2s against a 0.2s budget.
+            raise RuntimeError("the claim loop never looked at its deadline")
+        time.sleep(0.01)
+        return session_mod.CAPTURE_LOCK_STALE + 1
+
+    monkeypatch.setattr(session_mod, "_claim_atomically", always_taken)
+    monkeypatch.setattr(session_mod, "_break_stale_lock", always_stale)
+
+    started = time.monotonic()
+    with pytest.raises(session_mod.TriggerError) as gave_up:
+        sess._claim_capture(lock, stamp, timeout=0.2)
+    spent = time.monotonic() - started
+
+    assert breaks > 1, "the break path was never taken, so nothing was exercised"
+    assert spent < 1.0, f"a 0.2s budget spent {spent:.1f}s breaking locks"
+
+    # The lock is gone - this call broke it - so the message must not name a
+    # session holding it. That claim is the one `_busy_message` refuses to
+    # make about the trigger for the same reason.
+    assert "another session is capturing" not in str(gave_up.value)
+    assert "contended for" in str(gave_up.value)
+
+
+# ---- wiring: `ask` and the capture lock -------------------------------------
+
+
+def test_a_capture_holds_the_lock_and_a_diag_does_not(sess, cfg, monkeypatch):
+    """The lock covers captures, not the whole protocol.
+
+    Locking every request would serialise two sessions completely - which is
+    the thing 0.3.0 exists to have stopped.
+    """
+    _publish(cfg)  # `compose` validates against the published set
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+    seen = []
+
+    def watch(self, result, *, timeout, what):
+        # `self` here is bound to `sess`: this replaces a class attribute,
+        # not an instance one, and Python's descriptor protocol hands the
+        # instance to the first positional slot on every call through it.
+        seen.append(lock.exists())
+        # Stands in for the game reading and discarding the trigger it just
+        # answered - nothing else in this fake environment ever does, and
+        # without it the second `ask` finds the first request still on disk
+        # and times out claiming a slot that is, in reality, this session's
+        # own abandoned one.
+        trigger.unlink(missing_ok=True)
+        return "OK"
+
+    monkeypatch.setattr(session_mod.Session, "_await_text", watch)
+
+    sess.ask("capture", timeout=5.0)
+    sess.ask("diag", timeout=5.0)
+
+    assert seen == [True, False], (
+        f"lock held during [capture, diag] was {seen} - a capture must hold "
+        "it and a diag must not"
+    )
+
+
+def test_the_capture_lock_is_released_even_when_the_reply_never_comes(
+    sess, cfg, monkeypatch
+):
+    """A timeout must not wedge captures for both sessions.
+
+    Seen failing before the fix by removing the `finally`.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+
+    def never(self, result, *, timeout, what):
+        raise session_mod.TriggerError("no reply")
+
+    monkeypatch.setattr(session_mod.Session, "_await_text", never)
+
+    with pytest.raises(session_mod.TriggerError):
+        sess.ask("capture", timeout=1.0)
+
+    assert not lock.exists(), "a failed capture kept the lock"
+    assert stamp.exists(), (
+        "no stamp was written, so the next capture will not know to miss "
+        "this second - and Terraria may well have written a PNG regardless "
+        "of whether the reply arrived"
+    )
+
+
+def test_a_budget_eaten_by_the_boundary_wait_leaves_no_request_behind(
+    sess, cfg, monkeypatch
+):
+    """The boundary wait must not buy a capture nobody is serialising.
+
+    Reproduced with ONE session and no contention at all: a stamp from a
+    capture that just finished, then `ask("capture", timeout=0.4)`. The
+    boundary wait ate the whole budget, `_claim_capture` handed back a 0.0
+    remainder anyway, and `_claim(timeout=0.0)` wrote the request to the
+    trigger and only THEN raised for having no time to wait on it. The
+    `finally` released the capture lock with that request still sitting on
+    the trigger - and the mod deletes a trigger before dispatching it, so the
+    game goes on to serve it and Terraria writes a PNG WITH NO LOCK HELD.
+    Another session can take the freed lock, wait out a stamp written before
+    that PNG existed, and land in the same second: the exact collision this
+    branch exists to remove, reached through the branch's own mechanism.
+
+    The assertion that matters is the trigger one. A test that only checked
+    for a raise passed on the broken code, because the broken code raised.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    # A capture that finished at the top of this second, so the boundary wait
+    # is most of a second - more than the budget below.
+    session_mod._write_stamp(stamp, math.floor(time.time()))
+
+    with pytest.raises(session_mod.TriggerError) as spent:
+        sess.ask("capture", timeout=0.4)
+
+    assert not trigger.exists(), (
+        f"the trigger holds {trigger.read_text()!r} after a capture that "
+        "reported failure - the game will serve it with no capture lock held, "
+        "which is the unserialised capture this branch removed"
+    )
+    assert not lock.exists(), "the capture lock outlived the request it was taken for"
+
+    message = str(spent.value)
+    assert "NOTHING OF THIS REQUEST IS ON DISK" in message
+    assert "may still answer" not in message, (
+        "this borrowed `_claimed_out_of_time_message`, which promises the game "
+        "may still serve a request that was never written"
+    )
+
+    # POSITIVE CONTROL, same test: with a budget that outlasts the boundary
+    # wait the same call succeeds, so this cannot pass by every capture
+    # having become an error.
+    served = []
+
+    def answer(self, result, *, timeout, what):
+        served.append(trigger.read_text())
+        trigger.unlink(missing_ok=True)
+        return "PNG: C:\\x.png"
+
+    monkeypatch.setattr(session_mod.Session, "_await_text", answer)
+    session_mod._write_stamp(stamp, math.floor(time.time()))
+    reply = sess.ask("capture", timeout=5.0)
+
+    assert reply.text == "PNG: C:\\x.png"
+    assert served and "capture" in served[0]
+
+
+def test_a_session_waiting_for_the_capture_lock_holds_no_trigger(
+    sess, cfg, monkeypatch
+):
+    """The property that makes two locks safe, asserted rather than assumed.
+
+    If `ask` claimed the trigger first and the lock second, two captures
+    would deadlock: each holding what the other waits for.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    session_mod._claim_atomically(lock, "held by somebody else")
+
+    # Matched against `_capture_busy_message`'s own wording, not just
+    # `TriggerError` - any early refusal (an unpublished command, a bad
+    # target) raises the same exception type, and would let this test pass
+    # having never reached the lock at all. Pinning the message pins the
+    # test to the lock-contention path specifically.
+    with pytest.raises(session_mod.TriggerError, match="another session is capturing"):
+        sess.ask("capture", timeout=0.3)
+
+    assert not trigger.exists(), (
+        "a session blocked on the capture lock had already claimed the "
+        "trigger - two captures in this order deadlock"
+    )
+
+
+def _grab_capture_lock(save_dir, results, index):
+    """One OS process trying to hold the capture lock, reporting what it saw."""
+    from tmodloader_mcp import session as worker_session_mod
+
+    lock = Path(save_dir) / "biomancy-capture.lock"
+    try:
+        worker_session_mod._claim_atomically(lock, str(index))
+    except worker_session_mod.SlotBusy:
+        results.append(("blocked", index))
+        return
+
+    # Held. If exclusion is real, no other process is inside this window.
+    results.append(("held", index))
+    time.sleep(0.2)
+    lock.unlink(missing_ok=True)
+
+
+def test_eight_processes_contend_for_the_capture_lock_and_one_wins(tmp_path):
+    """Eight real processes, not eight threads.
+
+    The GIL can hide a race that two OS processes expose, and two OS
+    processes is exactly the arrangement this feature exists for.
+    """
+    procs = []
+    with multiprocessing.Manager() as manager:
+        results = manager.list()
+        try:
+            for i in range(8):
+                p = multiprocessing.Process(
+                    target=_grab_capture_lock, args=(str(tmp_path), results, i)
+                )
+                procs.append(p)
+            # Every one started before any is joined, or they serialise
+            # themselves and the test proves nothing.
+            for p in procs:
+                p.start()
+            for p in procs:
+                p.join(timeout=30)
+        finally:
+            for p in procs:
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=5)
+
+        outcomes = list(results)
+
+    held = [i for kind, i in outcomes if kind == "held"]
+    assert len(outcomes) == 8, f"a process died without reporting: {outcomes}"
+    assert len(held) == 1, (
+        f"{len(held)} processes held the capture lock at once ({held}) - "
+        "which is the collision this feature exists to prevent"
     )
