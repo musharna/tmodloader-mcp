@@ -11,6 +11,37 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Added
+
+- **`tests/live_capture_check.py` — the collision, reproduced and closed
+  against the real capture camera.** No test in `tests/` could reach this
+  defect: Terraria names the PNG after the second it started writing it,
+  before the mod is involved, so the collision only exists where Terraria
+  does. Everything else here drives fakes or bare files and passes just as
+  happily with the serialisation deleted.
+
+  It launches a server and client, joins a second client, and fires `capture`
+  from two separate OS processes through a barrier — processes rather than
+  threads, because the lock under test is a filesystem claim BETWEEN sessions
+  and two threads in one interpreter share state the real case does not.
+
+  A pass proves nothing by itself, which is why the file documents its own
+  negative control: point `PYTHONPATH` at a pre-fix checkout and run it again.
+  Measured 2026-08-14 against `b2041a3` (0.3.0, serialisation absent), 0/6
+  rounds passed — both callers named one file every time, and SIX PNGs existed
+  on disk for TWELVE requests. Half the pictures were not misattributed but
+  overwritten and lost. Serialised, on the same clients minutes apart: 3/3,
+  one file per request.
+
+  It also settled why a pre-fix run is FASTER (1.2s against 5-8s). The PNG's
+  name is stamped when the capture starts and the write finishes seconds later
+  — `Capture ... 23_43_59.png` landed at 23:44:06 — so before the fix the
+  loser's `CaptureFind` returned the winner's file the moment it appeared. The
+  slower serialised number is the honest one: it is a session waiting for a
+  picture that is actually its own. The stamp is therefore conservative by a
+  wider margin than its design assumed, recording a reply that arrives after
+  the write completes, long after the name was chosen.
+
 ### Fixed
 
 - **Two clients capturing in the same wall-clock second no longer collide.**
