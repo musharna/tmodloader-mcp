@@ -369,11 +369,11 @@ def trigger(
             commands are server-authoritative and refuse on a client, and each
             side publishes its own list.
         timeout: Seconds to wait for the game's reply. A command that does real
-            work on a large world can outlast the default — but for `capture`
-            specifically, going past 60s (`CAPTURE_LOCK_STALE`) risks a second
-            session mistaking this call's still-held lock for a dead run's,
-            breaking it, and capturing into the same window; see
-            `docs/MOD_CONTRACT.md#two-clients-at-once`.
+            work on a large world can outlast the default, and for `capture`
+            that is now safe at any value: the capture lock records the
+            deadline this argument implies, so another session waits it out
+            instead of guessing from the lock's age. Raising it no longer
+            trades a slow capture against a collision.
 
     `refused` is reported separately from `ok`: a refusal is the mod
     deliberately saying no, and treating it as success is how a rejected action
@@ -381,10 +381,12 @@ def trigger(
 
     `note` is usually null and is the one field with no other way to reach you:
     something that happened on the way to this reply which the reply itself
-    cannot show. Currently it says a stale capture lock was broken to take this
+    cannot show. Currently it says a capture lock was broken to take this
     picture — captures are serialised across sessions sharing a save directory,
-    and a lock held past 60s is assumed to belong to a run that died. That is a
-    judgement made from age alone, so it is reported rather than done quietly.
+    and this one's holder was judged gone. It names WHICH rule judged it: the
+    holder's own recorded deadline had passed, or the lock recorded no deadline
+    and the 60s age bound decided instead. The second is the weaker claim — a
+    guess about how long a capture can take — and worth knowing you are reading.
     """
     if _session is None:
         raise RuntimeError("no session — call `launch` first")

@@ -11,6 +11,55 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The capture lock's staleness bound is the holder's own deadline, not a
+  60-second guess.** Until now the only signal was the lock's mtime, and it
+  was wrong in both directions. A capture given `timeout=120` — which the
+  `trigger` tool's own advice about large worlds encourages — was still LIVE
+  with a lock past 60s, so a second session broke it and captured into the
+  very window the lock exists to keep clear: the collision this whole
+  mechanism removes, reached back through a supported parameter with no error
+  and no warning. The same guess ran the other way too, leaving a dead capture
+  whose caller asked for five seconds to wedge the other session for a full
+  minute.
+
+  The lock already carried content nobody read — a pid. It now carries the
+  holder's deadline on a second line, and that deadline is true BY
+  CONSTRUCTION rather than by assumption: `ask` spends one budget across the
+  lock claim, the boundary wait, the trigger claim and the reply wait, so a
+  lock taken now cannot outlive now plus the caller's `timeout`. Wall clock
+  rather than monotonic, because the reader is a different process and the two
+  other things compared against this file — the stamp and the mtime — are
+  already wall clock; one protocol file with two clocks in it is a trap for
+  whoever reads it next.
+
+  `CAPTURE_LOCK_STALE` survives as the fallback for a lock that says nothing
+  readable: an older version's bare pid, a write caught half-finished, a hand
+  edit. The parse never raises, and never accepts `nan` or `inf` as a promise
+  — a NaN compares false against everything and would silently disable the
+  bound, while an infinity would protect the lock forever. A new
+  `CAPTURE_LOCK_GRACE` (~2s) covers the holder's own release and DrvFs
+  timestamp granularity; it is documented as slop, not as safety.
+
+  A deadline is believed for at most `CAPTURE_LOCK_MAX` (10 minutes) past the
+  claim it belongs to — the same guard `STAMP_WAIT_MAX` already puts on the
+  stamp. Without it, a lock claimed while the clock ran ahead records a budget
+  nobody meant and is protected for as long as the error lasts, wedging
+  captures for both sessions until somebody deletes a file: this mechanism's
+  bounded failure traded for an unbounded one. The ceiling is anchored to the
+  lock's mtime rather than to the reader's clock, since an anchor that moves
+  with the reader can always be outrun.
+
+  The reply's `note` now names WHICH bound fired. "The last holder promised to
+  be gone and was not" and "your picture waited on a guess" send a reader to
+  different places, and the old wording claimed the first while often meaning
+  the second.
+
+  Unchanged and still stated: a capture whose reply times out releases its
+  lock while Terraria may still be writing the PNG. That residual is
+  independent of the bound.
+
 ### Added
 
 - **`tests/live_capture_check.py` — the collision, reproduced and closed
