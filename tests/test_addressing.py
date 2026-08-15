@@ -1419,3 +1419,73 @@ def test_eight_processes_contend_for_the_capture_lock_and_one_wins(tmp_path):
         f"{len(held)} processes held the capture lock at once ({held}) - "
         "which is the collision this feature exists to prevent"
     )
+
+
+def _hold_lock_with_deadline(save_dir, seconds_from_now, ready, done):
+    """Hold the capture lock in ANOTHER process, promising to be gone at a time.
+
+    Module-level for the same reason `_grab_capture_lock` is: a child process
+    has to be able to import the target.
+    """
+    from tmodloader_mcp import session as worker_session_mod
+
+    lock = Path(save_dir) / "biomancy-capture.lock"
+    worker_session_mod._claim_atomically(
+        lock, worker_session_mod._lock_payload(time.time() + seconds_from_now)
+    )
+    ready.set()
+    done.wait(timeout=30)
+    lock.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize(
+    ("seconds_from_now", "survives"),
+    [(300.0, True), (-300.0, False)],
+    ids=["deadline-ahead", "deadline-passed"],
+)
+def test_a_deadline_written_by_another_process_is_read_by_this_one(
+    tmp_path, seconds_from_now, survives
+):
+    """The deadline crosses a process boundary intact, both ways.
+
+    The unit tests above write the lock and read it back inside one
+    interpreter, which cannot fail on the things a real pair of sessions can:
+    text encoding, a write not yet flushed when the reader stats the file, a
+    payload format that only round-trips because one process built both ends.
+    Two sessions on one save directory is the entire case this lock exists
+    for, so the rule that decides whether to break it gets tested that way.
+
+    Both parameters run against a lock whose mtime is ANCIENT, so age alone
+    would break it every time - the age bound is the thing being overridden,
+    and a run where it still decided would pass the `deadline-passed` case
+    while failing `deadline-ahead`.
+    """
+    lock = tmp_path / "biomancy-capture.lock"
+    ready = multiprocessing.Event()
+    done = multiprocessing.Event()
+    holder = multiprocessing.Process(
+        target=_hold_lock_with_deadline,
+        args=(str(tmp_path), seconds_from_now, ready, done),
+    )
+    holder.start()
+    try:
+        assert ready.wait(timeout=30), "the holder never claimed the lock"
+
+        ancient = time.time() - (session_mod.CAPTURE_LOCK_STALE + 600)
+        os.utime(lock, (ancient, ancient))
+
+        broke = session_mod._break_stale_lock(lock)
+
+        if survives:
+            assert broke is None, "a holder still inside its deadline was broken"
+            assert lock.exists()
+        else:
+            assert broke is not None
+            assert broke.by_deadline, "age decided this, and the deadline should have"
+            assert not lock.exists()
+    finally:
+        done.set()
+        holder.join(timeout=30)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join(timeout=5)
