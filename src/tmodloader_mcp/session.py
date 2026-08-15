@@ -24,6 +24,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 from . import commands as commands_mod
 from . import inventory
@@ -153,6 +154,14 @@ CAPTURE_LOCK_STALE = 60.0
 #: ran ahead, a hand-edited file - and a wrong stamp must cost a moment, not
 #: an outage.
 STAMP_WAIT_MAX = 1.0
+
+#: Slop allowed past a holder's own recorded deadline before its lock may be
+#: broken. SLOP, NOT SAFETY: after its deadline the holder still has to run
+#: its `finally` - write the stamp, unlink the lock - and DrvFs timestamp
+#: granularity against a Windows clock has never been measured here. It buys a
+#: margin against those two, and it does NOT make an early break safe; that is
+#: what the deadline itself is for.
+CAPTURE_LOCK_GRACE = 2.0
 
 
 class SessionError(RuntimeError):
@@ -294,33 +303,59 @@ def _will_capture(payload: str) -> bool:
     return request is not None and request.command == "capture"
 
 
-def _break_stale_lock(lock: Path) -> float | None:
-    """Remove a capture lock no live capture could still be holding, and say
-    how old it was. `None` when nothing was broken.
+class Broken(NamedTuple):
+    """A lock this call removed: how old it was, and which rule said so."""
 
-    A capture's duration is bounded, so age is a real signal here in a way it
-    is not for the trigger - and the two failure modes are not comparable.
-    Breaking this wrongly costs a collision, which is exactly what shipped in
-    0.3.0; breaking the trigger claim wrongly destroys a request somebody is
-    waiting on. Do not carry this over.
+    age: float
+    #: True when the holder's own recorded deadline had passed. False when the
+    #: lock said nothing readable and `CAPTURE_LOCK_STALE` decided instead -
+    #: a materially weaker claim, and the caller tells them apart in the note
+    #: because "your picture waited on a guess" and "the last holder promised
+    #: to be gone and was not" send a reader to different places.
+    by_deadline: bool
+
+
+def _break_stale_lock(lock: Path) -> Broken | None:
+    """Remove a capture lock no live capture could still be holding, and say
+    how old it was and why. `None` when nothing was broken.
+
+    THE HOLDER'S OWN DEADLINE IS THE BOUND, and age is the fallback for a
+    holder that did not record one. Age alone was a guess in both directions:
+    it broke a live capture whose caller had legitimately asked for longer
+    than 60s - reachable straight from `trigger`'s own advice about large
+    worlds - and it made a dead capture with a five-second timeout wedge the
+    other session for a full minute. A deadline the holder wrote itself is
+    true by construction, because `ask` spends one budget across all three of
+    its waits and cannot outlive it.
+
+    Breaking wrongly costs a collision, which is exactly what shipped in
+    0.3.0; breaking the TRIGGER claim wrongly destroys a request somebody is
+    waiting on. That asymmetry is why this rule exists here and must not be
+    carried over there.
 
     THE RETURN IS "DID THIS CALL REMOVE IT", not merely "was it stale". The
     holder may release between the stat and the unlink - a race this function
     WINS by doing nothing further - and that race's `FileNotFoundError` used
     to be swallowed the same way a permission failure is, with the age handed
-    back regardless of which happened. That age now reaches a caller: Task 8
-    turns it into "a stale capture lock was broken to take this capture", and
-    in that interleaving nothing here broke anything - the holder finished on
-    its own. Saying so anyway would be a false claim about a judgement call
-    nobody made. So the unlink's own outcome decides the answer, not just the
-    stat that preceded it.
+    back regardless of which happened. That age reaches a caller as "a stale
+    capture lock was broken to take this capture", and in that interleaving
+    nothing here broke anything - the holder finished on its own. Saying so
+    anyway would be a false claim about a judgement call nobody made. So the
+    unlink's own outcome decides the answer, not just the stat that preceded
+    it.
     """
     try:
         age = time.time() - lock.stat().st_mtime
     except OSError:
         return None
 
-    if age <= CAPTURE_LOCK_STALE:
+    deadline = _lock_deadline(lock)
+    if deadline is None:
+        expired = age > CAPTURE_LOCK_STALE
+    else:
+        expired = time.time() > deadline + CAPTURE_LOCK_GRACE
+
+    if not expired:
         return None
 
     try:
@@ -331,7 +366,60 @@ def _break_stale_lock(lock: Path) -> float | None:
         # one. `_claim_capture`'s retry is unaffected: the lock is not held
         # either way, so retrying is correct on both branches of this except.
         return None
-    return age
+    return Broken(age=age, by_deadline=deadline is not None)
+
+
+def _lock_payload(deadline: float) -> str:
+    """What a capture lock holds: who took it, and when they promise to be gone.
+
+    The pid is a breadcrumb - nothing reads it, and a developer staring at a
+    wedged directory wants to know which process to look for. The deadline is
+    load-bearing: it is what lets the NEXT session decide whether this holder
+    can still be alive, instead of guessing from age.
+
+    WALL CLOCK, not `time.monotonic()`, and the reason is the reader. A
+    monotonic value means nothing to a process that did not start the clock,
+    and the two other things anyone compares against this file - the stamp and
+    the lock's own mtime - are already wall clock. One protocol file with two
+    clocks in it is a trap for whoever reads it next.
+    """
+    return f"{os.getpid()}\n{deadline:.6f}"
+
+
+def _lock_deadline(lock: Path) -> float | None:
+    """When the holder said it would be gone, or None if it did not say.
+
+    NEVER RAISES, for the same reason `_pending_payload` reads with
+    `errors="replace"`: this file is read by a process that did not write it,
+    and every way it can be wrong - absent, empty, truncated mid-write, hand
+    edited, written by an older version that stored only a pid - has to arrive
+    as "no deadline here" rather than as an exception on a path whose whole
+    job is deciding whether somebody else is alive.
+
+    A deadline that cannot be read is not an error, it is the OLD contract:
+    the caller falls back to `CAPTURE_LOCK_STALE`.
+    """
+    try:
+        lines = lock.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+
+    if len(lines) < 2:
+        return None
+
+    try:
+        deadline = float(lines[1])
+    except ValueError:
+        return None
+
+    # A NaN compares false against everything, so it would neither break a
+    # lock nor protect one - it would silently disable the bound. Infinity is
+    # worse: it protects the lock forever. Both are reachable from `float()`
+    # on text somebody wrote by hand, so neither counts as a deadline.
+    if not math.isfinite(deadline):
+        return None
+
+    return deadline
 
 
 def _write_stamp(stamp: Path, when: float) -> None:
@@ -724,15 +812,28 @@ class Session:
         it vanished under a race `_break_stale_lock` recognises as somebody
         else's release - retries silently, same as before Task 8.
         """
-        broke: float | None = None
+        broke: Broken | None = None
         deadline = time.monotonic() + timeout
+
+        # TWO CLOCKS, ON PURPOSE, and they measure different things. This
+        # one is monotonic because it bounds THIS call's own waiting, where a
+        # wall clock that steps sideways would hand out a wrong remainder.
+        # The one written into the lock is wall clock because another process
+        # reads it - see `_lock_payload`.
+        #
+        # It is `timeout` rather than the claim's share of it because the
+        # holder's whole `ask` is bounded by one budget: this function returns
+        # the remainder, `_claim` takes that, `_await_text` takes what is left.
+        # So a lock taken now cannot outlive now + timeout, which is exactly
+        # the promise the next session needs.
+        expiry = time.time() + timeout
         while True:
             try:
-                _claim_atomically(lock, str(os.getpid()))
+                _claim_atomically(lock, _lock_payload(expiry))
             except SlotBusy:
-                age = _break_stale_lock(lock)
-                if age is not None:
-                    broke = age
+                removed = _break_stale_lock(lock)
+                if removed is not None:
+                    broke = removed
                 # EVERY cycle checks the deadline, including one that just
                 # broke a lock. The break used to `continue` straight past
                 # this: a lock somebody kept recreating stale would then loop
@@ -746,7 +847,7 @@ class Session:
                 # No sleep after a break: that branch freed the name itself, so
                 # it retries at once rather than sleeping on a lock it knows is
                 # no longer there.
-                if age is None:
+                if removed is None:
                     time.sleep(min(CLAIM_POLL, remaining))
                 continue
             break
@@ -764,9 +865,21 @@ class Session:
             lock.unlink(missing_ok=True)
             raise TriggerError(self._capture_out_of_time_message(timeout, wait))
 
+        # THE NOTE NAMES WHICH BOUND FIRED, because the two are worth very
+        # different amounts to whoever reads it. A holder that recorded a
+        # deadline and blew through it is a fact about that session; a lock
+        # broken on age alone said nothing at all, and the 60s that decided it
+        # is a guess about how long a capture can take. A reader chasing a
+        # collision needs to know which of those they are looking at.
         note = (
-            f"a stale capture lock ({broke:.0f}s old, past the "
-            f"{CAPTURE_LOCK_STALE:g}s bound) was broken to take this capture"
+            (
+                f"a capture lock {broke.age:.0f}s old was broken to take this "
+                "capture: its holder's own deadline had passed"
+                if broke.by_deadline
+                else f"a capture lock {broke.age:.0f}s old was broken to take "
+                f"this capture: it recorded no deadline, so the "
+                f"{CAPTURE_LOCK_STALE:g}s age bound decided it"
+            )
             if broke is not None
             else None
         )
