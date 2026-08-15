@@ -937,19 +937,55 @@ def test_the_grace_margin_is_honoured_either_side_of_the_deadline(tmp_path):
     The margin is slop rather than safety - see `CAPTURE_LOCK_GRACE` - so
     what is pinned here is only that it exists in both directions: just past
     the deadline is still protected, well past it is not.
+
+    Each lock is aged CONSISTENTLY with the budget it records - mtime is the
+    claim, so a lock claiming a 60s budget is stamped 60s before its deadline.
+    An mtime unrelated to the deadline is an artifact no claim can produce,
+    and `CAPTURE_LOCK_MAX` rightly refuses to believe one.
     """
     lock = tmp_path / "biomancy-capture.lock"
-    ancient = time.time() - 3600
 
-    lock.write_text(session_mod._lock_payload(time.time() - 0.1))
-    os.utime(lock, (ancient, ancient))
+    def claimed_with(deadline: float, budget: float = 60.0) -> None:
+        lock.write_text(session_mod._lock_payload(deadline))
+        claim = deadline - budget
+        os.utime(lock, (claim, claim))
+
+    claimed_with(time.time() - 0.1)
     assert session_mod._break_stale_lock(lock) is None, "inside the grace"
 
-    lock.write_text(
-        session_mod._lock_payload(time.time() - session_mod.CAPTURE_LOCK_GRACE - 1)
-    )
-    os.utime(lock, (ancient, ancient))
+    claimed_with(time.time() - session_mod.CAPTURE_LOCK_GRACE - 1)
     assert session_mod._break_stale_lock(lock) is not None, "past the grace"
+
+
+def test_a_deadline_too_far_out_to_believe_is_capped(tmp_path):
+    """An impossible promise costs a bounded wait, not a permanent outage.
+
+    A lock claimed while the clock ran ahead - or edited by hand - records a
+    budget nobody meant. Honouring it literally would protect that lock for as
+    long as the error lasts, wedging captures for BOTH sessions until somebody
+    deletes a file: this mechanism's bounded failure, a collision, traded for
+    an unbounded one. `CAPTURE_LOCK_MAX` is the same guard `STAMP_WAIT_MAX`
+    puts on the stamp, for the same reason.
+    """
+    lock = tmp_path / "biomancy-capture.lock"
+    claim = time.time() - session_mod.CAPTURE_LOCK_MAX - 60
+
+    # A holder claiming a full day, from a claim older than the cap.
+    lock.write_text(session_mod._lock_payload(claim + 86_400))
+    os.utime(lock, (claim, claim))
+
+    assert session_mod._break_stale_lock(lock) is not None, (
+        "an uncapped deadline protects this lock for the next day"
+    )
+
+    # POSITIVE CONTROL, same test: the same absurd budget on a lock claimed
+    # JUST NOW is still protected, so the cap is a ceiling on how long a
+    # deadline is believed rather than a rule that discards big ones outright.
+    fresh = time.time()
+    lock.write_text(session_mod._lock_payload(fresh + 86_400))
+    os.utime(lock, (fresh, fresh))
+    assert session_mod._break_stale_lock(lock) is None
+    assert lock.exists()
 
 
 @pytest.mark.parametrize(
@@ -1455,10 +1491,12 @@ def test_a_deadline_written_by_another_process_is_read_by_this_one(
     Two sessions on one save directory is the entire case this lock exists
     for, so the rule that decides whether to break it gets tested that way.
 
-    Both parameters run against a lock whose mtime is ANCIENT, so age alone
-    would break it every time - the age bound is the thing being overridden,
-    and a run where it still decided would pass the `deadline-passed` case
-    while failing `deadline-ahead`.
+    Both parameters age the lock PAST `CAPTURE_LOCK_STALE`, so the old rule
+    would break it every time - that is the bound being overridden, and a run
+    where age still decided would pass `deadline-passed` while failing
+    `deadline-ahead`. It stays well inside `CAPTURE_LOCK_MAX`, because a claim
+    older than the cap is one the reader is entitled to disbelieve, and this
+    test is about the deadline rather than about the ceiling over it.
     """
     lock = tmp_path / "biomancy-capture.lock"
     ready = multiprocessing.Event()
@@ -1471,8 +1509,8 @@ def test_a_deadline_written_by_another_process_is_read_by_this_one(
     try:
         assert ready.wait(timeout=30), "the holder never claimed the lock"
 
-        ancient = time.time() - (session_mod.CAPTURE_LOCK_STALE + 600)
-        os.utime(lock, (ancient, ancient))
+        stale = time.time() - (session_mod.CAPTURE_LOCK_STALE + 30)
+        os.utime(lock, (stale, stale))
 
         broke = session_mod._break_stale_lock(lock)
 
