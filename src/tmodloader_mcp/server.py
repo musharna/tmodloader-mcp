@@ -157,6 +157,11 @@ class StatusOut(TypedDict):
     # mode, port and player of a session while staying silent about the only
     # field that says WHICH WORLD is loaded.
     world: str | None
+    # Characters brought in by `join`, in arrival order - NOT including
+    # `player`, which came up with `launch`. Empty rather than null when a
+    # session is running with nobody joined: "none yet" and "no session" are
+    # different answers and a caller acts on them differently.
+    joined: list[str] | None
     started_pids: list[int] | None
 
 
@@ -334,6 +339,57 @@ def launch(
         port=_session.port,
         player=_session.player,
         world=_session.world,
+        started_pids=sorted(_session.started),
+    )
+
+
+class JoinOut(TypedDict):
+    player: str
+    # Everyone joined so far, this call included, in arrival order. The
+    # session's own `player` is not in it - that client came up with `launch`.
+    joined: list[str]
+    started_pids: list[int]
+
+
+@mcp.tool(
+    title="Join a second client to the running session",
+    annotations=_MUTATES,
+    structured_output=True,
+)
+def join(player: str, timeout: float = 300.0) -> JoinOut:
+    """Bring another character into the session that is already running.
+
+    Args:
+        player: Character name. Must already exist — `-player` does not create
+            one — and must not be one this session already has, in any casing.
+        timeout: Seconds to wait for that client to report a live, world-ready
+            heartbeat of its own.
+
+    The protocol has supported several clients since answers became per-player;
+    the LIFECYCLE supported one, so the arrangement that work exists to make
+    safe could only be reached by spawning a game by hand. This is that, with
+    the waiting done properly.
+
+    It waits for THIS client, not for a process. A new pid says something
+    started — not that a character loaded, that the join was accepted, or that
+    a world is under it. And it watches only that player's own tokened
+    heartbeat: the unsuffixed `<mod>-hooks.txt` is a shared slot holding
+    whichever client booted last, so accepting it would return against the
+    heartbeat of the game that was already here.
+
+    Address the new client by name — `diag(target=...)`, `shot(target=...)` —
+    which already works, because addressing was never the half that was
+    missing. `stop` takes it down with everything else the session started.
+    """
+    global _session
+
+    if _session is None:
+        raise RuntimeError("no session — call `launch` first")
+
+    _session = session_mod.join(_cfg(), _session, player, timeout=timeout)
+    return JoinOut(
+        player=player,
+        joined=list(_session.joined),
         started_pids=sorted(_session.started),
     )
 
@@ -639,6 +695,7 @@ def status() -> StatusOut:
             port=None,
             player=None,
             world=None,
+            joined=None,
             started_pids=None,
         )
 
@@ -648,6 +705,7 @@ def status() -> StatusOut:
         port=_session.port,
         player=_session.player,
         world=_session.world,
+        joined=list(_session.joined),
         started_pids=sorted(_session.started),
     )
 

@@ -602,6 +602,15 @@ class Session:
     #: configured default for the world that was asked for.
     world: str | None = None
     started: set[int] = field(default_factory=set)
+    #: Characters brought in by `join`, in the order they arrived. NOT
+    #: including `player`, which is this session's own and came up with
+    #: `launch` - the two are different things to a reader, and folding them
+    #: together would lose which client the session was started for.
+    #:
+    #: Names rather than pids because a name is what a caller addresses. The
+    #: pids go into `started`, where `stop` already looks, so teardown needs
+    #: no knowledge of this at all.
+    joined: list[str] = field(default_factory=list)
 
     # ---- artifacts -------------------------------------------------------
 
@@ -1350,6 +1359,89 @@ class Session:
         )
 
 
+def _player_problem(player: str) -> str | None:
+    """Why this character name cannot be addressed, or None if it can.
+
+    EVERY request is addressed, so a name `parse` cannot read back intact
+    fails on every call rather than only on targeted ones. Asked once, where
+    the answer names the character, instead of arriving as a refusal on a
+    request the caller thought was simple.
+
+    WHAT THIS ACTUALLY CATCHES: whitespace, not `@` or `:`. `player` is only
+    ever placed in the TARGET position, the payload's terminal field - `parse`
+    takes everything after the first `@` as the target VERBATIM and never
+    re-splits it, so a name holding `@` or `:` reads back unchanged. Measured
+    against both this module's `parse` and the mod's own `DevCommands.Parse`
+    (responder/DevCommands.cs), which use the identical rule - a first
+    hypothesis for this guard checked those two characters directly and was
+    wrong, because neither one actually breaks anything. What `parse` DOES
+    change is whitespace: both sides trim the target, so a name with a leading
+    or trailing space - or one that is empty or whitespace-only - reads back
+    shorter than it was typed, or as no name at all. That is
+    indistinguishable from an ordinary name in a log or a config file, which
+    is exactly why it is worth catching once rather than as a silent mystery
+    on every request the session ever sends.
+
+    A FUNCTION RATHER THAN A BLOCK INSIDE `launch`, because `join` brings up a
+    client the same way and has to apply the same rule. Two copies of this
+    would be two rules, and the one that drifted would be the one nobody ran.
+    """
+    heard = parse(f"diag@{player}")
+    if heard is None or heard.target != player:
+        return (
+            f"the character name {player!r} is not the name a request will "
+            f"carry: a payload naming it reads back as {heard}, not as typed. "
+            "`parse` trims whitespace from the target, so a name padded with "
+            "spaces - or one that is empty or all whitespace - is addressed "
+            "shorter than it was typed, or to nobody at all, on every request "
+            "this session sends."
+        )
+    return None
+
+
+def _client_is_ready(cfg: Config, player: str) -> bool:
+    """Whether THIS player's client is up, live and in a world.
+
+    THE TOKENED NAME ONLY, and that is the whole reason this is separate from
+    the pair `_wait_ready` watches for the launch client. The unsuffixed
+    `<mod>-hooks.txt` is a SLOT, not a client: nothing deletes it when its
+    writer moves to a tokened name, every client that boots writes it again on
+    the way through the menu, and with two clients it holds ONE record
+    belonging to whoever started last - measured frozen at `polls: 1` and
+    still reading live 45 seconds after its writer had been in the world for a
+    minute.
+
+    `launch` accepts it anyway, correctly: its client may genuinely be sitting
+    at the menu with no character, and there is nothing else to watch. A JOIN
+    cannot, because by then there IS something else that writes that name -
+    the client already running - and accepting it would let the joining call
+    return against somebody else's stale menu record before the joining client
+    existed at all.
+
+    Sufficient as well as necessary: a join is always `-player <name>
+    -skipselect`, so its very first heartbeat is already the tokened one.
+    """
+    return _heartbeat_ready(
+        cfg.artifact(artifacts_for(cfg.mod_name, player).heartbeat, server=False)
+    )
+
+
+def _heartbeat_ready(path: Path) -> bool:
+    """Live AND in a world - the one definition of ready, used by both waits.
+
+    Both conditions, because they fail differently: a stale-but-ready
+    heartbeat means the process died after loading, and a fresh-but-not-ready
+    one means it is still loading. Checking only existence conflates them,
+    which is how a harness once sailed past three gates on a killed client's
+    file.
+
+    What `launch` and `join` disagree about is WHICH FILES to ask this of, not
+    what the answer means - so the predicate is shared and the candidate sets
+    are not.
+    """
+    return heartbeat_is_live(path) and world_is_ready(path.read_text(errors="replace"))
+
+
 def _clear_stale_artifacts(
     cfg: Config, *, player: str | None, port: int | None = None
 ) -> None:
@@ -1506,16 +1598,9 @@ def launch(
     # all. That is indistinguishable from an ordinary name in a log or a
     # config file, which is exactly why it is worth catching once here rather
     # than as a silent mystery on every request this session ever sends.
-    heard = parse(f"diag@{player}")
-    if heard is None or heard.target != player:
-        raise SessionError(
-            f"the character name {player!r} is not the name a request will "
-            f"carry: a payload naming it reads back as {heard}, not as typed. "
-            "`parse` trims whitespace from the target, so a name padded with "
-            "spaces - or one that is empty or all whitespace - is addressed "
-            "shorter than it was typed, or to nobody at all, on every request "
-            "this session sends."
-        )
+    problem = _player_problem(player)
+    if problem:
+        raise SessionError(problem)
 
     existing = _tml_pids(cfg)
     if existing:
@@ -1636,6 +1721,140 @@ def launch(
     return session
 
 
+def join(
+    cfg: Config, session: Session, player: str, *, timeout: float = 300.0
+) -> Session:
+    """Bring a SECOND client into a session that is already running.
+
+    The protocol has supported several clients since per-player naming - every
+    request carries an address and every answer carries a token - and the
+    LIFECYCLE supported exactly one. So the arrangement two whole releases
+    exist to make safe was, from this harness, unreachable: the only way to
+    get a second client was to spawn it by hand, which is what
+    `tests/live_capture_check.py` did.
+
+    Lifted from that function, with the three things it got away with in a
+    test and should not do here.
+
+    IT WAITS FOR A CLIENT, NOT FOR A PID. The lifted version watched for a new
+    tModLoader pid and called it done. A pid says a process started - not that
+    a character loaded, that the join was accepted, or that a world is under
+    it. `launch` holds its own client to a live, world-ready heartbeat and so
+    does this.
+
+    IT WATCHES THE TOKENED NAME ONLY - see `_client_is_ready`, which is where
+    that reasoning lives, because it is the difference between waiting for
+    this client and accepting the one that is already here.
+
+    IT REFUSES A DUPLICATE CHARACTER. Two clients under one name share a
+    player token, so their heartbeat, reply, diag and shot drop box are one
+    filename each - the exact collision per-player naming removed, reachable
+    again through the tool that adds clients. Terraria would also kick one of
+    them, but a kick arrives as a readiness timeout that names nothing.
+
+    THE PIDS GO INTO `session.started`, which is the whole of teardown: `stop`
+    kills exactly what a session started, so a client this harness spawned and
+    did not record is a game left running that nothing owns. `stop` needs no
+    knowledge of joining at all.
+    """
+    if session.mode != "server_client":
+        raise SessionError(
+            f"this session is {session.mode!r}, which has no server for a "
+            "client to join. Only `server_client` runs one."
+        )
+
+    problem = _player_problem(player)
+    if problem:
+        raise SessionError(problem)
+
+    # Case-insensitively, because the mod compares a target to its own name
+    # that way: `n43n` and `N43N` are one client to the game, and would be one
+    # client here too - answering each other's requests - while being two
+    # different player tokens and therefore two sets of files.
+    taken = [session.player, *session.joined]
+    if any(player.casefold() == name.casefold() for name in taken):
+        raise SessionError(
+            f"{player!r} is already in this session (it has {taken}). Two "
+            "clients under one character name share a player token, so their "
+            "heartbeat, reply, diag and shot would each be one file between "
+            "them - and the game will kick one of them besides."
+        )
+
+    before = _tml_pids(cfg)
+    client_cmd = [
+        str(cfg.dotnet),
+        "tModLoader.dll",
+        "-join",
+        "127.0.0.1",
+        "-port",
+        str(session.port),
+        "-player",
+        player,
+        "-skipselect",
+    ]
+
+    # SAME OWNERSHIP RULE `launch` HAS, and for the same reason: whoever spawns
+    # owns the process until it can hand it back. A client that starts and
+    # never becomes ready would otherwise stay up held by nobody, because this
+    # function never returned and the session never learned its pid.
+    try:
+        subprocess.Popen(
+            client_cmd,
+            cwd=str(cfg.tml_dir),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if _client_is_ready(cfg, player):
+                break
+            time.sleep(2)
+        else:
+            raise SessionError(
+                f"{player!r} did not report a live, world-ready heartbeat "
+                f"within {timeout:.0f}s at "
+                f"{cfg.artifact(artifacts_for(cfg.mod_name, player).heartbeat, server=False).name}. "
+                "The client requires Steam to be running and logged in; after "
+                "that, suspect the join rather than the client's startup - a "
+                "wrong port, a refused connection, or a character name the "
+                "server rejected."
+            )
+    except BaseException as failure:
+        # Through `stop`, not a second kill path: it is the one place that
+        # issues taskkill, waits out the settle and CHECKS for survivors, and
+        # a hand-rolled kill here would be a quieter version of it that agrees
+        # today. Aimed at a throwaway session holding only what THIS call
+        # started, so a failed join cannot take down the client that was
+        # already running.
+        stranded = _tml_pids(cfg) - before
+        if stranded:
+            try:
+                stop(
+                    cfg,
+                    Session(
+                        cfg=cfg,
+                        mode=session.mode,
+                        port=session.port,
+                        player=player,
+                        world=session.world,
+                        started=stranded,
+                    ),
+                )
+            except SessionError as leak:
+                # Attached, not raised over - same rule `launch` follows. Why
+                # the join failed is what the caller acts on; that a process
+                # also survived cleanup is something they need told, not
+                # something that should replace it.
+                failure.add_note(str(leak))
+        raise
+
+    session.started |= _tml_pids(cfg) - before
+    session.joined.append(player)
+    return session
+
+
 def _wait_ready(
     cfg: Config, *, mode: str, player: str, timeout: float, port: int | None = None
 ) -> None:
@@ -1694,10 +1913,7 @@ def _wait_ready(
         ]
 
     def _any_ready(paths: list[Path]) -> bool:
-        return any(
-            heartbeat_is_live(p) and world_is_ready(p.read_text(errors="replace"))
-            for p in paths
-        )
+        return any(_heartbeat_ready(p) for p in paths)
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
