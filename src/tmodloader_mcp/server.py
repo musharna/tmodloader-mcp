@@ -461,7 +461,9 @@ def diag(
     Args:
         server: Read the dedicated server's view instead of the client's.
         target: Address a specific client by name.
-        timeout: Seconds to wait for the dump. A large world takes longer.
+        timeout: Seconds for the WHOLE call — the reply and then the dump it
+            promises, out of one budget rather than one each. A large world
+            takes longer.
 
     Returns counters as integers and the mod's absence markers as null, so a
     reading of 0 — a real measurement — cannot be confused with "no data".
@@ -501,7 +503,8 @@ def shot(region: str, target: str | None = None, timeout: float = 60.0) -> ShotO
             character name, world name and any chat, so a request says which
             corner it wants.
         target: Address a specific client.
-        timeout: Seconds to wait for the reply and the PNG.
+        timeout: Seconds for the WHOLE call — the reply and then the PNG,
+            out of one budget rather than one each.
 
     This reads what the game rendered, not the screen, so no other window can
     appear in it — by construction rather than by luck. It also sees things the
