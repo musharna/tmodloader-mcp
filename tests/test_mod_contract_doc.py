@@ -14,7 +14,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from tmodloader_mcp.triggers import artifacts_for, player_token
+from tmodloader_mcp import config
+from tmodloader_mcp.triggers import (
+    artifacts_for,
+    artifacts_for_server,
+    player_token,
+)
 
 DOC = Path(__file__).resolve().parent.parent / "docs" / "MOD_CONTRACT.md"
 
@@ -28,6 +33,15 @@ PLACEHOLDER = "<mod>"
 #: PLACEHOLDER stands in for a real mod name. A literal hash is one player's
 #: fact, not the protocol's — the document names the SHAPE.
 TOKEN_PLACEHOLDER = "<token>"
+
+#: What the document writes where a real port would go, the same way
+#: TOKEN_PLACEHOLDER stands in for a real player token.
+PORT_PLACEHOLDER = "<N>"
+
+#: The port whose address this test computes from the real `server_address`,
+#: then substitutes back out for PORT_PLACEHOLDER. Any port would do; this one
+#: is `launch`'s own default.
+_PROBE_PORT = 7810
 
 #: A name whose token this test computes from the real `player_token`, then
 #: substitutes back out for TOKEN_PLACEHOLDER below. Any non-empty name would
@@ -84,6 +98,47 @@ def _expected() -> set[str]:
     return shared | per_player
 
 
+#: A Config that exists only to lend this test its REAL `-server` sider.
+#: Transcribing that rule here instead is what the whole file exists to avoid:
+#: a second copy of a naming rule is a second naming rule.
+_SIDER = config.load({"TMODLOADER_MOD_NAME": "mod"})
+
+
+def _sided(name: str) -> str:
+    return _SIDER.artifact(name, server=True).name
+
+
+def _legitimate() -> set[str]:
+    """`_expected()`, plus every SIDED spelling of it.
+
+    Not folded into `_expected()`, and the asymmetry is the point. Every
+    unsided name is a file some responder must write, so its absence from the
+    document is a gap worth failing on. A sided one is the same artifact seen
+    from the server, and the document names the handful that are worth
+    discussing rather than all sixteen — requiring each would turn a
+    specification into an inventory. So sided names are LEGITIMATE to mention
+    and not REQUIRED to be mentioned, and only the invention check reads this.
+
+    The server's per-port forms come from `artifacts_for_server`, so they are
+    derived here the same way the per-player ones are: the probe port's real
+    computed address subbed back out for the placeholder.
+    """
+    per_port = {
+        name.replace(f"port{_PROBE_PORT}", f"port{PORT_PLACEHOLDER}").replace(
+            "mod-", f"{PLACEHOLDER}-", 1
+        )
+        for name in artifacts_for_server("mod", _PROBE_PORT).all
+    }
+
+    unsided = _expected() | per_port
+    return unsided | {
+        _sided(name.replace(PLACEHOLDER, "mod", 1)).replace(
+            "mod-", f"{PLACEHOLDER}-", 1
+        )
+        for name in unsided
+    }
+
+
 def test_the_contract_document_exists():
     assert DOC.is_file(), "the mod-side contract is documented nowhere"
 
@@ -126,5 +181,5 @@ def test_the_document_does_not_describe_files_that_do_not_exist():
     # nothing at all. This is the assertion that catches a broken regex.
     assert mentioned, "no artifact names found in the document - the scan broke"
 
-    invented = sorted(mentioned - _expected())
+    invented = sorted(mentioned - _legitimate())
     assert not invented, f"the document describes files nothing writes: {invented}"

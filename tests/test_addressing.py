@@ -27,9 +27,15 @@ from pathlib import Path
 
 import pytest
 
+from tmodloader_mcp import heartbeat
 from tmodloader_mcp import session as session_mod
 from tmodloader_mcp.session import Session
-from tmodloader_mcp.triggers import Reply, TriggerError, artifacts_for
+from tmodloader_mcp.triggers import (
+    Reply,
+    TriggerError,
+    artifacts_for,
+    artifacts_for_server,
+)
 
 #: The session's own player, and somebody else entirely. Both are real names
 #: run through the real token rule rather than hand-spelled filenames, so these
@@ -189,17 +195,67 @@ def test_a_reply_to_an_unaddressed_request_still_comes_to_this_session(
 
 
 def test_a_server_reply_is_never_looked_for_under_a_player(sess, cfg, monkeypatch):
-    """The dedicated server has no player, and handing it a token would name a
-    file nothing writes. `target` must not change that: the server side stays
-    unsuffixed however the request was addressed."""
+    """The dedicated server has no player, so a PLAYER token must never name
+    one of its files - it would be a path nothing writes.
+
+    It does have an address, and its answers carry that; what stays true is
+    that `target` cannot change which files a server side reads. This test
+    used to assert the server was unsuffixed FULL STOP, which was the right
+    assertion while a server had nothing to be named by."""
     _publish(cfg, server=True)
     _replies_when_triggered(
-        monkeypatch, cfg.artifact(cfg.artifacts.result, server=True), "server says"
+        monkeypatch,
+        cfg.artifact(artifacts_for_server(cfg.mod_name, sess.port).result, server=True),
+        "server says",
     )
 
     assert (
         sess.ask("diag", server=True, target=OTHER, timeout=1.0).text == "server says"
     )
+
+
+def test_two_servers_on_one_save_directory_do_not_share_an_answer_file(cfg):
+    """THE OTHER HALF OF THE FIX, and the half that looks fixed without being.
+
+    Addressing alone routes correctly and still loses the answer: server A
+    serves the request addressed to A, then writes its reply into the very
+    file B is also writing, and B's harness reads A's. That is the collision
+    per-player naming removed for clients, surviving behind a routing fix.
+
+    Asserted as a property of the names rather than by running two servers,
+    for the reason the staging-file test gives: a race reproduces sometimes,
+    and a test that fails sometimes is not a test.
+    """
+    a = Session(cfg=cfg, mode="server_client", port=7810, player=SELF)
+    b = Session(cfg=cfg, mode="server_client", port=7811, player=OTHER)
+
+    for name in ("result", "diag", "heartbeat"):
+        mine = a.path(getattr(a._names(server=True), name), server=True)
+        theirs = b.path(getattr(b._names(server=True), name), server=True)
+        assert mine != theirs, (
+            f"both servers write their {name} to {mine.name} - whichever writes "
+            "last, both harnesses read"
+        )
+
+    # POSITIVE CONTROL, same test: the trigger and the command list are SHARED
+    # on purpose and must NOT have separated. A per-server trigger would make
+    # addressing meaningless, because neither server would be polling the name
+    # a request actually landed under.
+    for name in ("trigger", "commands", "capture_lock", "capture_stamp"):
+        assert a.path(getattr(a._names(server=True), name), server=True) == b.path(
+            getattr(b._names(server=True), name), server=True
+        ), f"{name} went per-server, and it is the one thing that must not"
+
+
+def test_a_server_with_no_port_writes_exactly_what_it_always_did(cfg):
+    """Degradation, not breakage. A session with no port to name a server by
+    falls back to the unsuffixed names - the old ambiguity, which two sessions
+    survived before this existed, rather than a new set of filenames nothing
+    on the mod side writes."""
+    nameless = Session(cfg=cfg, mode="server_client", port=None, player=SELF)
+
+    assert nameless._names(server=True).result == cfg.artifacts.result
+    assert nameless._names(server=True).heartbeat == cfg.artifacts.heartbeat
 
 
 # ---- site 2: diag(), the dump file --------------------------------------
@@ -861,15 +917,52 @@ def test_an_unaddressed_request_is_addressed_to_this_sessions_player(
     assert seen == [f"diag@{SELF}"], f"composed {seen}, not an addressed payload"
 
 
-def test_the_server_side_is_never_addressed(sess, cfg, monkeypatch):
-    """POSITIVE CONTROL, and a real hazard.
+def test_the_server_side_is_addressed_by_its_port(sess, cfg, monkeypatch):
+    """THE DEFECT, at the site that produced it.
 
-    A dedicated server has no local player, so `IsFor` returns FALSE for any
-    non-empty target - addressing it would mean it never answers anything
-    again. It also writes a `-server` suffixed trigger, so it was never
-    contended and has nothing to gain here.
+    This test used to assert the opposite - that a server request goes out
+    UNADDRESSED - on the grounds that a dedicated server has no local player,
+    so `IsFor` returns false for any non-empty target and addressing it would
+    silence it for good. That was a true statement about the mod and the wrong
+    conclusion drawn from it: what followed was that two sessions each driving
+    their own server out of one save directory wrote indistinguishable
+    requests to one server-side trigger. The request went to whichever polled
+    first, and either session's `launch` or `stop` could destroy the other's
+    in flight. `DevArtifacts.ServerAddress` gives a server something to match,
+    so the conclusion no longer follows.
     """
     _publish(cfg, server=True)
+    seen: list[str] = []
+    real = session_mod._claim_atomically
+
+    def spy(path, text):
+        seen.append(text)
+        return real(path, text)
+
+    monkeypatch.setattr(session_mod, "_claim_atomically", spy)
+    _replies_when_triggered(
+        monkeypatch,
+        cfg.artifact(artifacts_for_server(cfg.mod_name, sess.port).result, server=True),
+        "server says",
+    )
+
+    sess.ask("diag", server=True, timeout=1.0)
+
+    assert seen == [f"diag@port{sess.port}"], (
+        f"composed {seen}, which the other server cannot tell from its own"
+    )
+
+
+def test_a_server_with_no_port_falls_back_to_an_unaddressed_request(cfg, monkeypatch):
+    """POSITIVE CONTROL for the address, and the degradation rule.
+
+    A session with no port has nothing to name its server by, and must write
+    the untargeted request it always did rather than inventing an address.
+    That is the OLD ambiguity - survivable, and what every server did before
+    this - where a made-up address would be two servers claiming to be one.
+    """
+    _publish(cfg, server=True)
+    nameless = Session(cfg=cfg, mode="server_client", port=None, player=SELF)
     seen: list[str] = []
     real = session_mod._claim_atomically
 
@@ -882,9 +975,162 @@ def test_the_server_side_is_never_addressed(sess, cfg, monkeypatch):
         monkeypatch, cfg.artifact(cfg.artifacts.result, server=True), "server says"
     )
 
-    sess.ask("diag", server=True, timeout=1.0)
+    nameless.ask("diag", server=True, timeout=1.0)
 
-    assert seen == ["diag"], f"the server was addressed: {seen}"
+    assert seen == ["diag"]
+
+
+#: The address vectors, spelled here as literals rather than computed. The mod
+#: asserts the identical strings in `DevArtifactsTests.ThePortIsTheAddress`,
+#: and there is no shared code between the two languages - nothing at runtime
+#: would notice them drifting apart, because each side would compose its own
+#: spelling and simply never meet. Same arrangement `PlayerTokenTests` holds
+#: for the player token.
+SERVER_ADDRESS_VECTORS = [(7810, "port7810"), (7777, "port7777"), (1, "port1")]
+
+
+@pytest.mark.parametrize(("port", "expected"), SERVER_ADDRESS_VECTORS)
+def test_the_address_is_spelled_the_way_the_mod_spells_it(port, expected):
+    assert session_mod.server_address(port) == expected
+
+
+def test_an_addressed_server_heartbeat_is_still_not_read_as_a_clients(tmp_path):
+    """`heartbeat.client_files` tells a client's heartbeat from the dedicated
+    server's by matching PLAYER_TOKEN_GRAMMAR, and excludes the server BY
+    CONSTRUCTION rather than by a special case: `server` does not end in a dash
+    and four hex characters.
+
+    A port CAN end that way - `7810` is four hex digits - so giving the server
+    a name is exactly the change that could have broken this, and it is the
+    diagnosis the walk exists to keep straight.
+    """
+    prefix = "biomancy"
+    # The REAL discovery walk over REAL files, not a regex asserted against
+    # itself: the grammar lives in one module and the exclusion this is about
+    # lives in another, and only running the walk exercises both.
+    for port in (7810, 7777, 1234, 65535):
+        stem = artifacts_for_server(prefix, port).heartbeat.removesuffix(".txt")
+        (tmp_path / f"{stem}-server.txt").write_text("hooks-seen: PostUpdateWorld\n")
+
+    # POSITIVE CONTROL, same test: a real client heartbeat in the same
+    # directory IS found, so this cannot pass by the walk having stopped
+    # finding anything at all.
+    client = artifacts_for(prefix, SELF).heartbeat
+    (tmp_path / client).write_text("hooks-seen: PostUpdateInput\n")
+
+    found = [p.name for p in heartbeat.client_files(tmp_path, prefix)]
+
+    assert found == [client], (
+        f"the walk reported {found} as clients - a dedicated server's heartbeat "
+        "is in there, which is the one thing this discovery exists to keep apart"
+    )
+
+
+def test_only_one_of_the_four_possible_server_spellings_would_have_broken_that(
+    tmp_path,
+):
+    """WHICH GUARD IS ACTUALLY HOLDING, measured rather than asserted in prose.
+
+    Two independent choices decide the server heartbeat's name: whether the
+    side suffix goes before or after the token, and whether the address carries
+    the `port` prefix. `server_address`'s docstring first claimed the prefix
+    was what kept the walk above honest. It is not - the composition order
+    alone is enough, and so is the prefix alone. Only doing BOTH the other way
+    round produces a name the walk reads as a client.
+
+    That is worth a test rather than a comment for two reasons: it is the sort
+    of claim that reads as obviously true in either direction, and it is what
+    says which of the two guards may be dropped if anybody wants to. The
+    shipped spelling is the first entry.
+    """
+    spellings = {
+        "biomancy-hooks-port7810-server.txt": False,  # shipped
+        "biomancy-hooks-7810-server.txt": False,  # token first, bare port
+        "biomancy-hooks-server-port7810.txt": False,  # side first, prefixed
+        "biomancy-hooks-server-7810.txt": True,  # side first, bare - THE BAD ONE
+    }
+
+    read_as_client = {}
+    for name in spellings:
+        for existing in tmp_path.iterdir():
+            existing.unlink()
+        (tmp_path / name).write_text("hooks-seen: PostUpdateWorld\n")
+        read_as_client[name] = bool(heartbeat.client_files(tmp_path, "biomancy"))
+
+    assert read_as_client == spellings, (
+        f"the guards do not hold where they were thought to: {read_as_client}"
+    )
+
+
+def test_a_launch_does_not_destroy_the_OTHER_servers_pending_request(cfg):
+    """THE HARM, stated as the residual stated it: A's cleanup takes B's
+    in-flight server-side request.
+
+    `_release_trigger` deletes a pending request only where it is this
+    session's to take back, and the ONLY signal is the address the payload
+    carries. With server requests untargeted, every one of them read as
+    "belongs to whoever polls first, and this session is a whoever" - so a
+    second session launching or stopping deleted a request the first was
+    still waiting on the answer to. The client side never had this, because a
+    client request has always carried a name.
+    """
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=True)
+
+    # B's request, in flight on the shared server-side trigger.
+    trigger.write_text("diag@port7811")
+
+    session_mod._release_trigger(cfg, player=SELF, port=7810)
+
+    assert trigger.is_file(), (
+        "A's cleanup deleted a request addressed to B's server, which B is "
+        "still waiting for the answer to"
+    )
+
+    # POSITIVE CONTROL, same test: A's OWN pending request IS cleared. Without
+    # this the assertion above passes on a `_release_trigger` that never
+    # deletes anything - and leaving your own stale request behind wedges the
+    # slot for both sessions, which is the opposite failure.
+    trigger.write_text("diag@port7810")
+    session_mod._release_trigger(cfg, player=SELF, port=7810)
+
+    assert not trigger.exists(), (
+        "this session left its own pending server request on the shared "
+        "trigger, where it blocks the next request from either session"
+    )
+
+
+def test_a_sessions_own_server_leftovers_are_cleared_at_launch(cfg):
+    """The other side of giving the server a name: `_clear_stale_artifacts`
+    has to know it.
+
+    A reply or heartbeat left by a DEAD run is what lets a readiness check
+    pass against a process that is gone - the whole reason that function
+    exists. Once a server's answers carry its port, clearing only the
+    unsuffixed server names leaves the previous run's `-port7810-server`
+    files exactly where the next run on the same port will read them.
+    """
+    names = artifacts_for_server(cfg.mod_name, 7810)
+    mine = [
+        cfg.artifact(names.heartbeat, server=True),
+        cfg.artifact(names.result, server=True),
+    ]
+    for path in mine:
+        path.write_text("left over from a run that is gone")
+
+    # Another session's server, on another port. Not this session's to delete
+    # - the same rule that leaves other players' files alone.
+    theirs = cfg.artifact(
+        artifacts_for_server(cfg.mod_name, 7811).heartbeat, server=True
+    )
+    theirs.write_text("a live server on another port")
+
+    session_mod._clear_stale_artifacts(cfg, player=SELF, port=7810)
+
+    assert not any(p.exists() for p in mine), (
+        f"{[p.name for p in mine if p.exists()]} survived the launch that "
+        "cleared them - a readiness check can pass against a dead server"
+    )
+    assert theirs.is_file(), "another session's live server heartbeat was deleted"
 
 
 def test_launch_refuses_a_character_name_padded_with_whitespace(monkeypatch):

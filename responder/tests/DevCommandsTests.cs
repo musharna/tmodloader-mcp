@@ -211,9 +211,43 @@ namespace TModLoaderMcp.DevBridge.Tests
 			Assert.True(r.IsFor("tst2"), "the addressee must act on it");
 			Assert.False(r.IsFor("n43n"), "the other client must NOT act on it");
 
-			// A dedicated server has no local player and is never an addressee.
+			// A side with NO address - a client at the menu with no character, a
+			// dedicated server started without -port - is never an addressee.
 			Assert.False(r.IsFor(null));
 			Assert.False(r.IsFor(""));
+		}
+
+		/// <summary>
+		/// THE SAME RULE, ONE AXIS OVER. Two dedicated servers sharing one
+		/// Main.SavePath poll one server-side trigger, and until a server had an
+		/// address every request there was untargeted - so whichever polled first
+		/// took it, and either session's cleanup could destroy the other's
+		/// in-flight request. A server's address is its port; nothing else about
+		/// this method changes, which is the point: one comparison, two kinds of
+		/// addressee.
+		/// </summary>
+		[Fact]
+		public void ATargetedRequestIsRefusedByTheOtherServerToo() {
+			DevRequest r = DevCommands.Parse("diag@port7810");
+
+			Assert.True(r.IsFor("port7810"), "the addressed server must act on it");
+			Assert.False(r.IsFor("port7811"), "the other server must NOT act on it");
+			Assert.False(r.IsFor(null), "a server with no -port is never an addressee");
+		}
+
+		/// <summary>
+		/// A player really can be called port7810, and this asserts that it
+		/// matches - because pretending otherwise would need a spelling rule
+		/// here, and there is none. What keeps the two kinds of address from
+		/// colliding is that they are never read from the same file: a client
+		/// polls &lt;mod&gt;-capture.trigger and a dedicated server polls
+		/// &lt;mod&gt;-capture-server.trigger. This test is what makes that
+		/// reasoning explicit rather than assumed - if the separation ever came
+		/// from the strings, this is where it would show.
+		/// </summary>
+		[Fact]
+		public void AnAddressIsNotDistinguishedByItsSpelling() {
+			Assert.True(DevCommands.Parse("diag@port7810").IsFor("port7810"));
 		}
 
 		/// <summary>

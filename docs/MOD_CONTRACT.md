@@ -59,6 +59,12 @@ exactly one name:
 | `<mod>-diag-<token>.txt`    | mod         | when asked                             | **yes**        |
 | `<mod>-shot-<token>.png`    | mod         | when asked                             | **yes**        |
 
+A **dedicated server** carries an address in the same slot — its port rather
+than a player token, since it has no player — so its answers are
+`<mod>-capture-port<N>-server.txt` and so on. See
+[The server's address](#the-servers-address); the rows above are the client's
+half, which is where two sessions at once is the everyday arrangement.
+
 The prefix must be letters and digits only. It lands in filenames and inside a
 regular expression, so a separator would build a path rather than a name and a
 dot would widen the pattern. The token sits **before the extension** — after
@@ -201,9 +207,14 @@ that means "this client is up and has not got a character yet", and a world
 becomes ready at exactly the moment a character exists, so `launch`'s
 readiness wait watches BOTH names for exactly this reason: whichever one this
 client is currently writing is the one that will flip to `world-ready: True`.
-A dedicated server never has a player, so it never writes a tokened heartbeat
-at all — only the `-server` suffix from
-[Where the files live](#where-the-files-live) applies to it.
+**A DEDICATED SERVER writes `<mod>-hooks-port<N>-server.txt`,** where `<N>` is
+the `-port` on its own command line — see
+[The server's address](#the-servers-address). It never has a player, so it
+never writes a _player_ token; the address is a different thing wearing the
+same slot. A server that cannot read a port falls back to the plain
+`<mod>-hooks-server.txt` it always wrote, so `launch` watches both names —
+and a responder vendored before addresses existed keeps working, degraded to
+the old ambiguity rather than broken.
 
 **Read the untokened client heartbeat as a slot, not as a client.** Nothing
 deletes it when its writer moves to a tokened name, and every client that
@@ -421,6 +432,60 @@ unreachable from here. A client that has not yet loaded a character has an empty
 name, matches no target, and is therefore not askable; `heartbeat` answers for
 it instead, off disk, without the game's cooperation.
 
+### The server's address
+
+**A dedicated server is addressed by its port: `diag@port7810`.** Until
+2026-08-16 it could not be addressed at all — it has no `Main.LocalPlayer`, so
+`IsFor` returned false for any target — and what followed was that every
+request on the server side of the trigger went out untargeted. Two harness
+sessions each driving their own server out of one save directory were then
+indistinguishable on disk in all three ways that matter: the request went to
+whichever server polled first, both wrote their answers to one set of
+filenames, and either session's `launch` or `stop` could delete a request the
+other was still waiting on. That is the race per-player naming removed for
+clients, surviving on the axis nothing had covered.
+
+The address is `port` followed by the decimal port, and it is BOTH the target a
+request carries and the token that names the answers
+(`<mod>-diag-port<N>-server.txt`). One string for both jobs, because two
+spellings of one identity is one more place for the two languages to disagree
+and nothing at runtime would notice them drifting.
+
+**The port, because it is the one value both sides already hold** with no
+handshake to get wrong: the harness passes `-port` when it launches the server
+and the mod reads the same argument back off its own command line
+(`Environment.GetCommandLineArgs()`, not Terraria's networking state — that
+keeps the rule inside the part of `responder/` that compiles and is tested
+without Terraria on the line). It is unique by construction too: two servers
+cannot bind one port.
+
+**A player really can be called `port7810`, and it still cannot collide.** Not
+because of the spelling — because the two are never read from the same file. A
+client polls `<mod>-capture.trigger` and a dedicated server polls
+`<mod>-capture-server.trigger`, so this form is only ever compared against a
+server and a character name only ever against a client.
+
+**No address is a supported state.** A server started without `-port`, or with
+one that is not a port, has none: it answers anything untargeted and is never
+the addressee of a targeted request, exactly as every server did before this.
+The harness does the same in reverse — a session with no port sends the
+untargeted request it always did rather than inventing an address. That is the
+old ambiguity, which two sessions survived; a made-up address would be two
+servers claiming to be one.
+
+**Only the answers take the address.** The trigger, the command list and the
+two capture files stay shared. A per-server trigger would make addressing
+meaningless, since neither server would be polling the name a request landed
+under; and two servers out of one save directory run one mod, so a per-server
+command list would be two files that can only ever agree.
+
+**This moved where the side suffix goes relative to the token**, from
+`-server-<token>` to `<token>-server`, to match the order the harness has
+always composed in. No existing filename changed: the order is only observable
+when both a suffix and a token apply, and until now nothing had both. A test
+had stood since the per-player work recording that divergence and stating that
+giving a server a token could not be done safely without fixing it first.
+
 **The trigger holds one request, and it is CLAIMED rather than written.** One
 name is one slot, so a second request arriving before the first is read cannot
 also be there. It used to overwrite it: both payloads reached disk intact, the
@@ -624,6 +689,14 @@ mod itself follows when it declines to consume a request it is not addressed
 by. An unreadable or unaddressed payload counts as the session's own because
 nothing will ever collect it either way, and a slot that holds one request
 cannot afford to hold it forever.
+
+**Each side is asked about its OWN address** — the player on the client
+trigger, `port<N>` on the server's. This used to ask about the player for
+both, and that was the bound on the whole rule: every server-side request was
+untargeted, so it read as "carrying no address at all" and either session
+deleted it. Asking about the player on the server side now would fail the
+other way, leaving a session's own pending server request on the shared
+trigger to block the next request from both.
 
 That release is also the only way an UNCONSUMABLE request leaves the slot.
 Nothing validates that a target names a live client, so a typo — or a client

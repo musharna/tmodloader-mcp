@@ -11,6 +11,41 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Added
+
+- **A dedicated server has an address: its port.** It had none — no
+  `Main.LocalPlayer`, so `IsFor` refused every target — and what followed was
+  that every request on the server side of the trigger went out untargeted.
+  Two sessions each driving their own server out of one save directory were
+  then indistinguishable on disk in all three ways that matter: the request
+  went to whichever server polled first, both wrote their answers to one set
+  of filenames, and either session's `launch` or `stop` could delete a request
+  the other was still waiting on. The same race per-player naming removed for
+  clients, on the axis nothing had covered.
+
+  `port7810` is both the target a request carries (`diag@port7810`) and the
+  token naming the answers (`<mod>-diag-port7810-server.txt`) — one string,
+  because two spellings of one identity is one more place for the two
+  languages to disagree. The port because it is the one value both sides
+  already hold with no handshake: the harness passes `-port`, and the mod
+  reads the same argument back off its own command line. Read from the command
+  line rather than from Terraria's networking state so the rule stays inside
+  the part of `responder/` that compiles and is tested without Terraria on the
+  line.
+
+  **Breaking for the mod side**: a responder must be re-vendored to be
+  addressable. An old copy still works, degraded to the old ambiguity rather
+  than broken — it writes the unsuffixed server names, which `launch` still
+  accepts, and answers untargeted requests as it always did.
+
+  This also moved where the side suffix sits relative to the token, from
+  `-server-<token>` to `<token>-server`, matching the order the harness has
+  always composed in. No existing filename changed — the order is only
+  observable when both apply, and until now nothing had both. A test had stood
+  since the per-player work recording that divergence and saying in as many
+  words that giving a server a token could not be done safely without fixing
+  it first.
+
 ### Fixed
 
 - **`diag` and `shot` spend ONE budget across both of their waits.** Each
