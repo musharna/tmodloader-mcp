@@ -462,6 +462,39 @@ def _write_stamp(stamp: Path, when: float) -> None:
         stamp.write_text(f"{when:.6f}")
 
 
+def _release_capture(lock: Path, stamp: Path, *, when: float) -> OSError | None:
+    """Give up a held capture lock, and say so if the lock would not go.
+
+    THE ORDER IS THE PROTOCOL, not a reading preference. The stamp is written
+    BEFORE the lock is unlinked, and reversing the two statements is a silent
+    hole rather than a slower path: the unlink frees the name, a session
+    already polling for it claims it in the same breath, and `_stamp_wait`
+    then reads whatever the PREVIOUS capture left behind - a second that
+    passed long ago - so the boundary wait returns 0.0 and both captures land
+    in one second. That is this feature's entire failure mode, reached through
+    the release rather than through the claim, and nothing about how the two
+    statements look says which order they belong in.
+
+    THE UNLINK'S FAILURE IS RETURNED, NOT RAISED, because the only caller runs
+    this from a `finally`. An OSError escaping from there REPLACES whatever
+    the caller was about to receive: the reply to a capture that worked, or
+    the exception explaining one that did not. Trading the answer for the
+    housekeeping is the wrong way round in both directions - and the lock left
+    behind is bounded anyway, since it carries its holder's own deadline and
+    the next session breaks it on that.
+
+    Not swallowed either. The caller folds it into the note, because a lock
+    that will not go is the one thing on this path a human can act on: until
+    its deadline passes, every capture from either session waits on it.
+    """
+    _write_stamp(stamp, when)
+    try:
+        lock.unlink(missing_ok=True)
+    except OSError as stuck:
+        return stuck
+    return None
+
+
 def _stamp_wait(stamp: Path, *, now: float) -> float:
     """How long to wait before capturing, so as not to land in the stamped
     second.
@@ -882,18 +915,39 @@ class Session:
                 continue
             break
 
-        wait = _stamp_wait(stamp, now=time.time())
-        if wait:
-            time.sleep(wait)
+        # THE LOCK IS HELD FROM HERE, and every way out of this block has to
+        # give it back. Released HERE rather than by `ask`'s `finally`, which
+        # only runs for a lock this function RETURNED.
+        #
+        # The `except` is not decoration for the `raise` below it - that path
+        # could unlink for itself. It is for the exits no statement in here
+        # mentions: a KeyboardInterrupt or a signal handler's exception landing
+        # inside the boundary sleep, which is where this function spends nearly
+        # all of its wall clock. That is the one way the lock outlives its
+        # session by DESIGN rather than by crash. A crash takes the process
+        # with it and the next session's deadline check tidies up after it;
+        # this leaves a live process holding a name it will never come back
+        # for, and the caller who pressed Ctrl-C has no idea they now own a
+        # file. `BaseException` for exactly that reason: `Exception` does not
+        # catch the interrupt this exists for.
+        #
+        # No stamp on any of these paths, unlike `_release_capture`: nothing
+        # reached the trigger, so there is no picture whose second the next
+        # capture has to miss.
+        try:
+            wait = _stamp_wait(stamp, now=time.time())
+            if wait:
+                time.sleep(wait)
 
-        remaining = max(0.0, deadline - time.monotonic())
-        if remaining < CLAIM_POLL:
-            # Released HERE rather than by `ask`'s `finally`, which only runs
-            # for a lock this function RETURNED. Nothing was written to the
-            # trigger, so the caller gets one honest error instead of an error
-            # plus a capture nothing is serialising.
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining < CLAIM_POLL:
+                # Nothing was written to the trigger, so the caller gets one
+                # honest error instead of an error plus a capture nothing is
+                # serialising.
+                raise TriggerError(self._capture_out_of_time_message(timeout, wait))
+        except BaseException:
             lock.unlink(missing_ok=True)
-            raise TriggerError(self._capture_out_of_time_message(timeout, wait))
+            raise
 
         # THE NOTE NAMES WHICH BOUND FIRED, because the two are worth very
         # different amounts to whoever reads it. A holder that recorded a
@@ -985,6 +1039,7 @@ class Session:
         # value to pass.
         note = None
         held = False
+        stuck = None
         try:
             if capturing:
                 timeout, note = self._claim_capture(lock, stamp, timeout=timeout)
@@ -998,9 +1053,24 @@ class Session:
             if held:
                 # Stamped even on failure: Terraria may have written a PNG
                 # whether or not the reply arrived, and a second nobody
-                # recorded is a second the next capture will land in.
-                _write_stamp(stamp, time.time())
-                lock.unlink(missing_ok=True)
+                # recorded is a second the next capture will land in. The
+                # stamp-then-unlink order is load bearing - see
+                # `_release_capture`, which is where it is stated once rather
+                # than being two adjacent lines here that look interchangeable.
+                stuck = _release_capture(lock, stamp, when=time.time())
+
+        if stuck is not None:
+            # Reported rather than raised, and reported HERE rather than inside
+            # the `finally`, where it would have replaced this reply. A caller
+            # whose capture worked still needs to know their next one will
+            # block, and this is the only thing on the whole path they can do
+            # something about.
+            failed = (
+                f"this capture's lock could not be released ({stuck}) and is "
+                f"still at {lock}. Captures from either session block on it "
+                "until its recorded deadline passes, or until it is deleted"
+            )
+            note = f"{note}; {failed}" if note else failed
 
         return Reply(command=command, text=text.strip(), note=note)
 
