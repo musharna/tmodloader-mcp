@@ -12,9 +12,14 @@ tModLoader has not had one. This is that.
 > and no command list is kept here to be wrong about. The mod-side half is now
 > yours too: [`responder/`](responder/) is a folder you copy into your mod and
 > subclass, and CI compiles it with nothing of any mod's on the compile line.
-> Two clients on one machine no longer overwrite each other's answers, which
-> is the first thing here to have been proven by running it rather than by
-> reading it. See [Phase 2](#phase-2--what-would-make-this-yours).
+>
+> **Two sessions can share one save directory.** Two clients stopped
+> overwriting each other's answers in 0.3.0; 0.4.0 closed the three ways they
+> could still collide — captures landing in one wall-clock second, the lock
+> that serialises them being bounded by a guess, and a dedicated server having
+> no address to be told apart by. Every one of those was found by RUNNING it,
+> which is the thing about this project most worth knowing: the suite passes
+> against several of them. See [Phase 2](#phase-2--what-would-make-this-yours).
 
 ## Why an MCP server rather than a shell script
 
@@ -267,6 +272,23 @@ checkout:
    a time**, not a queue; that is the mechanism now, not a limitation to work
    around. See
    [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#what-a-live-two-client-run-found).
+
+6. ~~Two sessions sharing one save directory still collide in three places~~ —
+   **done in 0.4.0, all three run rather than reasoned about.** Two `capture`
+   requests inside one wall-clock second used to produce ONE picture and two
+   callers each told it was theirs; they are serialised now, and the pre-fix
+   control is the number worth quoting — 0 of 6 rounds passed, with six PNGs
+   on disk for twelve requests, so half the pictures were not misattributed
+   but lost. The lock doing that serialising carries its holder's own deadline
+   instead of a 60-second guess that was wrong in both directions. And a
+   **dedicated server is addressed by its port** (`diag@port7810`), which is
+   also what names its answers — before that, two servers on one save
+   directory were indistinguishable on disk, so the request went to whichever
+   polled first and either session's cleanup could destroy the other's.
+
+   What is NOT covered: two dedicated servers genuinely racing for one
+   trigger. Each half of that mechanism was checked with one server and a
+   hand-written trigger; running two needs a second world.
 
 The last thing that made this a tool for one mod is gone. The filenames, the
 paths and the command list were already yours — this side holds no opinion about
