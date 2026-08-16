@@ -38,9 +38,11 @@ from .triggers import (
     Reply,
     TriggerError,
     artifacts_for,
+    artifacts_for_server,
     compose,
     heartbeat_is_live,
     parse,
+    server_address,
     world_is_ready,
 )
 
@@ -518,7 +520,7 @@ def _stamp_wait(stamp: Path, *, now: float) -> float:
     return min(remaining, STAMP_WAIT_MAX)
 
 
-def _is_ours_to_clear(payload: str | None, *, player: str | None) -> bool:
+def _is_ours_to_clear(payload: str | None, *, addressee: str | None) -> bool:
     """Whether a trigger holding `payload` is this session's to delete.
 
     THE SHARED SLOT IS NOT THIS SESSION'S PROPERTY. One trigger file is polled
@@ -543,29 +545,40 @@ def _is_ours_to_clear(payload: str | None, *, player: str | None) -> bool:
     Compared case-insensitively, because the mod compares a target to its own
     name that way - `n43n` and `N43N` are one client, however it was typed.
 
-    THE ADDRESS IS THE ONLY SIGNAL, which bounds this: two sessions each driving
-    a DEDICATED SERVER out of one save directory write unaddressed requests to
-    the server-side trigger and are indistinguishable here. Nothing on disk
-    separates them; the client side, where two sessions actually is the
-    supported arrangement, carries a player and does separate.
+    THE ADDRESS IS THE ONLY SIGNAL, and `addressee` is whatever this side is
+    addressed by on the trigger being examined - a character name on the
+    client's, a `port7810` address on the dedicated server's. It used to be
+    called `player`, and that name was the bound: two sessions each driving
+    their own DEDICATED SERVER out of one save directory wrote unaddressed
+    requests to the server-side trigger and were indistinguishable here, so
+    either session's `launch` or `stop` destroyed the other's in-flight
+    request. A server has an address now, so both sides separate by the same
+    rule.
     """
     if payload is None:
         return True
     request = parse(payload)
     if request is None or request.target is None:
         return True
-    return player is not None and request.target.casefold() == player.casefold()
+    return addressee is not None and request.target.casefold() == addressee.casefold()
 
 
-def _release_trigger(cfg: Config, *, player: str | None) -> None:
+def _release_trigger(cfg: Config, *, player: str | None, port: int | None) -> None:
     """Give up the shared trigger on both sides, where it is ours to give up.
 
     Called instead of unlinking it, by everything that used to unlink it. See
     `_is_ours_to_clear` for which of the two cases each side falls into.
+
+    EACH SIDE IS ASKED ABOUT ITS OWN ADDRESS. Passing the player for both would
+    make every server-side request unclaimable - a `port7810` target matching
+    no character name - so this session would leave its OWN pending server
+    request behind on every launch, which is the opposite failure to the one
+    the address was added to fix.
     """
+    addressees = {False: player, True: server_address(port)}
     for server in (False, True):
         trigger = cfg.artifact(cfg.artifacts.trigger, server=server)
-        if _is_ours_to_clear(_pending_payload(trigger), player=player):
+        if _is_ours_to_clear(_pending_payload(trigger), addressee=addressees[server]):
             trigger.unlink(missing_ok=True)
 
 
@@ -604,11 +617,31 @@ class Session:
         """
         return artifacts_for(self.cfg.mod_name, self.player)
 
-    def _names(self, server: bool, player: str | None = None) -> Artifacts:
-        """Per-player names for the client, unsuffixed ones for the server.
+    @property
+    def address(self) -> str | None:
+        """What this session's dedicated server answers to, or None.
 
-        The dedicated server has no player. Handing it a token would rename
-        files it writes under names nothing reads.
+        The client side's equivalent is `self.player`, which is required and
+        cannot be absent; this can be, and only because a `Session` may carry a
+        port for a mode that has no server at all.
+        """
+        return server_address(self.port)
+
+    def _names(self, server: bool, player: str | None = None) -> Artifacts:
+        """Per-addressee names: the client's player token, the server's address.
+
+        THE SERVER USED TO GET UNSUFFIXED NAMES, on the grounds that it has no
+        player and a token would rename files under names nothing reads. True
+        of a PLAYER token and false of the conclusion: two sessions each
+        driving their own server out of one save directory wrote every answer -
+        result, diag, heartbeat - to one set of filenames, so each read the
+        other's. That is the collision per-player naming removed for clients,
+        surviving on the axis nothing had covered. The server's address does
+        the same job here.
+
+        Only the answers take it. The trigger, the command list and the two
+        capture files stay shared, which `Artifacts` gets right for free: the
+        token is applied by `_named`, and those four names do not go through it.
 
         `player` IS THE ADDRESSEE, and defaults to this session's own. That
         distinction is the whole of a live failure: an answer is written by the
@@ -639,7 +672,11 @@ class Session:
         which is the point of digesting the original bytes.
         """
         if server:
-            return self.cfg.artifacts
+            # `target` is ignored here on purpose, the way it always was: a
+            # server-side request is addressed to THE server this session
+            # launched and to nothing else, so there is no other addressee whose
+            # files this could mean.
+            return artifacts_for_server(self.cfg.mod_name, self.port)
 
         if player is None or player.casefold() == self.player.casefold():
             player = self.player
@@ -681,9 +718,16 @@ class Session:
         the next request simply flattened it; the claim removed that accident,
         and this message is where the missing remedy is handed back.
 
-        So: the payload, its age, and - when it is addressed to this session's
-        own player - that it is theirs and how to be rid of it. That case is
-        the self-inflicted one and the only one this side can be sure about.
+        So: the payload, its age, and - when it is addressed to something this
+        session answers for - that it is theirs and how to be rid of it. That
+        case is the self-inflicted one and the only one this side can be sure
+        about.
+
+        BOTH OF THIS SESSION'S ADDRESSES ARE CHECKED, its player and its
+        server's. Only the player was, which was right while a server-side
+        request could not carry an address at all; now that it can, checking
+        the player alone would send somebody hunting another session over a
+        request their own server left on its own trigger.
         """
         try:
             pending = trigger.read_text().strip()
@@ -694,21 +738,32 @@ class Session:
             held = "a request that vanished while it was being read"
 
         request = parse(pending) if pending is not None else None
-        addressed_to_me = (
-            request is not None
-            and request.target is not None
-            and request.target.casefold() == self.player.casefold()
-        )
+        mine = None
+        if request is not None and request.target is not None:
+            for what, address in (("player", self.player), ("server", self.address)):
+                if (
+                    address is not None
+                    and request.target.casefold() == address.casefold()
+                ):
+                    mine = (what, address)
+                    break
 
-        if addressed_to_me:
+        if mine is not None:
+            what, address = mine
+            unpolled = (
+                "no client of that name is polling: either none is running, or "
+                "one is running without a loaded character, whose name is empty "
+                "and matches no target"
+                if what == "player"
+                else "no dedicated server on that port is polling: either none "
+                "is running, or one is running that was started without the "
+                "`-port` it would read its own address from"
+            )
             tail = (
-                f"It is addressed to this session's own player ({self.player!r}), "
-                "so it is nobody else's to collect - and nothing has collected "
-                "it, which means no client of that name is polling: either none "
-                "is running, or one is running without a loaded character, whose "
-                "name is empty and matches no target. A fresh `launch` clears a "
-                "pending request addressed to this session's player; so does "
-                "deleting the file."
+                f"It is addressed to this session's own {what} ({address!r}), so "
+                f"it is nobody else's to collect - and nothing has collected it, "
+                f"which means {unpolled}. A fresh `launch` clears a pending "
+                f"request addressed to this session; so does deleting the file."
             )
         else:
             tail = (
@@ -997,15 +1052,26 @@ class Session:
         # different client answering on each of two consecutive attempts. This
         # side knows its own player, so leaving that to chance was a choice.
         #
-        # NOT for the dedicated server: it has no local player, so any target
-        # matches nothing and it would fall silent for good.
-        #
         # A client that has not yet loaded a character has an EMPTY name, so
         # it matches no target either and cannot be asked anything through
         # this path. `heartbeat` is how that client is reached instead - it
         # reads off disk and needs no cooperation from the game.
-        if not server and target is None:
-            target = self.player
+        #
+        # THE DEDICATED SERVER IS ADDRESSED TOO, by its port. This paragraph
+        # used to end "NOT for the dedicated server: it has no local player, so
+        # any target matches nothing and it would fall silent for good", which
+        # was a true statement about the mod and the wrong conclusion. What
+        # followed from it was that every server-side request was untargeted -
+        # so two sessions each driving their own server out of one save
+        # directory were indistinguishable on that trigger, the request went to
+        # whichever polled first, and either session's cleanup could destroy
+        # the other's. `DevArtifacts.ServerAddress` gives the server something
+        # to match, so it is addressed like anything else.
+        #
+        # A session with no port to name a server by falls back to untargeted,
+        # which is the old ambiguity rather than a new failure.
+        if target is None:
+            target = self.address if server else self.player
 
         payload = compose(
             command,
@@ -1284,16 +1350,27 @@ class Session:
         )
 
 
-def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
+def _clear_stale_artifacts(
+    cfg: Config, *, player: str | None, port: int | None = None
+) -> None:
     """A heartbeat or reply left by a previous run is what lets a readiness
     check pass against a dead process.
 
-    Clears the unsuffixed names for both sides - `cfg.artifacts` has no
-    player, and is the right answer for the dedicated server, which never has
-    one - AND this session's own per-player names, when `player` is given. A
-    per-player reply from a dead run under the SAME player name would
-    otherwise survive into this one, which is the exact scenario the original
-    comment describes and Task 2's per-player naming made reachable.
+    Clears the unsuffixed names for both sides - `cfg.artifacts` has no token,
+    which is still what a server started without a `-port` writes - AND this
+    session's own per-addressee names: the client's per-player ones when
+    `player` is given, and the server's per-port ones when `port` is. A reply
+    from a dead run under the SAME player name would otherwise survive into
+    this one, which is the exact scenario the original comment describes and
+    Task 2's per-player naming made reachable.
+
+    THE SERVER'S OWN NAMES ARE NEW HERE and are the same hole one axis over:
+    once a server's answers carry its port, a `launch` that cleared only the
+    unsuffixed server names left the previous run's `-port7810-server` reply
+    and heartbeat on disk. Same port next launch, same filenames, and
+    `_wait_ready` can pass against a dead server's leftover heartbeat - which
+    is the failure this whole function exists to prevent, reintroduced by the
+    change that gave the server an identity.
 
     THE TRIGGER IS EXCLUDED FROM BOTH LOOPS and released separately, because
     it is the one artifact shared with the OTHER session rather than merely
@@ -1331,15 +1408,21 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
         for server in (False, True):
             cfg.artifact(name, server=server).unlink(missing_ok=True)
 
-    if player is not None:
-        for name in artifacts_for(cfg.mod_name, player).all:
-            # None of `shared` is per player, so this is the same shared names
-            # again and the same exclusion applies. Skipped by name rather than
-            # by trusting that, because a member of `shared` deciding to carry
-            # a token one day must not silently reopen the hole.
+    # (names, which side they live on) - the client's under this player, the
+    # server's under this port. Both loops apply the same `shared` exclusion:
+    # none of those three carries a token today, and skipping them by name
+    # rather than by trusting that means one of them acquiring a token some day
+    # cannot silently reopen the hole.
+    for names, on_server in (
+        (artifacts_for(cfg.mod_name, player) if player is not None else None, False),
+        (artifacts_for_server(cfg.mod_name, port) if port is not None else None, True),
+    ):
+        if names is None:
+            continue
+        for name in names.all:
             if name in shared:
                 continue
-            cfg.artifact(name, server=False).unlink(missing_ok=True)
+            cfg.artifact(name, server=on_server).unlink(missing_ok=True)
 
     # The lock is excluded from both loops above because it may belong to a
     # LIVE session - but a launch is exactly when a lock left by a DEAD run
@@ -1348,7 +1431,7 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
     for server in (False, True):
         _break_stale_lock(cfg.artifact(cfg.artifacts.capture_lock, server=server))
 
-    _release_trigger(cfg, player=player)
+    _release_trigger(cfg, player=player, port=port)
 
 
 def world_problem(world: str) -> str | None:
@@ -1468,7 +1551,7 @@ def launch(
     session = Session(cfg=cfg, mode=mode, port=port, player=player, world=world_arg)
 
     # Clear stale artifacts BEFORE launching - see _clear_stale_artifacts.
-    _clear_stale_artifacts(cfg, player=player)
+    _clear_stale_artifacts(cfg, player=player, port=port)
 
     server_cmd = [
         str(cfg.dotnet),
@@ -1521,7 +1604,7 @@ def launch(
                 stdin=subprocess.DEVNULL,
             )
 
-        _wait_ready(cfg, mode=mode, player=player, timeout=timeout)
+        _wait_ready(cfg, mode=mode, player=player, timeout=timeout, port=port)
     except BaseException as failure:
         # WHOEVER SPAWNS OWNS THEM UNTIL IT CAN HAND THEM BACK.
         #
@@ -1553,7 +1636,9 @@ def launch(
     return session
 
 
-def _wait_ready(cfg: Config, *, mode: str, player: str, timeout: float) -> None:
+def _wait_ready(
+    cfg: Config, *, mode: str, player: str, timeout: float, port: int | None = None
+) -> None:
     """Block until the heartbeat says a world is live AND is recent.
 
     Both conditions, because they fail differently: a stale-but-ready heartbeat
@@ -1582,13 +1667,30 @@ def _wait_ready(cfg: Config, *, mode: str, player: str, timeout: float) -> None:
     candidate set is fixed to exactly the two names PLAYER could be writing
     under - discovered between those two, not among every name that exists.
     """
-    server_hb = cfg.artifact(cfg.artifacts.heartbeat, server=True)
     per_player_name = artifacts_for(cfg.mod_name, player).heartbeat
+    per_port_name = artifacts_for_server(cfg.mod_name, port).heartbeat
 
     def _client_candidates() -> list[Path]:
         return [
             cfg.artifact(cfg.artifacts.heartbeat, server=False),
             cfg.artifact(per_player_name, server=False),
+        ]
+
+    # THE SERVER IS DISCOVERED BETWEEN TWO NAMES FOR THE CLIENT'S REASON AND
+    # ONE OF ITS OWN. A server that can read its own `-port` writes
+    # `<mod>-hooks-port7810-server.txt`; one that cannot - started by hand, or
+    # running a responder vendored before server addresses existed - writes the
+    # unsuffixed `<mod>-hooks-server.txt` it always did. Accepting only the
+    # tokened name would turn that second case from a degradation into a hard
+    # failure at `launch`, which is the worst place to discover a version skew:
+    # the error is a readiness timeout, and it names the heartbeat rather than
+    # the responder that is a copy behind. `artifacts_for_server(port=None)`
+    # collapses to the unsuffixed name, so a session with no port simply has
+    # one candidate twice rather than a special case here.
+    def _server_candidates() -> list[Path]:
+        return [
+            cfg.artifact(cfg.artifacts.heartbeat, server=True),
+            cfg.artifact(per_port_name, server=True),
         ]
 
     def _any_ready(paths: list[Path]) -> bool:
@@ -1599,9 +1701,7 @@ def _wait_ready(cfg: Config, *, mode: str, player: str, timeout: float) -> None:
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        server_ready = heartbeat_is_live(server_hb) and world_is_ready(
-            server_hb.read_text(errors="replace")
-        )
+        server_ready = _any_ready(_server_candidates())
         client_ready = mode != "server_client" or _any_ready(_client_candidates())
         if server_ready and client_ready:
             # A short settle after world-ready: the mod refuses commands until a
@@ -1611,7 +1711,17 @@ def _wait_ready(cfg: Config, *, mode: str, player: str, timeout: float) -> None:
             return
         time.sleep(2)
 
-    missing = [server_hb.name] if not heartbeat_is_live(server_hb) else []
+    server_found = [p for p in _server_candidates() if p.is_file()]
+    server_live = [p for p in server_found if heartbeat_is_live(p)]
+    if server_live:
+        missing = []
+    elif server_found:
+        missing = [p.name for p in server_found]
+    else:
+        # Both names, so the reader can see WHICH ones were watched - a
+        # responder a copy behind writes only the first, and a reader who has
+        # never heard of the second learns it exists from this line.
+        missing = [p.name for p in _server_candidates()]
 
     # A client is "missing" when NO name it could be writing under - suffixed
     # or not - is live. That is a different question from whether one of the
@@ -1747,7 +1857,7 @@ def stop(
     # NOT an unconditional unlink. The trigger is shared with the other
     # session, and a teardown that deleted it took that session's in-flight
     # request with it - see `_release_trigger`.
-    _release_trigger(cfg, player=session.player)
+    _release_trigger(cfg, player=session.player, port=session.port)
 
     session.started = survivors
 

@@ -1,3 +1,4 @@
+using System;
 using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
@@ -92,22 +93,38 @@ namespace TModLoaderMcp.DevBridge
 		}
 
 		/// <summary>
-		/// Side suffix and player token together, in that order.
+		/// Token and side suffix together, TOKEN FIRST:
+		/// biomancy-diag-n43n-003f-server.txt.
 		///
 		/// The two axes are independent and compose: the mod prefix keeps two
 		/// MODS apart, the side suffix keeps two SIDES apart, and the token
-		/// keeps two CLIENTS apart. A dedicated server passes a null token
-		/// because it has no client to be confused with.
+		/// keeps two ADDRESSEES apart - two clients by their player tokens, and
+		/// (since a dedicated server got an address) two servers by theirs.
+		///
+		/// THE ORDER IS THE HARNESS'S, and this method used to have the other
+		/// one. triggers.py's Artifacts._named splices the token in first and
+		/// config.py's Config.artifact then appends "-server" to that already
+		/// tokened name, giving `-token-server`; this composed `-server-token`.
+		/// Those are two different files, and they agreed only because the one
+		/// combination that tells them apart - a dedicated server WITH a token -
+		/// could not arise: LocalPlayerName is null whenever Main.dedServ is.
+		/// DevArtifactsTests carried that divergence as a standing warning that
+		/// giving a server a token could not be done safely without fixing this
+		/// composition first. Giving a server a token is exactly what
+		/// ServerAddress below does, so this is that fix.
+		///
+		/// No existing name moved. With no token the side suffix is the only
+		/// operation, and with no side suffix the token is - the order can only
+		/// be observed when BOTH apply, which is precisely the case that had
+		/// never happened.
 		/// </summary>
-		public static string ForSide(string name, bool dedicatedServer, string playerToken) {
-			string sided = ForSide(name, dedicatedServer);
-
+		public static string ForSide(string name, bool dedicatedServer, string token) {
 			// Absence must stay absence even with a token in hand: a null name
 			// has nothing to tag, and "-n43n-003f" alone would be a real,
 			// plausible-looking file in Main.SavePath - the same failure the
 			// two-argument sibling above guards against for "-server".
-			if (string.IsNullOrEmpty(sided) || string.IsNullOrEmpty(playerToken)) {
-				return sided;
+			if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(token)) {
+				return ForSide(name, dedicatedServer);
 			}
 
 			// Same Path methods the two-argument overload uses, not manual
@@ -115,7 +132,82 @@ namespace TModLoaderMcp.DevBridge
 			// dot in a directory component. Before the extension: after it,
 			// `biomancy-diag.txt-n43n-003f` is not a text file to anything
 			// that reads extensions.
-			return Path.GetFileNameWithoutExtension(sided) + "-" + playerToken + Path.GetExtension(sided);
+			string tokened =
+				Path.GetFileNameWithoutExtension(name) + "-" + token + Path.GetExtension(name);
+
+			// The side suffix goes on LAST, through the same overload the
+			// untokened path uses, so there is one implementation of "-server"
+			// rather than two that can drift.
+			return ForSide(tokened, dedicatedServer);
+		}
+
+		/// <summary>
+		/// What a dedicated server answers to, or null if it cannot tell.
+		///
+		/// A dedicated server has no LocalPlayer, so until now it had no address
+		/// at all: every request written to its side of the trigger was
+		/// untargeted, and two harness sessions each driving their own server out
+		/// of ONE Main.SavePath were indistinguishable on disk. Whichever server
+		/// polled first took the request, both wrote their answers to the same
+		/// filename, and either session's cleanup could destroy the other's
+		/// in-flight request. That is the same race per-player naming removed for
+		/// clients, on the axis nothing had covered.
+		///
+		/// THE PORT IS THE ADDRESS because it is the one value both sides already
+		/// hold independently, with no handshake to get wrong: the harness passes
+		/// -port when it launches the server, and the server reads the same
+		/// argument back off its own command line. It is also unique by
+		/// construction - two servers cannot bind one port, so two servers
+		/// sharing a save directory cannot share an address.
+		///
+		/// READ FROM THE COMMAND LINE rather than from Terraria's own networking
+		/// state, and that is deliberate: Environment.GetCommandLineArgs() is
+		/// plain .NET, so this rule compiles and is tested in responder/tests with
+		/// nothing of Terraria's on the compile line - the same vendorability
+		/// boundary every other file here respects. A rule that read a Terraria
+		/// field would live where nothing in this repository can check it.
+		///
+		/// ONE STRING FOR BOTH JOBS. The value returned here is both the target a
+		/// request is addressed to (`diag@port7810`) and the token that names the
+		/// server's answers (`biomancy-diag-port7810-server.txt`). Two spellings
+		/// of one identity is one more place for the two sides to disagree.
+		///
+		/// NULL IS A SUPPORTED ANSWER, not a failure: a server started without
+		/// -port, or with one that is not a port, has no address and behaves
+		/// exactly as every server did before this existed - it answers anything
+		/// untargeted and is never the addressee of a targeted request. That is
+		/// the old ambiguity rather than a new outage.
+		///
+		/// The LAST -port decides. Terraria's own argument handling lets a later
+		/// occurrence win, and picking an earlier one would be this side guessing
+		/// differently from the process it is describing.
+		/// </summary>
+		public static string ServerAddress(string[] commandLine) {
+			if (commandLine == null) {
+				return null;
+			}
+
+			string found = null;
+			for (int i = 0; i + 1 < commandLine.Length; i++) {
+				if (string.Equals(commandLine[i], "-port", StringComparison.OrdinalIgnoreCase)) {
+					found = commandLine[i + 1];
+				}
+			}
+
+			// NumberStyles.None on purpose: no sign, no whitespace, no group
+			// separators. "+7810" and " 7810" are things a shell can produce and
+			// the harness never writes, and accepting them here would let the two
+			// sides derive different addresses from one command line.
+			if (found == null
+				|| !int.TryParse(found, NumberStyles.None, CultureInfo.InvariantCulture, out int port)
+				|| port < 1
+				|| port > 65535) {
+				return null;
+			}
+
+			// Re-rendered from the parsed int rather than echoed, so "07810" and
+			// "7810" are one address. The harness formats an int too.
+			return "port" + port.ToString(CultureInfo.InvariantCulture);
 		}
 
 		/// <summary>

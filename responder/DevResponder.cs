@@ -443,7 +443,7 @@ namespace TModLoaderMcp.DevBridge
 			// every poll until its owner takes it, and reporting each time would
 			// bury the actual answer under its own noise.
 			DevRequest request = DevCommands.Parse(raw);
-			if (!request.IsFor(LocalPlayerName)) {
+			if (!request.IsFor(LocalAddress)) {
 				return;
 			}
 
@@ -791,9 +791,10 @@ namespace TModLoaderMcp.DevBridge
 		/// <summary>
 		/// This side's player name, or null where there is no local player.
 		///
-		/// A dedicated server has no LocalPlayer worth speaking of, so it is never
-		/// the addressee of a targeted request - which is correct: the server has
-		/// its own suffixed trigger and does not need to be addressed by name.
+		/// A dedicated server has no LocalPlayer worth speaking of, so it never
+		/// has one of these. It is no longer unaddressable because of that - see
+		/// LocalAddress - but the two are still separate questions, and this one
+		/// is only ever about a character.
 		/// </summary>
 		private static string LocalPlayerName {
 			get {
@@ -806,12 +807,52 @@ namespace TModLoaderMcp.DevBridge
 			}
 		}
 
+		private static string _serverAddress;
+		private static bool _serverAddressRead;
+
+		/// <summary>
+		/// This dedicated server's address, read ONCE.
+		///
+		/// Cached because Tick runs from four update hooks and would otherwise
+		/// walk the process command line sixty times a second to learn a value
+		/// that cannot change. A separate `read` flag rather than a null check,
+		/// because null is a legitimate answer here - a server with no -port -
+		/// and a null check would re-scan on every poll for exactly the case
+		/// where scanning never helps.
+		/// </summary>
+		private static string ServerAddress {
+			get {
+				if (!_serverAddressRead) {
+					_serverAddress = DevArtifacts.ServerAddress(Environment.GetCommandLineArgs());
+					_serverAddressRead = true;
+				}
+
+				return _serverAddress;
+			}
+		}
+
+		/// <summary>
+		/// What a request's target is compared against on THIS side.
+		///
+		/// A client's address is its character name. A dedicated server's is its
+		/// port, which is the whole of the change: before it, a server matched no
+		/// target at all, so every request on its side of the trigger had to be
+		/// untargeted - and two harness sessions each driving their own server out
+		/// of one Main.SavePath were indistinguishable on disk. Whichever polled
+		/// first took the request.
+		///
+		/// Null on a client until a character exists, which is unchanged and
+		/// correct: a client at the menu has no name to be addressed by, and
+		/// IsFor(null) declines every targeted request rather than guessing.
+		/// </summary>
+		private static string LocalAddress => Main.dedServ ? ServerAddress : LocalPlayerName;
+
 		/// <summary>
 		/// Full path to one of this side's SHARED artifacts - the trigger and
 		/// the published command list. Both must stay addressed by the SAME
 		/// name regardless of which client is polling: the trigger is how one
 		/// client's request reaches whichever client it names (see the
-		/// IsFor(LocalPlayerName) check in Tick), and a client-specific trigger
+		/// IsFor(LocalAddress) check in Tick), and a client-specific trigger
 		/// path would make that addressing meaningless, since nobody would be
 		/// polling the name a request actually landed under. Deliberately does
 		/// NOT take a player token - see AnswerPathFor for the files that do.
@@ -821,23 +862,31 @@ namespace TModLoaderMcp.DevBridge
 		}
 
 		/// <summary>
-		/// This client's token, or null on a dedicated server and before a
-		/// character exists.
+		/// What names this side's answers, or null when nothing does.
+		///
+		/// A client's is its player token - the slug-plus-digest form, which is
+		/// NOT its address. A dedicated server's is its address verbatim: the
+		/// port is already a filename fragment and digesting it would invent a
+		/// second spelling of one identity for the two languages to disagree
+		/// about.
+		///
+		/// Null on a dedicated server with no -port, and on a client before a
+		/// character exists. ForSide's null-token branch then returns the plain
+		/// sided name unchanged, so a client at the menu still writes the
+		/// unsuffixed heartbeat the harness reads before any world is loaded,
+		/// and a server launched by hand writes exactly what it always did.
 		/// </summary>
-		private static string PlayerTokenOrNull => DevArtifacts.PlayerToken(LocalPlayerName);
+		private static string AnswerTokenOrNull =>
+			Main.dedServ ? ServerAddress : DevArtifacts.PlayerToken(LocalPlayerName);
 
 		/// <summary>
-		/// This side's answer to a request, named for THIS client:
-		/// biomancy-diag-n43n-003f.txt rather than biomancy-diag.txt. Two
-		/// clients polling the same Main.SavePath would otherwise overwrite
-		/// each other's diag, heartbeat and capture answers exactly the way
-		/// DevArtifacts' own docs describe for sides.
-		///
-		/// Before a character exists PlayerTokenOrNull is null and ForSide's
-		/// null-token branch returns the plain sided name unchanged - so a
-		/// client at the menu still writes the unsuffixed heartbeat the
-		/// harness reads before any world is loaded, without a special case
-		/// here.
+		/// This side's answer to a request, named for THIS addressee:
+		/// biomancy-diag-n43n-003f.txt rather than biomancy-diag.txt, and
+		/// biomancy-diag-port7810-server.txt rather than
+		/// biomancy-diag-server.txt. Two clients - or, now, two servers -
+		/// sharing one Main.SavePath would otherwise overwrite each other's
+		/// diag, heartbeat and capture answers exactly the way DevArtifacts'
+		/// own docs describe for sides.
 		/// </summary>
 		private static string AnswerPathFor(string name) {
 			return Path.Combine(Main.SavePath, AnswerName(name));
@@ -851,7 +900,7 @@ namespace TModLoaderMcp.DevBridge
 		/// a path this class could combine itself.
 		/// </summary>
 		private static string AnswerName(string name) {
-			return DevArtifacts.ForSide(name, Main.dedServ, PlayerTokenOrNull);
+			return DevArtifacts.ForSide(name, Main.dedServ, AnswerTokenOrNull);
 		}
 
 		protected static void Report(string line) {
