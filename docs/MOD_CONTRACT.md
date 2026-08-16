@@ -271,13 +271,17 @@ load-bearing:
   whole budget fails as a claim rather than reporting a game that was never
   involved.
 
-  Scoped to ONE request, which is what this rule can promise: a tool that
-  issues a request and then waits for a SECOND file — the state dump, the drop
-  box — spends its timeout on the trigger-plus-reply round trip and then waits
-  up to that timeout again for the file, so an end-to-end call can take roughly
-  twice what it was given. Documented rather than tightened, because the second
-  wait is for a file the mod writes after answering and the reply is not
-  evidence it has landed.
+  That holds for the tools that wait TWICE as well. `diag` and `shot` each
+  issue a request and then wait for a second file — the state dump, the drop
+  box — and each used to hand the caller's whole timeout to both waits, so an
+  end-to-end call could take roughly twice what it was given. This paragraph
+  recorded that as a documented residual until 2026-08-16, on the grounds that
+  the second wait is for a file the mod writes AFTER answering and the reply is
+  not evidence it has landed. That is still true of the file and was never a
+  reason to charge for it twice. One deadline now spans both waits, and a reply
+  that consumes the whole budget fails naming the BUDGET — rather than passing
+  a zero down to a wait whose own error ("the game may not be polling — check
+  that a world is loaded") blames a game that has just answered.
 
   `capture` spends that same one budget on more than the trigger-plus-reply
   round trip: it must first take `<mod>-capture.lock` (see
@@ -473,6 +477,29 @@ returns immediately; the NEXT claimant waits out whatever is left of that
 second, capped at one second (`STAMP_WAIT_MAX`), before it captures. The cost
 of the boundary lands on the contender rather than on a session working
 alone, which pays nothing.
+
+**The release has an order: the stamp first, then the lock.** The two look
+interchangeable and are not. Unlinking first frees the name, a session already
+polling for it takes the lock in that instant, and its `_stamp_wait` reads
+whatever the PREVIOUS capture left there — a second long past — so its
+boundary wait returns nothing and both PNGs land together. That is this whole
+mechanism's failure mode, arrived at through the release rather than through
+the claim, and every test still passes with the two swapped.
+
+**Neither half of the release may replace the answer.** It runs from a
+`finally`, where an exception does not join what is in flight — it REPLACES
+it. A lock file that would not unlink came back to the caller as a
+`PermissionError` instead of the capture's own reply, or instead of the
+timeout explaining why there wasn't one. The failure is reported through the
+reply's `note` instead: a lock that will not go is the one thing on that path
+a human can act on, since captures from either session block on it until its
+deadline passes. The lock is given back on the interrupt path too — the
+holder spends nearly all its wall clock asleep on the boundary, and that is
+the one way the lock outlives its session with the session still running. A
+crash takes the process with it and the next claimant's deadline check tidies
+up; a `KeyboardInterrupt` leaves a live process holding a name it will never
+return to. No stamp on that path: nothing reached the trigger, so there is no
+picture whose second anyone has to miss.
 
 **The lock says when its holder will be gone, and that is the bound.** It
 carries two lines — the holder's pid, then the wall-clock moment its whole

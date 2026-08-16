@@ -250,6 +250,117 @@ def test_an_unaddressed_shot_still_uses_this_sessions_drop_box(sess, cfg, monkey
     assert artifacts_for(cfg.mod_name, SELF).shot.split(".")[0] in kept.name
 
 
+# ---- one budget for a two-wait call ------------------------------------
+
+
+def _reply_costing(monkeypatch, cfg: FakeCfg, spend: list[float], *, png: bool):
+    """A reply that takes `spend[0]` seconds to arrive, and the file it
+    promises already on disk when it does.
+
+    The whole point is the SECOND wait, so the first is charged deliberately
+    rather than raced for: `spend` is a one-item list so a test can change
+    what the reply costs between two calls and use one as the other's
+    control.
+    """
+    names = artifacts_for(cfg.mod_name, SELF)
+
+    def slow_ask(
+        self, command, *, argument=None, target=None, server=False, timeout=60.0
+    ):
+        time.sleep(spend[0])
+        if png:
+            cfg.artifact(names.shot, server=False).write_bytes(_png())
+        else:
+            cfg.artifact(names.diag, server=False).write_text("player: " + SELF + "\n")
+        return Reply(command=command, text="ok")
+
+    monkeypatch.setattr(Session, "ask", slow_ask)
+
+
+def _records_the_budget(monkeypatch, method: str, given: list[float]):
+    real = getattr(Session, method)
+
+    def watching(self, path, *, timeout, what):
+        given.append(timeout)
+        return real(self, path, timeout=timeout, what=what)
+
+    monkeypatch.setattr(Session, method, watching)
+
+
+@pytest.mark.parametrize(
+    ("call", "method", "png"),
+    [
+        (lambda s, t: s.diag(timeout=t), "_await_text", False),
+        (lambda s, t: s.shot("full", timeout=t), "_await_png", True),
+    ],
+    ids=["diag", "shot"],
+)
+def test_a_two_wait_call_spends_one_budget_and_not_two(
+    sess, cfg, monkeypatch, call, method, png
+):
+    """THE DEFECT. Both sites, because a fix to one is a tripwire removal.
+
+    `diag` and `shot` are each two waits - the reply, then the file the reply
+    promises - and each handed the caller's WHOLE timeout to both. So a call
+    asked to take at most 60s could legitimately take 120, silently, and a
+    caller who bounded it to fit their own budget got twice what they asked
+    for. The tool text was already the honest version: `shot`'s `timeout`
+    reads "seconds to wait for the reply and the PNG", which described neither
+    wait alone and nothing at all together.
+    """
+    spend = [1.2]
+    given: list[float] = []
+    _reply_costing(monkeypatch, cfg, spend, png=png)
+    _records_the_budget(monkeypatch, method, given)
+
+    call(sess, 2.0)
+
+    assert given and given[0] <= 1.0, (
+        f"the second wait was given {given[0]:.2f}s after the reply had "
+        "already spent 1.2s of a 2.0s budget - so the call can take nearly "
+        "twice what the caller asked for"
+    )
+
+    # POSITIVE CONTROL, same test: a reply that costs nothing must still leave
+    # nearly the whole budget, so this cannot pass by the second wait having
+    # been given some small fixed number.
+    spend[0] = 0.0
+    given.clear()
+    call(sess, 2.0)
+
+    assert given and given[0] > 1.5, (
+        f"an instant reply left only {given[0]:.2f}s of 2.0s for the second "
+        "wait - the budget is being spent somewhere nobody asked it to be"
+    )
+
+
+def test_a_budget_spent_on_the_reply_blames_the_budget_not_the_game(
+    sess, cfg, monkeypatch
+):
+    """Where the remainder goes when there is none left.
+
+    Passing a zero down would let `_await_file` answer instead, and its
+    sentence is "no diag dump within 0s ... the game may not be polling -
+    check that a world is loaded and the mod is enabled". Every word of that
+    is about a game which, on this path, has just answered. The reader is sent
+    to restart a world over a timeout that was simply too tight.
+    """
+    spend = [0.4]
+    _reply_costing(monkeypatch, cfg, spend, png=False)
+
+    with pytest.raises(session_mod.TriggerError) as spent:
+        sess.diag(timeout=0.3)
+
+    message = str(spent.value)
+    assert "budget" in message and "longer timeout" in message
+    assert "may not be polling" not in message, (
+        "this is `_await_file`'s message, which blames a game that answered"
+    )
+
+    # POSITIVE CONTROL: the same call, the same reply cost, a budget that fits.
+    assert sess.diag(timeout=5.0).fields.get("player") == SELF
+
+
 # ---- the shared staging file -------------------------------------------
 
 

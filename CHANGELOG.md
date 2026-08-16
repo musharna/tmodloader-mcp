@@ -13,6 +13,31 @@ keeping, not because they broke a released API.
 
 ### Fixed
 
+- **`diag` and `shot` spend ONE budget across both of their waits.** Each
+  issues a request and then waits for a second file — the state dump, the drop
+  box — and each handed the caller's whole `timeout` to both, so a call asked
+  to take at most 60s could legitimately take 120. The tool text was already
+  the honest version: `shot`'s `timeout` read "seconds to wait for the reply
+  and the PNG", which described neither wait alone and nothing at all
+  together. A budget the reply consumes now fails naming the BUDGET, rather
+  than passing a zero down to a wait whose own error ("the game may not be
+  polling — check that a world is loaded") blames a game that just answered.
+
+- **Releasing a capture lock is a protocol, and three parts of it were
+  unstated.** The stamp is written BEFORE the lock is unlinked, and reversing
+  the two still passes every test — what changes is invisible from one
+  session: the unlink frees the name, a session already polling takes it in
+  that instant, and reads the second the PREVIOUS capture left behind, so both
+  PNGs land together. That is this feature's whole failure mode, reached
+  through the release rather than the claim. The unlink also sat unguarded in
+  a `finally`, where an exception does not join what is in flight but REPLACES
+  it: a capture that took its picture and got its reply came back as a
+  `PermissionError` about a lock file, and one that timed out lost the error
+  explaining why. It is reported through the reply's `note` now instead. And
+  the lock is given back on the interrupt path — the holder spends nearly all
+  its wall clock asleep on the second boundary, which is the one way the lock
+  outlives its session with the session still alive.
+
 - **The capture lock's staleness bound is the holder's own deadline, not a
   60-second guess.** Until now the only signal was the lock's mtime, and it
   was wrong in both directions. A capture given `timeout=120` — which the

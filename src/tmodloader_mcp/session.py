@@ -1086,7 +1086,10 @@ class Session:
         scalars said `npcs: active=6 mutated=1`; the indented per-NPC lines under
         them said which six, and were parsed and thrown away — so a caller could
         learn that six existed and never what any of them was.
+
+        ONE BUDGET ACROSS BOTH WAITS — see `_left_of`.
         """
+        deadline = time.monotonic() + timeout
         dump = self.path(self._names(server, target).diag, server=server)
         dump.unlink(missing_ok=True)
 
@@ -1094,7 +1097,11 @@ class Session:
         if not reply.ok:
             raise TriggerError(f"the game refused a diag: {reply.text}")
 
-        text = self._await_text(dump, timeout=timeout, what="diag dump")
+        text = self._await_text(
+            dump,
+            timeout=self._left_of(deadline, timeout, what="diag dump"),
+            what="diag dump",
+        )
         return Diag(fields=parse_diag(text), records=diag_sections(text))
 
     def shot(
@@ -1125,7 +1132,10 @@ class Session:
         on the first one's captures. Same silent loss, wearing the fix as a
         disguise - the path handed back was unique among the calls that made
         it, which is not the property anybody needed.
+
+        ONE BUDGET ACROSS BOTH WAITS — see `_left_of`.
         """
+        deadline = time.monotonic() + timeout
         drop = self.path(self._names(False, target).shot, server=False)
         drop.unlink(missing_ok=True)
 
@@ -1133,7 +1143,11 @@ class Session:
         if not reply.ok:
             raise TriggerError(f"the game refused a shot: {reply.text}")
 
-        self._await_png(drop, timeout=timeout, what="shot PNG")
+        self._await_png(
+            drop,
+            timeout=self._left_of(deadline, timeout, what="shot PNG"),
+            what="shot PNG",
+        )
 
         # Numbered first so a listing sorts into capture order, and the region
         # kept so a directory of these is readable without a log beside it.
@@ -1143,6 +1157,37 @@ class Session:
         return kept
 
     # ---- waiting ---------------------------------------------------------
+
+    def _left_of(self, deadline: float, timeout: float, *, what: str) -> float:
+        """What is left of ONE call's budget, or an error saying where it went.
+
+        `diag` and `shot` are each TWO waits — the reply, and then the file the
+        reply promises — and both used to be handed the caller's whole
+        `timeout`. So a call asked to take at most 60s could legitimately take
+        120, and a caller who bounded this to fit their own budget was quietly
+        given twice what they asked for. The tool text was already the honest
+        version and the code was not: `shot`'s own `timeout` argument reads
+        "seconds to wait for the reply AND the PNG", which was true of neither
+        wait alone and of nothing at all together.
+
+        The remainder is RAISED ON rather than passed on as a zero, because
+        `_await_file(timeout=0)` reports "no shot PNG within 0s ... the game
+        may not be polling" — it blames the game for a wait this side never
+        made, and sends the reader to look at a game that answered perfectly.
+
+        `ask` already spends one budget across its own three waits, and this
+        is the same rule one layer up.
+        """
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TriggerError(
+                f"the whole {timeout:.0f}s budget went on getting the reply, "
+                f"leaving none to wait for the {what}. The game DID answer, so "
+                f"the {what} is most likely on its way and this is a budget "
+                "that was too tight rather than a game that is not responding "
+                "— ask again with a longer timeout."
+            )
+        return left
 
     def _await_file(self, path: Path, *, timeout: float, what: str) -> None:
         deadline = time.monotonic() + timeout
