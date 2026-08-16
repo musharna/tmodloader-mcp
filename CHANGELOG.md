@@ -11,6 +11,38 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Added
+
+- **`join` — a second client into a session that is already running.** The
+  protocol has supported several clients since answers became per-player:
+  every request carries an address, every answer carries a token. The
+  LIFECYCLE supported exactly one, so the arrangement two whole releases exist
+  to make safe was unreachable from this harness — the only way to get a
+  second client was to spawn a game by hand, which is what
+  `tests/live_capture_check.py` did. That function is now deleted and the live
+  check calls this instead, which is the point of moving it.
+
+  It waits for a CLIENT, not for a process. The lifted version watched for a
+  new tModLoader pid and called it done; a pid says something started, not
+  that a character loaded, that the join was accepted, or that a world is
+  under it.
+
+  And it watches only that player's own tokened heartbeat. The unsuffixed
+  `<mod>-hooks.txt` is a shared slot rather than a client — every client that
+  boots writes it on the way through the menu and nothing deletes it — so with
+  a client already running it holds THAT client's record, and accepting it
+  would let the call return against the heartbeat of the game that was already
+  here. This is the one the test suite missed on the first pass: written with
+  a zero timeout, the wait loop never ran, and the test passed just as happily
+  against a version that accepted the shared slot.
+
+  A duplicate character is refused, case-insensitively. Two clients under one
+  name share a player token, so their heartbeat, reply, diag and shot are one
+  file each between them — the collision per-player naming removed, reachable
+  again through the tool that adds clients. `stop` needs no knowledge of any
+  of this: the pids go into `session.started`, which is already exactly what
+  it kills. `status` gained `joined`.
+
 ## [0.4.0] - 2026-08-16
 
 The release where two sessions stop colliding on the one thing neither can see

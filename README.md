@@ -31,6 +31,7 @@ What earns the surface here is that a running game is not stateless:
 | Tool              | What it buys over `bash`                                         |
 | ----------------- | ---------------------------------------------------------------- |
 | `launch` / `stop` | Session state across calls                                       |
+| `join`            | A second client into a session that is already running           |
 | `status`          | Asking whether a session exists without provoking an error       |
 | `diag`            | Structured fields AND the records under them, not text to `sed`  |
 | `trigger`         | The write → poll → timeout → clean-up loop, written once         |

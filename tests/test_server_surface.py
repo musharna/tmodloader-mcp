@@ -34,6 +34,9 @@ class FakeSession:
         # would let `status` drop the world and still pass.
         self.world = r"C:\Worlds\Fake.wld"
         self.started = {4808, 42224}
+        # `join` appends here and `status` reports it; a fake without it would
+        # let the tool layer drop the list and still pass.
+        self.joined: list[str] = ["tst2"]
         self.calls: list[tuple] = []
 
     def diag(self, *, server=False, target=None, timeout=60.0):
@@ -183,6 +186,7 @@ def test_status_reports_no_session_without_raising(no_session):
         "port": None,
         "player": None,
         "world": None,
+        "joined": None,
         "started_pids": None,
     }
 
