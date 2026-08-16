@@ -38,9 +38,11 @@ from .triggers import (
     Reply,
     TriggerError,
     artifacts_for,
+    artifacts_for_server,
     compose,
     heartbeat_is_live,
     parse,
+    server_address,
     world_is_ready,
 )
 
@@ -462,6 +464,39 @@ def _write_stamp(stamp: Path, when: float) -> None:
         stamp.write_text(f"{when:.6f}")
 
 
+def _release_capture(lock: Path, stamp: Path, *, when: float) -> OSError | None:
+    """Give up a held capture lock, and say so if the lock would not go.
+
+    THE ORDER IS THE PROTOCOL, not a reading preference. The stamp is written
+    BEFORE the lock is unlinked, and reversing the two statements is a silent
+    hole rather than a slower path: the unlink frees the name, a session
+    already polling for it claims it in the same breath, and `_stamp_wait`
+    then reads whatever the PREVIOUS capture left behind - a second that
+    passed long ago - so the boundary wait returns 0.0 and both captures land
+    in one second. That is this feature's entire failure mode, reached through
+    the release rather than through the claim, and nothing about how the two
+    statements look says which order they belong in.
+
+    THE UNLINK'S FAILURE IS RETURNED, NOT RAISED, because the only caller runs
+    this from a `finally`. An OSError escaping from there REPLACES whatever
+    the caller was about to receive: the reply to a capture that worked, or
+    the exception explaining one that did not. Trading the answer for the
+    housekeeping is the wrong way round in both directions - and the lock left
+    behind is bounded anyway, since it carries its holder's own deadline and
+    the next session breaks it on that.
+
+    Not swallowed either. The caller folds it into the note, because a lock
+    that will not go is the one thing on this path a human can act on: until
+    its deadline passes, every capture from either session waits on it.
+    """
+    _write_stamp(stamp, when)
+    try:
+        lock.unlink(missing_ok=True)
+    except OSError as stuck:
+        return stuck
+    return None
+
+
 def _stamp_wait(stamp: Path, *, now: float) -> float:
     """How long to wait before capturing, so as not to land in the stamped
     second.
@@ -485,7 +520,7 @@ def _stamp_wait(stamp: Path, *, now: float) -> float:
     return min(remaining, STAMP_WAIT_MAX)
 
 
-def _is_ours_to_clear(payload: str | None, *, player: str | None) -> bool:
+def _is_ours_to_clear(payload: str | None, *, addressee: str | None) -> bool:
     """Whether a trigger holding `payload` is this session's to delete.
 
     THE SHARED SLOT IS NOT THIS SESSION'S PROPERTY. One trigger file is polled
@@ -510,29 +545,40 @@ def _is_ours_to_clear(payload: str | None, *, player: str | None) -> bool:
     Compared case-insensitively, because the mod compares a target to its own
     name that way - `n43n` and `N43N` are one client, however it was typed.
 
-    THE ADDRESS IS THE ONLY SIGNAL, which bounds this: two sessions each driving
-    a DEDICATED SERVER out of one save directory write unaddressed requests to
-    the server-side trigger and are indistinguishable here. Nothing on disk
-    separates them; the client side, where two sessions actually is the
-    supported arrangement, carries a player and does separate.
+    THE ADDRESS IS THE ONLY SIGNAL, and `addressee` is whatever this side is
+    addressed by on the trigger being examined - a character name on the
+    client's, a `port7810` address on the dedicated server's. It used to be
+    called `player`, and that name was the bound: two sessions each driving
+    their own DEDICATED SERVER out of one save directory wrote unaddressed
+    requests to the server-side trigger and were indistinguishable here, so
+    either session's `launch` or `stop` destroyed the other's in-flight
+    request. A server has an address now, so both sides separate by the same
+    rule.
     """
     if payload is None:
         return True
     request = parse(payload)
     if request is None or request.target is None:
         return True
-    return player is not None and request.target.casefold() == player.casefold()
+    return addressee is not None and request.target.casefold() == addressee.casefold()
 
 
-def _release_trigger(cfg: Config, *, player: str | None) -> None:
+def _release_trigger(cfg: Config, *, player: str | None, port: int | None) -> None:
     """Give up the shared trigger on both sides, where it is ours to give up.
 
     Called instead of unlinking it, by everything that used to unlink it. See
     `_is_ours_to_clear` for which of the two cases each side falls into.
+
+    EACH SIDE IS ASKED ABOUT ITS OWN ADDRESS. Passing the player for both would
+    make every server-side request unclaimable - a `port7810` target matching
+    no character name - so this session would leave its OWN pending server
+    request behind on every launch, which is the opposite failure to the one
+    the address was added to fix.
     """
+    addressees = {False: player, True: server_address(port)}
     for server in (False, True):
         trigger = cfg.artifact(cfg.artifacts.trigger, server=server)
-        if _is_ours_to_clear(_pending_payload(trigger), player=player):
+        if _is_ours_to_clear(_pending_payload(trigger), addressee=addressees[server]):
             trigger.unlink(missing_ok=True)
 
 
@@ -571,11 +617,31 @@ class Session:
         """
         return artifacts_for(self.cfg.mod_name, self.player)
 
-    def _names(self, server: bool, player: str | None = None) -> Artifacts:
-        """Per-player names for the client, unsuffixed ones for the server.
+    @property
+    def address(self) -> str | None:
+        """What this session's dedicated server answers to, or None.
 
-        The dedicated server has no player. Handing it a token would rename
-        files it writes under names nothing reads.
+        The client side's equivalent is `self.player`, which is required and
+        cannot be absent; this can be, and only because a `Session` may carry a
+        port for a mode that has no server at all.
+        """
+        return server_address(self.port)
+
+    def _names(self, server: bool, player: str | None = None) -> Artifacts:
+        """Per-addressee names: the client's player token, the server's address.
+
+        THE SERVER USED TO GET UNSUFFIXED NAMES, on the grounds that it has no
+        player and a token would rename files under names nothing reads. True
+        of a PLAYER token and false of the conclusion: two sessions each
+        driving their own server out of one save directory wrote every answer -
+        result, diag, heartbeat - to one set of filenames, so each read the
+        other's. That is the collision per-player naming removed for clients,
+        surviving on the axis nothing had covered. The server's address does
+        the same job here.
+
+        Only the answers take it. The trigger, the command list and the two
+        capture files stay shared, which `Artifacts` gets right for free: the
+        token is applied by `_named`, and those four names do not go through it.
 
         `player` IS THE ADDRESSEE, and defaults to this session's own. That
         distinction is the whole of a live failure: an answer is written by the
@@ -606,7 +672,11 @@ class Session:
         which is the point of digesting the original bytes.
         """
         if server:
-            return self.cfg.artifacts
+            # `target` is ignored here on purpose, the way it always was: a
+            # server-side request is addressed to THE server this session
+            # launched and to nothing else, so there is no other addressee whose
+            # files this could mean.
+            return artifacts_for_server(self.cfg.mod_name, self.port)
 
         if player is None or player.casefold() == self.player.casefold():
             player = self.player
@@ -648,9 +718,16 @@ class Session:
         the next request simply flattened it; the claim removed that accident,
         and this message is where the missing remedy is handed back.
 
-        So: the payload, its age, and - when it is addressed to this session's
-        own player - that it is theirs and how to be rid of it. That case is
-        the self-inflicted one and the only one this side can be sure about.
+        So: the payload, its age, and - when it is addressed to something this
+        session answers for - that it is theirs and how to be rid of it. That
+        case is the self-inflicted one and the only one this side can be sure
+        about.
+
+        BOTH OF THIS SESSION'S ADDRESSES ARE CHECKED, its player and its
+        server's. Only the player was, which was right while a server-side
+        request could not carry an address at all; now that it can, checking
+        the player alone would send somebody hunting another session over a
+        request their own server left on its own trigger.
         """
         try:
             pending = trigger.read_text().strip()
@@ -661,21 +738,32 @@ class Session:
             held = "a request that vanished while it was being read"
 
         request = parse(pending) if pending is not None else None
-        addressed_to_me = (
-            request is not None
-            and request.target is not None
-            and request.target.casefold() == self.player.casefold()
-        )
+        mine = None
+        if request is not None and request.target is not None:
+            for what, address in (("player", self.player), ("server", self.address)):
+                if (
+                    address is not None
+                    and request.target.casefold() == address.casefold()
+                ):
+                    mine = (what, address)
+                    break
 
-        if addressed_to_me:
+        if mine is not None:
+            what, address = mine
+            unpolled = (
+                "no client of that name is polling: either none is running, or "
+                "one is running without a loaded character, whose name is empty "
+                "and matches no target"
+                if what == "player"
+                else "no dedicated server on that port is polling: either none "
+                "is running, or one is running that was started without the "
+                "`-port` it would read its own address from"
+            )
             tail = (
-                f"It is addressed to this session's own player ({self.player!r}), "
-                "so it is nobody else's to collect - and nothing has collected "
-                "it, which means no client of that name is polling: either none "
-                "is running, or one is running without a loaded character, whose "
-                "name is empty and matches no target. A fresh `launch` clears a "
-                "pending request addressed to this session's player; so does "
-                "deleting the file."
+                f"It is addressed to this session's own {what} ({address!r}), so "
+                f"it is nobody else's to collect - and nothing has collected it, "
+                f"which means {unpolled}. A fresh `launch` clears a pending "
+                f"request addressed to this session; so does deleting the file."
             )
         else:
             tail = (
@@ -882,18 +970,39 @@ class Session:
                 continue
             break
 
-        wait = _stamp_wait(stamp, now=time.time())
-        if wait:
-            time.sleep(wait)
+        # THE LOCK IS HELD FROM HERE, and every way out of this block has to
+        # give it back. Released HERE rather than by `ask`'s `finally`, which
+        # only runs for a lock this function RETURNED.
+        #
+        # The `except` is not decoration for the `raise` below it - that path
+        # could unlink for itself. It is for the exits no statement in here
+        # mentions: a KeyboardInterrupt or a signal handler's exception landing
+        # inside the boundary sleep, which is where this function spends nearly
+        # all of its wall clock. That is the one way the lock outlives its
+        # session by DESIGN rather than by crash. A crash takes the process
+        # with it and the next session's deadline check tidies up after it;
+        # this leaves a live process holding a name it will never come back
+        # for, and the caller who pressed Ctrl-C has no idea they now own a
+        # file. `BaseException` for exactly that reason: `Exception` does not
+        # catch the interrupt this exists for.
+        #
+        # No stamp on any of these paths, unlike `_release_capture`: nothing
+        # reached the trigger, so there is no picture whose second the next
+        # capture has to miss.
+        try:
+            wait = _stamp_wait(stamp, now=time.time())
+            if wait:
+                time.sleep(wait)
 
-        remaining = max(0.0, deadline - time.monotonic())
-        if remaining < CLAIM_POLL:
-            # Released HERE rather than by `ask`'s `finally`, which only runs
-            # for a lock this function RETURNED. Nothing was written to the
-            # trigger, so the caller gets one honest error instead of an error
-            # plus a capture nothing is serialising.
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining < CLAIM_POLL:
+                # Nothing was written to the trigger, so the caller gets one
+                # honest error instead of an error plus a capture nothing is
+                # serialising.
+                raise TriggerError(self._capture_out_of_time_message(timeout, wait))
+        except BaseException:
             lock.unlink(missing_ok=True)
-            raise TriggerError(self._capture_out_of_time_message(timeout, wait))
+            raise
 
         # THE NOTE NAMES WHICH BOUND FIRED, because the two are worth very
         # different amounts to whoever reads it. A holder that recorded a
@@ -943,15 +1052,26 @@ class Session:
         # different client answering on each of two consecutive attempts. This
         # side knows its own player, so leaving that to chance was a choice.
         #
-        # NOT for the dedicated server: it has no local player, so any target
-        # matches nothing and it would fall silent for good.
-        #
         # A client that has not yet loaded a character has an EMPTY name, so
         # it matches no target either and cannot be asked anything through
         # this path. `heartbeat` is how that client is reached instead - it
         # reads off disk and needs no cooperation from the game.
-        if not server and target is None:
-            target = self.player
+        #
+        # THE DEDICATED SERVER IS ADDRESSED TOO, by its port. This paragraph
+        # used to end "NOT for the dedicated server: it has no local player, so
+        # any target matches nothing and it would fall silent for good", which
+        # was a true statement about the mod and the wrong conclusion. What
+        # followed from it was that every server-side request was untargeted -
+        # so two sessions each driving their own server out of one save
+        # directory were indistinguishable on that trigger, the request went to
+        # whichever polled first, and either session's cleanup could destroy
+        # the other's. `DevArtifacts.ServerAddress` gives the server something
+        # to match, so it is addressed like anything else.
+        #
+        # A session with no port to name a server by falls back to untargeted,
+        # which is the old ambiguity rather than a new failure.
+        if target is None:
+            target = self.address if server else self.player
 
         payload = compose(
             command,
@@ -985,6 +1105,7 @@ class Session:
         # value to pass.
         note = None
         held = False
+        stuck = None
         try:
             if capturing:
                 timeout, note = self._claim_capture(lock, stamp, timeout=timeout)
@@ -998,9 +1119,24 @@ class Session:
             if held:
                 # Stamped even on failure: Terraria may have written a PNG
                 # whether or not the reply arrived, and a second nobody
-                # recorded is a second the next capture will land in.
-                _write_stamp(stamp, time.time())
-                lock.unlink(missing_ok=True)
+                # recorded is a second the next capture will land in. The
+                # stamp-then-unlink order is load bearing - see
+                # `_release_capture`, which is where it is stated once rather
+                # than being two adjacent lines here that look interchangeable.
+                stuck = _release_capture(lock, stamp, when=time.time())
+
+        if stuck is not None:
+            # Reported rather than raised, and reported HERE rather than inside
+            # the `finally`, where it would have replaced this reply. A caller
+            # whose capture worked still needs to know their next one will
+            # block, and this is the only thing on the whole path they can do
+            # something about.
+            failed = (
+                f"this capture's lock could not be released ({stuck}) and is "
+                f"still at {lock}. Captures from either session block on it "
+                "until its recorded deadline passes, or until it is deleted"
+            )
+            note = f"{note}; {failed}" if note else failed
 
         return Reply(command=command, text=text.strip(), note=note)
 
@@ -1016,7 +1152,10 @@ class Session:
         scalars said `npcs: active=6 mutated=1`; the indented per-NPC lines under
         them said which six, and were parsed and thrown away — so a caller could
         learn that six existed and never what any of them was.
+
+        ONE BUDGET ACROSS BOTH WAITS — see `_left_of`.
         """
+        deadline = time.monotonic() + timeout
         dump = self.path(self._names(server, target).diag, server=server)
         dump.unlink(missing_ok=True)
 
@@ -1024,7 +1163,11 @@ class Session:
         if not reply.ok:
             raise TriggerError(f"the game refused a diag: {reply.text}")
 
-        text = self._await_text(dump, timeout=timeout, what="diag dump")
+        text = self._await_text(
+            dump,
+            timeout=self._left_of(deadline, timeout, what="diag dump"),
+            what="diag dump",
+        )
         return Diag(fields=parse_diag(text), records=diag_sections(text))
 
     def shot(
@@ -1055,7 +1198,10 @@ class Session:
         on the first one's captures. Same silent loss, wearing the fix as a
         disguise - the path handed back was unique among the calls that made
         it, which is not the property anybody needed.
+
+        ONE BUDGET ACROSS BOTH WAITS — see `_left_of`.
         """
+        deadline = time.monotonic() + timeout
         drop = self.path(self._names(False, target).shot, server=False)
         drop.unlink(missing_ok=True)
 
@@ -1063,7 +1209,11 @@ class Session:
         if not reply.ok:
             raise TriggerError(f"the game refused a shot: {reply.text}")
 
-        self._await_png(drop, timeout=timeout, what="shot PNG")
+        self._await_png(
+            drop,
+            timeout=self._left_of(deadline, timeout, what="shot PNG"),
+            what="shot PNG",
+        )
 
         # Numbered first so a listing sorts into capture order, and the region
         # kept so a directory of these is readable without a log beside it.
@@ -1073,6 +1223,37 @@ class Session:
         return kept
 
     # ---- waiting ---------------------------------------------------------
+
+    def _left_of(self, deadline: float, timeout: float, *, what: str) -> float:
+        """What is left of ONE call's budget, or an error saying where it went.
+
+        `diag` and `shot` are each TWO waits — the reply, and then the file the
+        reply promises — and both used to be handed the caller's whole
+        `timeout`. So a call asked to take at most 60s could legitimately take
+        120, and a caller who bounded this to fit their own budget was quietly
+        given twice what they asked for. The tool text was already the honest
+        version and the code was not: `shot`'s own `timeout` argument reads
+        "seconds to wait for the reply AND the PNG", which was true of neither
+        wait alone and of nothing at all together.
+
+        The remainder is RAISED ON rather than passed on as a zero, because
+        `_await_file(timeout=0)` reports "no shot PNG within 0s ... the game
+        may not be polling" — it blames the game for a wait this side never
+        made, and sends the reader to look at a game that answered perfectly.
+
+        `ask` already spends one budget across its own three waits, and this
+        is the same rule one layer up.
+        """
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TriggerError(
+                f"the whole {timeout:.0f}s budget went on getting the reply, "
+                f"leaving none to wait for the {what}. The game DID answer, so "
+                f"the {what} is most likely on its way and this is a budget "
+                "that was too tight rather than a game that is not responding "
+                "— ask again with a longer timeout."
+            )
+        return left
 
     def _await_file(self, path: Path, *, timeout: float, what: str) -> None:
         deadline = time.monotonic() + timeout
@@ -1169,16 +1350,27 @@ class Session:
         )
 
 
-def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
+def _clear_stale_artifacts(
+    cfg: Config, *, player: str | None, port: int | None = None
+) -> None:
     """A heartbeat or reply left by a previous run is what lets a readiness
     check pass against a dead process.
 
-    Clears the unsuffixed names for both sides - `cfg.artifacts` has no
-    player, and is the right answer for the dedicated server, which never has
-    one - AND this session's own per-player names, when `player` is given. A
-    per-player reply from a dead run under the SAME player name would
-    otherwise survive into this one, which is the exact scenario the original
-    comment describes and Task 2's per-player naming made reachable.
+    Clears the unsuffixed names for both sides - `cfg.artifacts` has no token,
+    which is still what a server started without a `-port` writes - AND this
+    session's own per-addressee names: the client's per-player ones when
+    `player` is given, and the server's per-port ones when `port` is. A reply
+    from a dead run under the SAME player name would otherwise survive into
+    this one, which is the exact scenario the original comment describes and
+    Task 2's per-player naming made reachable.
+
+    THE SERVER'S OWN NAMES ARE NEW HERE and are the same hole one axis over:
+    once a server's answers carry its port, a `launch` that cleared only the
+    unsuffixed server names left the previous run's `-port7810-server` reply
+    and heartbeat on disk. Same port next launch, same filenames, and
+    `_wait_ready` can pass against a dead server's leftover heartbeat - which
+    is the failure this whole function exists to prevent, reintroduced by the
+    change that gave the server an identity.
 
     THE TRIGGER IS EXCLUDED FROM BOTH LOOPS and released separately, because
     it is the one artifact shared with the OTHER session rather than merely
@@ -1216,15 +1408,21 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
         for server in (False, True):
             cfg.artifact(name, server=server).unlink(missing_ok=True)
 
-    if player is not None:
-        for name in artifacts_for(cfg.mod_name, player).all:
-            # None of `shared` is per player, so this is the same shared names
-            # again and the same exclusion applies. Skipped by name rather than
-            # by trusting that, because a member of `shared` deciding to carry
-            # a token one day must not silently reopen the hole.
+    # (names, which side they live on) - the client's under this player, the
+    # server's under this port. Both loops apply the same `shared` exclusion:
+    # none of those three carries a token today, and skipping them by name
+    # rather than by trusting that means one of them acquiring a token some day
+    # cannot silently reopen the hole.
+    for names, on_server in (
+        (artifacts_for(cfg.mod_name, player) if player is not None else None, False),
+        (artifacts_for_server(cfg.mod_name, port) if port is not None else None, True),
+    ):
+        if names is None:
+            continue
+        for name in names.all:
             if name in shared:
                 continue
-            cfg.artifact(name, server=False).unlink(missing_ok=True)
+            cfg.artifact(name, server=on_server).unlink(missing_ok=True)
 
     # The lock is excluded from both loops above because it may belong to a
     # LIVE session - but a launch is exactly when a lock left by a DEAD run
@@ -1233,7 +1431,7 @@ def _clear_stale_artifacts(cfg: Config, *, player: str | None) -> None:
     for server in (False, True):
         _break_stale_lock(cfg.artifact(cfg.artifacts.capture_lock, server=server))
 
-    _release_trigger(cfg, player=player)
+    _release_trigger(cfg, player=player, port=port)
 
 
 def world_problem(world: str) -> str | None:
@@ -1353,7 +1551,7 @@ def launch(
     session = Session(cfg=cfg, mode=mode, port=port, player=player, world=world_arg)
 
     # Clear stale artifacts BEFORE launching - see _clear_stale_artifacts.
-    _clear_stale_artifacts(cfg, player=player)
+    _clear_stale_artifacts(cfg, player=player, port=port)
 
     server_cmd = [
         str(cfg.dotnet),
@@ -1406,7 +1604,7 @@ def launch(
                 stdin=subprocess.DEVNULL,
             )
 
-        _wait_ready(cfg, mode=mode, player=player, timeout=timeout)
+        _wait_ready(cfg, mode=mode, player=player, timeout=timeout, port=port)
     except BaseException as failure:
         # WHOEVER SPAWNS OWNS THEM UNTIL IT CAN HAND THEM BACK.
         #
@@ -1438,7 +1636,9 @@ def launch(
     return session
 
 
-def _wait_ready(cfg: Config, *, mode: str, player: str, timeout: float) -> None:
+def _wait_ready(
+    cfg: Config, *, mode: str, player: str, timeout: float, port: int | None = None
+) -> None:
     """Block until the heartbeat says a world is live AND is recent.
 
     Both conditions, because they fail differently: a stale-but-ready heartbeat
@@ -1467,13 +1667,30 @@ def _wait_ready(cfg: Config, *, mode: str, player: str, timeout: float) -> None:
     candidate set is fixed to exactly the two names PLAYER could be writing
     under - discovered between those two, not among every name that exists.
     """
-    server_hb = cfg.artifact(cfg.artifacts.heartbeat, server=True)
     per_player_name = artifacts_for(cfg.mod_name, player).heartbeat
+    per_port_name = artifacts_for_server(cfg.mod_name, port).heartbeat
 
     def _client_candidates() -> list[Path]:
         return [
             cfg.artifact(cfg.artifacts.heartbeat, server=False),
             cfg.artifact(per_player_name, server=False),
+        ]
+
+    # THE SERVER IS DISCOVERED BETWEEN TWO NAMES FOR THE CLIENT'S REASON AND
+    # ONE OF ITS OWN. A server that can read its own `-port` writes
+    # `<mod>-hooks-port7810-server.txt`; one that cannot - started by hand, or
+    # running a responder vendored before server addresses existed - writes the
+    # unsuffixed `<mod>-hooks-server.txt` it always did. Accepting only the
+    # tokened name would turn that second case from a degradation into a hard
+    # failure at `launch`, which is the worst place to discover a version skew:
+    # the error is a readiness timeout, and it names the heartbeat rather than
+    # the responder that is a copy behind. `artifacts_for_server(port=None)`
+    # collapses to the unsuffixed name, so a session with no port simply has
+    # one candidate twice rather than a special case here.
+    def _server_candidates() -> list[Path]:
+        return [
+            cfg.artifact(cfg.artifacts.heartbeat, server=True),
+            cfg.artifact(per_port_name, server=True),
         ]
 
     def _any_ready(paths: list[Path]) -> bool:
@@ -1484,9 +1701,7 @@ def _wait_ready(cfg: Config, *, mode: str, player: str, timeout: float) -> None:
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        server_ready = heartbeat_is_live(server_hb) and world_is_ready(
-            server_hb.read_text(errors="replace")
-        )
+        server_ready = _any_ready(_server_candidates())
         client_ready = mode != "server_client" or _any_ready(_client_candidates())
         if server_ready and client_ready:
             # A short settle after world-ready: the mod refuses commands until a
@@ -1496,7 +1711,17 @@ def _wait_ready(cfg: Config, *, mode: str, player: str, timeout: float) -> None:
             return
         time.sleep(2)
 
-    missing = [server_hb.name] if not heartbeat_is_live(server_hb) else []
+    server_found = [p for p in _server_candidates() if p.is_file()]
+    server_live = [p for p in server_found if heartbeat_is_live(p)]
+    if server_live:
+        missing = []
+    elif server_found:
+        missing = [p.name for p in server_found]
+    else:
+        # Both names, so the reader can see WHICH ones were watched - a
+        # responder a copy behind writes only the first, and a reader who has
+        # never heard of the second learns it exists from this line.
+        missing = [p.name for p in _server_candidates()]
 
     # A client is "missing" when NO name it could be writing under - suffixed
     # or not - is live. That is a different question from whether one of the
@@ -1632,7 +1857,7 @@ def stop(
     # NOT an unconditional unlink. The trigger is shared with the other
     # session, and a teardown that deleted it took that session's in-flight
     # request with it - see `_release_trigger`.
-    _release_trigger(cfg, player=session.player)
+    _release_trigger(cfg, player=session.player, port=session.port)
 
     session.started = survivors
 

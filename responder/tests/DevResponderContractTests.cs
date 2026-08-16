@@ -128,17 +128,53 @@ namespace TModLoaderMcp.DevBridge.Tests
         }
 
         /// <summary>
-        /// The property AnswerName/AnswerPathFor's null-token composition
-        /// actually relies on: a dedicated server never has a player token,
-        /// because LocalPlayerName short-circuits to null before ever
-        /// reaching Main.LocalPlayer. See
-        /// DevArtifactsTests.ADedicatedServerWithATokenWouldNotMatchTheHarnessesOrdering
-        /// for what breaks if this ever stops being true.
+        /// A dedicated server never has a PLAYER token, because LocalPlayerName
+        /// short-circuits to null before ever reaching Main.LocalPlayer. It does
+        /// now have an address token of its own - see AnswerTokenOrNull - and
+        /// the two must not be confused: a server acquiring a player token would
+        /// mean Main.dedServ had a LocalPlayer, which is a different and much
+        /// worse claim than the one this change makes. See
+        /// DevArtifactsTests.ADedicatedServerWithATokenMatchesTheHarnessesOrdering
+        /// for the composition that had to be fixed before a server could carry
+        /// any token at all.
         /// </summary>
         [Fact]
         public void LocalPlayerNameIsNullOnADedicatedServer() {
             Assert.Matches(
                 new Regex(@"private\s+static\s+string\s+LocalPlayerName\s*\{\s*get\s*\{\s*if\s*\(\s*Main\.dedServ\s*\)\s*\{\s*return\s+null\s*;"),
+                Source());
+        }
+
+        /// <summary>
+        /// THE ONE LINE THAT MAKES SERVER ADDRESSING EXIST, and nothing else in
+        /// this repository can reach it: DevResponder.cs is not on the compile
+        /// line, so the whole mechanism - a server's port becoming an address -
+        /// is inert unless Tick compares against LocalAddress rather than
+        /// LocalPlayerName. And the reverted spelling still COMPILES and still
+        /// passes every other test here, because LocalPlayerName is null on a
+        /// dedicated server by the test above - it would quietly restore exactly
+        /// the state this change removed: two servers, one save directory, every
+        /// request going to whichever polled first.
+        /// </summary>
+        [Fact]
+        public void TheAddressingCheckComparesAgainstLocalAddressNotJustAPlayer() {
+            Assert.Matches(new Regex(@"request\.IsFor\(LocalAddress\)"), Source());
+        }
+
+        /// <summary>
+        /// And the answers follow the address. Addressing alone is half a fix
+        /// that LOOKS whole: server A would correctly serve a request addressed
+        /// to A and then write its answer into the very file B is also writing,
+        /// so B's harness reads A's diag - the same collision per-player naming
+        /// removed for clients, surviving behind a routing fix.
+        /// </summary>
+        [Fact]
+        public void AnswersAreNamedForTheAddresseeIncludingAServers() {
+            Assert.Matches(
+                new Regex(@"ForSide\(name,\s*Main\.dedServ,\s*AnswerTokenOrNull\)"),
+                Source());
+            Assert.Matches(
+                new Regex(@"AnswerTokenOrNull\s*=>\s*\r?\n?\s*Main\.dedServ\s*\?\s*ServerAddress\s*:"),
                 Source());
         }
     }

@@ -65,19 +65,35 @@ namespace TModLoaderMcp.DevBridge
 		/// Whether this side should act on the request.
 		///
 		/// An untargeted request is for anyone, which keeps every existing script
-		/// working. A targeted one is for exactly one player, and a side with no
-		/// local player at all - a dedicated server - is never that player.
+		/// working. A targeted one is for exactly one ADDRESSEE, and a side with
+		/// no address at all is never it.
+		///
+		/// AN ADDRESS IS NOT ALWAYS A PLAYER NAME, and this parameter used to say
+		/// it was. A client's address is its character name; a dedicated server's
+		/// is "port7810", read off its own command line - see
+		/// DevArtifacts.ServerAddress for why the port and not something else. A
+		/// server had no address before that and so could never be addressed,
+		/// which is what left two servers sharing one save directory unable to
+		/// tell each other's requests apart.
+		///
+		/// THE TWO KINDS CANNOT COLLIDE, and not because of how they are spelled.
+		/// They are never compared against the same file: a client polls
+		/// &lt;mod&gt;-capture.trigger and a dedicated server polls
+		/// &lt;mod&gt;-capture-server.trigger, so a "port7810" target is only ever
+		/// read by a server and a character name only ever by a client. A player
+		/// really can be called port7810; the paths are what keep it harmless,
+		/// so no spelling rule here has to.
 		/// </summary>
-		public bool IsFor(string localPlayerName) {
+		public bool IsFor(string localAddress) {
 			if (string.IsNullOrEmpty(Target)) {
 				return true;
 			}
 
-			if (string.IsNullOrEmpty(localPlayerName)) {
+			if (string.IsNullOrEmpty(localAddress)) {
 				return false;
 			}
 
-			return string.Equals(Target, localPlayerName, StringComparison.OrdinalIgnoreCase);
+			return string.Equals(Target, localAddress, StringComparison.OrdinalIgnoreCase);
 		}
 	}
 

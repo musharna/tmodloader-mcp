@@ -11,7 +11,67 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Added
+
+- **A dedicated server has an address: its port.** It had none — no
+  `Main.LocalPlayer`, so `IsFor` refused every target — and what followed was
+  that every request on the server side of the trigger went out untargeted.
+  Two sessions each driving their own server out of one save directory were
+  then indistinguishable on disk in all three ways that matter: the request
+  went to whichever server polled first, both wrote their answers to one set
+  of filenames, and either session's `launch` or `stop` could delete a request
+  the other was still waiting on. The same race per-player naming removed for
+  clients, on the axis nothing had covered.
+
+  `port7810` is both the target a request carries (`diag@port7810`) and the
+  token naming the answers (`<mod>-diag-port7810-server.txt`) — one string,
+  because two spellings of one identity is one more place for the two
+  languages to disagree. The port because it is the one value both sides
+  already hold with no handshake: the harness passes `-port`, and the mod
+  reads the same argument back off its own command line. Read from the command
+  line rather than from Terraria's networking state so the rule stays inside
+  the part of `responder/` that compiles and is tested without Terraria on the
+  line.
+
+  **Breaking for the mod side**: a responder must be re-vendored to be
+  addressable. An old copy still works, degraded to the old ambiguity rather
+  than broken — it writes the unsuffixed server names, which `launch` still
+  accepts, and answers untargeted requests as it always did.
+
+  This also moved where the side suffix sits relative to the token, from
+  `-server-<token>` to `<token>-server`, matching the order the harness has
+  always composed in. No existing filename changed — the order is only
+  observable when both apply, and until now nothing had both. A test had stood
+  since the per-player work recording that divergence and saying in as many
+  words that giving a server a token could not be done safely without fixing
+  it first.
+
 ### Fixed
+
+- **`diag` and `shot` spend ONE budget across both of their waits.** Each
+  issues a request and then waits for a second file — the state dump, the drop
+  box — and each handed the caller's whole `timeout` to both, so a call asked
+  to take at most 60s could legitimately take 120. The tool text was already
+  the honest version: `shot`'s `timeout` read "seconds to wait for the reply
+  and the PNG", which described neither wait alone and nothing at all
+  together. A budget the reply consumes now fails naming the BUDGET, rather
+  than passing a zero down to a wait whose own error ("the game may not be
+  polling — check that a world is loaded") blames a game that just answered.
+
+- **Releasing a capture lock is a protocol, and three parts of it were
+  unstated.** The stamp is written BEFORE the lock is unlinked, and reversing
+  the two still passes every test — what changes is invisible from one
+  session: the unlink frees the name, a session already polling takes it in
+  that instant, and reads the second the PREVIOUS capture left behind, so both
+  PNGs land together. That is this feature's whole failure mode, reached
+  through the release rather than the claim. The unlink also sat unguarded in
+  a `finally`, where an exception does not join what is in flight but REPLACES
+  it: a capture that took its picture and got its reply came back as a
+  `PermissionError` about a lock file, and one that timed out lost the error
+  explaining why. It is reported through the reply's `note` now instead. And
+  the lock is given back on the interrupt path — the holder spends nearly all
+  its wall clock asleep on the second boundary, which is the one way the lock
+  outlives its session with the session still alive.
 
 - **The capture lock's staleness bound is the holder's own deadline, not a
   60-second guess.** Until now the only signal was the lock's mtime, and it

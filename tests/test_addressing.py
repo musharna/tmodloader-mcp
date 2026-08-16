@@ -27,9 +27,15 @@ from pathlib import Path
 
 import pytest
 
+from tmodloader_mcp import heartbeat
 from tmodloader_mcp import session as session_mod
 from tmodloader_mcp.session import Session
-from tmodloader_mcp.triggers import Reply, TriggerError, artifacts_for
+from tmodloader_mcp.triggers import (
+    Reply,
+    TriggerError,
+    artifacts_for,
+    artifacts_for_server,
+)
 
 #: The session's own player, and somebody else entirely. Both are real names
 #: run through the real token rule rather than hand-spelled filenames, so these
@@ -189,17 +195,67 @@ def test_a_reply_to_an_unaddressed_request_still_comes_to_this_session(
 
 
 def test_a_server_reply_is_never_looked_for_under_a_player(sess, cfg, monkeypatch):
-    """The dedicated server has no player, and handing it a token would name a
-    file nothing writes. `target` must not change that: the server side stays
-    unsuffixed however the request was addressed."""
+    """The dedicated server has no player, so a PLAYER token must never name
+    one of its files - it would be a path nothing writes.
+
+    It does have an address, and its answers carry that; what stays true is
+    that `target` cannot change which files a server side reads. This test
+    used to assert the server was unsuffixed FULL STOP, which was the right
+    assertion while a server had nothing to be named by."""
     _publish(cfg, server=True)
     _replies_when_triggered(
-        monkeypatch, cfg.artifact(cfg.artifacts.result, server=True), "server says"
+        monkeypatch,
+        cfg.artifact(artifacts_for_server(cfg.mod_name, sess.port).result, server=True),
+        "server says",
     )
 
     assert (
         sess.ask("diag", server=True, target=OTHER, timeout=1.0).text == "server says"
     )
+
+
+def test_two_servers_on_one_save_directory_do_not_share_an_answer_file(cfg):
+    """THE OTHER HALF OF THE FIX, and the half that looks fixed without being.
+
+    Addressing alone routes correctly and still loses the answer: server A
+    serves the request addressed to A, then writes its reply into the very
+    file B is also writing, and B's harness reads A's. That is the collision
+    per-player naming removed for clients, surviving behind a routing fix.
+
+    Asserted as a property of the names rather than by running two servers,
+    for the reason the staging-file test gives: a race reproduces sometimes,
+    and a test that fails sometimes is not a test.
+    """
+    a = Session(cfg=cfg, mode="server_client", port=7810, player=SELF)
+    b = Session(cfg=cfg, mode="server_client", port=7811, player=OTHER)
+
+    for name in ("result", "diag", "heartbeat"):
+        mine = a.path(getattr(a._names(server=True), name), server=True)
+        theirs = b.path(getattr(b._names(server=True), name), server=True)
+        assert mine != theirs, (
+            f"both servers write their {name} to {mine.name} - whichever writes "
+            "last, both harnesses read"
+        )
+
+    # POSITIVE CONTROL, same test: the trigger and the command list are SHARED
+    # on purpose and must NOT have separated. A per-server trigger would make
+    # addressing meaningless, because neither server would be polling the name
+    # a request actually landed under.
+    for name in ("trigger", "commands", "capture_lock", "capture_stamp"):
+        assert a.path(getattr(a._names(server=True), name), server=True) == b.path(
+            getattr(b._names(server=True), name), server=True
+        ), f"{name} went per-server, and it is the one thing that must not"
+
+
+def test_a_server_with_no_port_writes_exactly_what_it_always_did(cfg):
+    """Degradation, not breakage. A session with no port to name a server by
+    falls back to the unsuffixed names - the old ambiguity, which two sessions
+    survived before this existed, rather than a new set of filenames nothing
+    on the mod side writes."""
+    nameless = Session(cfg=cfg, mode="server_client", port=None, player=SELF)
+
+    assert nameless._names(server=True).result == cfg.artifacts.result
+    assert nameless._names(server=True).heartbeat == cfg.artifacts.heartbeat
 
 
 # ---- site 2: diag(), the dump file --------------------------------------
@@ -248,6 +304,117 @@ def test_an_unaddressed_shot_still_uses_this_sessions_drop_box(sess, cfg, monkey
     kept = sess.shot("full", timeout=1.0)
 
     assert artifacts_for(cfg.mod_name, SELF).shot.split(".")[0] in kept.name
+
+
+# ---- one budget for a two-wait call ------------------------------------
+
+
+def _reply_costing(monkeypatch, cfg: FakeCfg, spend: list[float], *, png: bool):
+    """A reply that takes `spend[0]` seconds to arrive, and the file it
+    promises already on disk when it does.
+
+    The whole point is the SECOND wait, so the first is charged deliberately
+    rather than raced for: `spend` is a one-item list so a test can change
+    what the reply costs between two calls and use one as the other's
+    control.
+    """
+    names = artifacts_for(cfg.mod_name, SELF)
+
+    def slow_ask(
+        self, command, *, argument=None, target=None, server=False, timeout=60.0
+    ):
+        time.sleep(spend[0])
+        if png:
+            cfg.artifact(names.shot, server=False).write_bytes(_png())
+        else:
+            cfg.artifact(names.diag, server=False).write_text("player: " + SELF + "\n")
+        return Reply(command=command, text="ok")
+
+    monkeypatch.setattr(Session, "ask", slow_ask)
+
+
+def _records_the_budget(monkeypatch, method: str, given: list[float]):
+    real = getattr(Session, method)
+
+    def watching(self, path, *, timeout, what):
+        given.append(timeout)
+        return real(self, path, timeout=timeout, what=what)
+
+    monkeypatch.setattr(Session, method, watching)
+
+
+@pytest.mark.parametrize(
+    ("call", "method", "png"),
+    [
+        (lambda s, t: s.diag(timeout=t), "_await_text", False),
+        (lambda s, t: s.shot("full", timeout=t), "_await_png", True),
+    ],
+    ids=["diag", "shot"],
+)
+def test_a_two_wait_call_spends_one_budget_and_not_two(
+    sess, cfg, monkeypatch, call, method, png
+):
+    """THE DEFECT. Both sites, because a fix to one is a tripwire removal.
+
+    `diag` and `shot` are each two waits - the reply, then the file the reply
+    promises - and each handed the caller's WHOLE timeout to both. So a call
+    asked to take at most 60s could legitimately take 120, silently, and a
+    caller who bounded it to fit their own budget got twice what they asked
+    for. The tool text was already the honest version: `shot`'s `timeout`
+    reads "seconds to wait for the reply and the PNG", which described neither
+    wait alone and nothing at all together.
+    """
+    spend = [1.2]
+    given: list[float] = []
+    _reply_costing(monkeypatch, cfg, spend, png=png)
+    _records_the_budget(monkeypatch, method, given)
+
+    call(sess, 2.0)
+
+    assert given and given[0] <= 1.0, (
+        f"the second wait was given {given[0]:.2f}s after the reply had "
+        "already spent 1.2s of a 2.0s budget - so the call can take nearly "
+        "twice what the caller asked for"
+    )
+
+    # POSITIVE CONTROL, same test: a reply that costs nothing must still leave
+    # nearly the whole budget, so this cannot pass by the second wait having
+    # been given some small fixed number.
+    spend[0] = 0.0
+    given.clear()
+    call(sess, 2.0)
+
+    assert given and given[0] > 1.5, (
+        f"an instant reply left only {given[0]:.2f}s of 2.0s for the second "
+        "wait - the budget is being spent somewhere nobody asked it to be"
+    )
+
+
+def test_a_budget_spent_on_the_reply_blames_the_budget_not_the_game(
+    sess, cfg, monkeypatch
+):
+    """Where the remainder goes when there is none left.
+
+    Passing a zero down would let `_await_file` answer instead, and its
+    sentence is "no diag dump within 0s ... the game may not be polling -
+    check that a world is loaded and the mod is enabled". Every word of that
+    is about a game which, on this path, has just answered. The reader is sent
+    to restart a world over a timeout that was simply too tight.
+    """
+    spend = [0.4]
+    _reply_costing(monkeypatch, cfg, spend, png=False)
+
+    with pytest.raises(session_mod.TriggerError) as spent:
+        sess.diag(timeout=0.3)
+
+    message = str(spent.value)
+    assert "budget" in message and "longer timeout" in message
+    assert "may not be polling" not in message, (
+        "this is `_await_file`'s message, which blames a game that answered"
+    )
+
+    # POSITIVE CONTROL: the same call, the same reply cost, a budget that fits.
+    assert sess.diag(timeout=5.0).fields.get("player") == SELF
 
 
 # ---- the shared staging file -------------------------------------------
@@ -750,15 +917,52 @@ def test_an_unaddressed_request_is_addressed_to_this_sessions_player(
     assert seen == [f"diag@{SELF}"], f"composed {seen}, not an addressed payload"
 
 
-def test_the_server_side_is_never_addressed(sess, cfg, monkeypatch):
-    """POSITIVE CONTROL, and a real hazard.
+def test_the_server_side_is_addressed_by_its_port(sess, cfg, monkeypatch):
+    """THE DEFECT, at the site that produced it.
 
-    A dedicated server has no local player, so `IsFor` returns FALSE for any
-    non-empty target - addressing it would mean it never answers anything
-    again. It also writes a `-server` suffixed trigger, so it was never
-    contended and has nothing to gain here.
+    This test used to assert the opposite - that a server request goes out
+    UNADDRESSED - on the grounds that a dedicated server has no local player,
+    so `IsFor` returns false for any non-empty target and addressing it would
+    silence it for good. That was a true statement about the mod and the wrong
+    conclusion drawn from it: what followed was that two sessions each driving
+    their own server out of one save directory wrote indistinguishable
+    requests to one server-side trigger. The request went to whichever polled
+    first, and either session's `launch` or `stop` could destroy the other's
+    in flight. `DevArtifacts.ServerAddress` gives a server something to match,
+    so the conclusion no longer follows.
     """
     _publish(cfg, server=True)
+    seen: list[str] = []
+    real = session_mod._claim_atomically
+
+    def spy(path, text):
+        seen.append(text)
+        return real(path, text)
+
+    monkeypatch.setattr(session_mod, "_claim_atomically", spy)
+    _replies_when_triggered(
+        monkeypatch,
+        cfg.artifact(artifacts_for_server(cfg.mod_name, sess.port).result, server=True),
+        "server says",
+    )
+
+    sess.ask("diag", server=True, timeout=1.0)
+
+    assert seen == [f"diag@port{sess.port}"], (
+        f"composed {seen}, which the other server cannot tell from its own"
+    )
+
+
+def test_a_server_with_no_port_falls_back_to_an_unaddressed_request(cfg, monkeypatch):
+    """POSITIVE CONTROL for the address, and the degradation rule.
+
+    A session with no port has nothing to name its server by, and must write
+    the untargeted request it always did rather than inventing an address.
+    That is the OLD ambiguity - survivable, and what every server did before
+    this - where a made-up address would be two servers claiming to be one.
+    """
+    _publish(cfg, server=True)
+    nameless = Session(cfg=cfg, mode="server_client", port=None, player=SELF)
     seen: list[str] = []
     real = session_mod._claim_atomically
 
@@ -771,9 +975,162 @@ def test_the_server_side_is_never_addressed(sess, cfg, monkeypatch):
         monkeypatch, cfg.artifact(cfg.artifacts.result, server=True), "server says"
     )
 
-    sess.ask("diag", server=True, timeout=1.0)
+    nameless.ask("diag", server=True, timeout=1.0)
 
-    assert seen == ["diag"], f"the server was addressed: {seen}"
+    assert seen == ["diag"]
+
+
+#: The address vectors, spelled here as literals rather than computed. The mod
+#: asserts the identical strings in `DevArtifactsTests.ThePortIsTheAddress`,
+#: and there is no shared code between the two languages - nothing at runtime
+#: would notice them drifting apart, because each side would compose its own
+#: spelling and simply never meet. Same arrangement `PlayerTokenTests` holds
+#: for the player token.
+SERVER_ADDRESS_VECTORS = [(7810, "port7810"), (7777, "port7777"), (1, "port1")]
+
+
+@pytest.mark.parametrize(("port", "expected"), SERVER_ADDRESS_VECTORS)
+def test_the_address_is_spelled_the_way_the_mod_spells_it(port, expected):
+    assert session_mod.server_address(port) == expected
+
+
+def test_an_addressed_server_heartbeat_is_still_not_read_as_a_clients(tmp_path):
+    """`heartbeat.client_files` tells a client's heartbeat from the dedicated
+    server's by matching PLAYER_TOKEN_GRAMMAR, and excludes the server BY
+    CONSTRUCTION rather than by a special case: `server` does not end in a dash
+    and four hex characters.
+
+    A port CAN end that way - `7810` is four hex digits - so giving the server
+    a name is exactly the change that could have broken this, and it is the
+    diagnosis the walk exists to keep straight.
+    """
+    prefix = "biomancy"
+    # The REAL discovery walk over REAL files, not a regex asserted against
+    # itself: the grammar lives in one module and the exclusion this is about
+    # lives in another, and only running the walk exercises both.
+    for port in (7810, 7777, 1234, 65535):
+        stem = artifacts_for_server(prefix, port).heartbeat.removesuffix(".txt")
+        (tmp_path / f"{stem}-server.txt").write_text("hooks-seen: PostUpdateWorld\n")
+
+    # POSITIVE CONTROL, same test: a real client heartbeat in the same
+    # directory IS found, so this cannot pass by the walk having stopped
+    # finding anything at all.
+    client = artifacts_for(prefix, SELF).heartbeat
+    (tmp_path / client).write_text("hooks-seen: PostUpdateInput\n")
+
+    found = [p.name for p in heartbeat.client_files(tmp_path, prefix)]
+
+    assert found == [client], (
+        f"the walk reported {found} as clients - a dedicated server's heartbeat "
+        "is in there, which is the one thing this discovery exists to keep apart"
+    )
+
+
+def test_only_one_of_the_four_possible_server_spellings_would_have_broken_that(
+    tmp_path,
+):
+    """WHICH GUARD IS ACTUALLY HOLDING, measured rather than asserted in prose.
+
+    Two independent choices decide the server heartbeat's name: whether the
+    side suffix goes before or after the token, and whether the address carries
+    the `port` prefix. `server_address`'s docstring first claimed the prefix
+    was what kept the walk above honest. It is not - the composition order
+    alone is enough, and so is the prefix alone. Only doing BOTH the other way
+    round produces a name the walk reads as a client.
+
+    That is worth a test rather than a comment for two reasons: it is the sort
+    of claim that reads as obviously true in either direction, and it is what
+    says which of the two guards may be dropped if anybody wants to. The
+    shipped spelling is the first entry.
+    """
+    spellings = {
+        "biomancy-hooks-port7810-server.txt": False,  # shipped
+        "biomancy-hooks-7810-server.txt": False,  # token first, bare port
+        "biomancy-hooks-server-port7810.txt": False,  # side first, prefixed
+        "biomancy-hooks-server-7810.txt": True,  # side first, bare - THE BAD ONE
+    }
+
+    read_as_client = {}
+    for name in spellings:
+        for existing in tmp_path.iterdir():
+            existing.unlink()
+        (tmp_path / name).write_text("hooks-seen: PostUpdateWorld\n")
+        read_as_client[name] = bool(heartbeat.client_files(tmp_path, "biomancy"))
+
+    assert read_as_client == spellings, (
+        f"the guards do not hold where they were thought to: {read_as_client}"
+    )
+
+
+def test_a_launch_does_not_destroy_the_OTHER_servers_pending_request(cfg):
+    """THE HARM, stated as the residual stated it: A's cleanup takes B's
+    in-flight server-side request.
+
+    `_release_trigger` deletes a pending request only where it is this
+    session's to take back, and the ONLY signal is the address the payload
+    carries. With server requests untargeted, every one of them read as
+    "belongs to whoever polls first, and this session is a whoever" - so a
+    second session launching or stopping deleted a request the first was
+    still waiting on the answer to. The client side never had this, because a
+    client request has always carried a name.
+    """
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=True)
+
+    # B's request, in flight on the shared server-side trigger.
+    trigger.write_text("diag@port7811")
+
+    session_mod._release_trigger(cfg, player=SELF, port=7810)
+
+    assert trigger.is_file(), (
+        "A's cleanup deleted a request addressed to B's server, which B is "
+        "still waiting for the answer to"
+    )
+
+    # POSITIVE CONTROL, same test: A's OWN pending request IS cleared. Without
+    # this the assertion above passes on a `_release_trigger` that never
+    # deletes anything - and leaving your own stale request behind wedges the
+    # slot for both sessions, which is the opposite failure.
+    trigger.write_text("diag@port7810")
+    session_mod._release_trigger(cfg, player=SELF, port=7810)
+
+    assert not trigger.exists(), (
+        "this session left its own pending server request on the shared "
+        "trigger, where it blocks the next request from either session"
+    )
+
+
+def test_a_sessions_own_server_leftovers_are_cleared_at_launch(cfg):
+    """The other side of giving the server a name: `_clear_stale_artifacts`
+    has to know it.
+
+    A reply or heartbeat left by a DEAD run is what lets a readiness check
+    pass against a process that is gone - the whole reason that function
+    exists. Once a server's answers carry its port, clearing only the
+    unsuffixed server names leaves the previous run's `-port7810-server`
+    files exactly where the next run on the same port will read them.
+    """
+    names = artifacts_for_server(cfg.mod_name, 7810)
+    mine = [
+        cfg.artifact(names.heartbeat, server=True),
+        cfg.artifact(names.result, server=True),
+    ]
+    for path in mine:
+        path.write_text("left over from a run that is gone")
+
+    # Another session's server, on another port. Not this session's to delete
+    # - the same rule that leaves other players' files alone.
+    theirs = cfg.artifact(
+        artifacts_for_server(cfg.mod_name, 7811).heartbeat, server=True
+    )
+    theirs.write_text("a live server on another port")
+
+    session_mod._clear_stale_artifacts(cfg, player=SELF, port=7810)
+
+    assert not any(p.exists() for p in mine), (
+        f"{[p.name for p in mine if p.exists()]} survived the launch that "
+        "cleared them - a readiness check can pass against a dead server"
+    )
+    assert theirs.is_file(), "another session's live server heartbeat was deleted"
 
 
 def test_launch_refuses_a_character_name_padded_with_whitespace(monkeypatch):
@@ -1309,6 +1666,233 @@ def test_the_capture_lock_is_released_even_when_the_reply_never_comes(
         "this second - and Terraria may well have written a PNG regardless "
         "of whether the reply arrived"
     )
+
+
+# ---- releasing the capture lock ---------------------------------------------
+
+
+def _answers_a_capture(monkeypatch, cfg: FakeCfg, text: str = "PNG: C:\\x.png"):
+    """A game that serves the request and takes it off the trigger.
+
+    Nothing else in this fake environment consumes a trigger, so without this
+    a second `ask` in the same test blocks on the first one's abandoned
+    request rather than on whatever the test is about.
+    """
+
+    def answer(self, result, *, timeout, what):
+        cfg.artifact(cfg.artifacts.trigger, server=False).unlink(missing_ok=True)
+        cfg.artifact(cfg.artifacts.trigger, server=True).unlink(missing_ok=True)
+        return text
+
+    monkeypatch.setattr(session_mod.Session, "_await_text", answer)
+
+
+def _lock_will_not_go(monkeypatch, lock: Path) -> None:
+    """A lock whose unlink refuses - a Windows share that lost its handle, a
+    permission the save directory picked up. Scoped to the ONE path, so the
+    staging files and the reply file this call also removes are untouched."""
+    real = Path.unlink
+
+    def refusing(self, *args, **kwargs):
+        if Path(self) == lock:
+            raise PermissionError(13, "Permission denied", str(lock))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refusing)
+
+
+def test_the_stamp_is_written_before_the_lock_is_freed(sess, cfg, monkeypatch):
+    """THE ORDER, asserted as the race it protects rather than as an ordering.
+
+    Reversed, the two statements in `_release_capture` still both run and
+    every existing test still passes: the stamp is written, the lock is
+    released, the capture answers. What changes is invisible from one session
+    - the unlink frees the name, and a session already polling for it takes
+    the lock in that instant and reads a stamp belonging to the capture
+    BEFORE this one. Its boundary wait returns 0.0 and both PNGs land in the
+    same second, which is the collision this whole mechanism exists to stop,
+    arrived at through the release.
+
+    So the test does what that session would do, at the only moment it could
+    matter: it tries to claim the lock from inside the stamp write. Blocked is
+    the answer that means the order is right, and it is the real claim
+    primitive being refused rather than a peek at the file's existence.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    _answers_a_capture(monkeypatch, cfg)
+
+    interloper: list[str] = []
+    real_stamp = session_mod._write_stamp
+
+    def racing(stamp, when):
+        try:
+            session_mod._claim_atomically(lock, "the next session")
+            interloper.append("took it")
+        except session_mod.SlotBusy:
+            interloper.append("blocked")
+        real_stamp(stamp, when)
+
+    monkeypatch.setattr(session_mod, "_write_stamp", racing)
+
+    sess.ask("capture", timeout=5.0)
+
+    assert interloper == ["blocked"], (
+        f"the next session {interloper} while this one was still writing its "
+        "stamp - so it would wait out a second belonging to the capture before "
+        "this one, and land in this one"
+    )
+
+
+def test_a_lock_that_will_not_go_is_reported_rather_than_raised(sess, cfg, monkeypatch):
+    """A failed unlink must not eat the answer to a capture that worked.
+
+    `lock.unlink` sat unguarded in `ask`'s `finally`, and an exception raised
+    there does not join whatever is in flight - it REPLACES it. So a capture
+    that took its picture, got its reply and did everything right came back to
+    the caller as a PermissionError about a lock file.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    _answers_a_capture(monkeypatch, cfg)
+
+    # POSITIVE CONTROL FIRST, before the unlink is broken: the same call
+    # answers with nothing to report, so neither assertion below can pass by
+    # every capture having grown a note.
+    clean = sess.ask("capture", timeout=5.0)
+    assert clean.text == "PNG: C:\\x.png"
+    assert clean.note is None
+
+    _lock_will_not_go(monkeypatch, lock)
+    reply = sess.ask("capture", timeout=5.0)
+
+    assert reply.text == "PNG: C:\\x.png", (
+        "the capture's own answer was replaced by its housekeeping"
+    )
+    assert reply.note is not None and str(lock) in reply.note, (
+        f"note was {reply.note!r} - a lock that will not go is the one thing "
+        "on this path a human can act on, and it went unsaid"
+    )
+
+
+def test_a_lock_that_will_not_go_does_not_replace_the_error_in_flight(
+    sess, cfg, monkeypatch
+):
+    """The same guard on the other branch, and the more damaging one.
+
+    A capture that timed out has an error worth reading - the game is not
+    polling, the world is not loaded. Swapping it for a PermissionError about
+    a lock sends the reader to the filesystem for a problem that is in the
+    game.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+
+    def never(self, result, *, timeout, what):
+        # Consumed before the raise, standing in for the mod, which deletes a
+        # trigger before dispatching it and so has taken this one whether or
+        # not the answer ever comes back. Without it the SECOND call below
+        # fails claiming the trigger - a real error, but not this one.
+        cfg.artifact(cfg.artifacts.trigger, server=False).unlink(missing_ok=True)
+        raise session_mod.TriggerError("no reply came")
+
+    monkeypatch.setattr(session_mod.Session, "_await_text", never)
+
+    # POSITIVE CONTROL, again first: the error arrives as itself while the
+    # unlink still works.
+    with pytest.raises(session_mod.TriggerError, match="no reply came"):
+        sess.ask("capture", timeout=5.0)
+
+    _lock_will_not_go(monkeypatch, lock)
+
+    with pytest.raises(session_mod.TriggerError, match="no reply came"):
+        sess.ask("capture", timeout=5.0)
+
+
+def test_an_interrupt_in_the_boundary_wait_does_not_keep_the_lock(
+    sess, cfg, monkeypatch
+):
+    """Ctrl-C during the boundary sleep must not leave a lock behind.
+
+    This is the one place the lock outlives its session by DESIGN rather than
+    by crash. A crash takes the process with it and the next session's
+    deadline check tidies up; here the process survives, holding a name it
+    will never return to, and the caller who pressed Ctrl-C has no idea they
+    now own a file that blocks both sessions' captures.
+
+    `_claim_capture` spends nearly all its wall clock inside that sleep, so
+    "narrow" describes the code and not the odds.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+
+    # A capture that finished at the top of this second, so there IS a
+    # boundary to wait out. Without it the sleep below is never reached and
+    # this test would pass against code that releases nothing.
+    session_mod._write_stamp(stamp, math.floor(time.time()))
+
+    slept: list[float] = []
+    held: list[bool] = []
+
+    def interrupted(seconds):
+        slept.append(seconds)
+        held.append(lock.exists())
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(session_mod.time, "sleep", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        sess.ask("capture", timeout=30.0)
+
+    assert slept and 0 < slept[0] <= session_mod.STAMP_WAIT_MAX, (
+        f"the interrupt landed on some other sleep ({slept}) - the claim loop's "
+        "retry, say - and not on the boundary wait this test is about"
+    )
+    assert held == [True], (
+        "the lock was never taken, so its absence afterwards proves nothing"
+    )
+    assert not lock.exists(), (
+        "an interrupted capture kept the lock, and the process it belongs to "
+        "is still alive and will never come back for it"
+    )
+
+
+def test_a_capture_aimed_at_the_dedicated_server_takes_no_lock(sess, cfg, monkeypatch):
+    """The `and not server` half of the predicate, which nothing covered.
+
+    A dedicated server has no graphics device and refuses `capture` outright,
+    so there is no picture to serialise. Worse than useless: the lock it would
+    take is a DIFFERENT, `-server` suffixed file, so it serialises against
+    nothing while still charging the caller a boundary wait and still able to
+    block on itself.
+    """
+    _publish(cfg, server=True)
+    _publish(cfg)
+    _answers_a_capture(monkeypatch, cfg, text="REFUSED: capture on a server")
+
+    client_lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    server_lock = cfg.artifact(cfg.artifacts.capture_lock, server=True)
+
+    claimed: list[Path] = []
+    real_claim = session_mod.Session._claim_capture
+
+    def counting(self, lock, stamp, *, timeout):
+        claimed.append(lock)
+        return real_claim(self, lock, stamp, timeout=timeout)
+
+    monkeypatch.setattr(session_mod.Session, "_claim_capture", counting)
+
+    sess.ask("capture", server=True, timeout=5.0)
+
+    assert claimed == [], "the server side serialised against a lock nobody shares"
+    assert not server_lock.exists()
+
+    # POSITIVE CONTROL, same test: the same verb on the client side does take
+    # one, so this cannot pass by the predicate having been broken outright.
+    sess.ask("capture", timeout=5.0)
+
+    assert claimed == [client_lock]
 
 
 def test_a_budget_eaten_by_the_boundary_wait_leaves_no_request_behind(
