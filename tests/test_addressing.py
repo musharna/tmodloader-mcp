@@ -1311,6 +1311,233 @@ def test_the_capture_lock_is_released_even_when_the_reply_never_comes(
     )
 
 
+# ---- releasing the capture lock ---------------------------------------------
+
+
+def _answers_a_capture(monkeypatch, cfg: FakeCfg, text: str = "PNG: C:\\x.png"):
+    """A game that serves the request and takes it off the trigger.
+
+    Nothing else in this fake environment consumes a trigger, so without this
+    a second `ask` in the same test blocks on the first one's abandoned
+    request rather than on whatever the test is about.
+    """
+
+    def answer(self, result, *, timeout, what):
+        cfg.artifact(cfg.artifacts.trigger, server=False).unlink(missing_ok=True)
+        cfg.artifact(cfg.artifacts.trigger, server=True).unlink(missing_ok=True)
+        return text
+
+    monkeypatch.setattr(session_mod.Session, "_await_text", answer)
+
+
+def _lock_will_not_go(monkeypatch, lock: Path) -> None:
+    """A lock whose unlink refuses - a Windows share that lost its handle, a
+    permission the save directory picked up. Scoped to the ONE path, so the
+    staging files and the reply file this call also removes are untouched."""
+    real = Path.unlink
+
+    def refusing(self, *args, **kwargs):
+        if Path(self) == lock:
+            raise PermissionError(13, "Permission denied", str(lock))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refusing)
+
+
+def test_the_stamp_is_written_before_the_lock_is_freed(sess, cfg, monkeypatch):
+    """THE ORDER, asserted as the race it protects rather than as an ordering.
+
+    Reversed, the two statements in `_release_capture` still both run and
+    every existing test still passes: the stamp is written, the lock is
+    released, the capture answers. What changes is invisible from one session
+    - the unlink frees the name, and a session already polling for it takes
+    the lock in that instant and reads a stamp belonging to the capture
+    BEFORE this one. Its boundary wait returns 0.0 and both PNGs land in the
+    same second, which is the collision this whole mechanism exists to stop,
+    arrived at through the release.
+
+    So the test does what that session would do, at the only moment it could
+    matter: it tries to claim the lock from inside the stamp write. Blocked is
+    the answer that means the order is right, and it is the real claim
+    primitive being refused rather than a peek at the file's existence.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    _answers_a_capture(monkeypatch, cfg)
+
+    interloper: list[str] = []
+    real_stamp = session_mod._write_stamp
+
+    def racing(stamp, when):
+        try:
+            session_mod._claim_atomically(lock, "the next session")
+            interloper.append("took it")
+        except session_mod.SlotBusy:
+            interloper.append("blocked")
+        real_stamp(stamp, when)
+
+    monkeypatch.setattr(session_mod, "_write_stamp", racing)
+
+    sess.ask("capture", timeout=5.0)
+
+    assert interloper == ["blocked"], (
+        f"the next session {interloper} while this one was still writing its "
+        "stamp - so it would wait out a second belonging to the capture before "
+        "this one, and land in this one"
+    )
+
+
+def test_a_lock_that_will_not_go_is_reported_rather_than_raised(sess, cfg, monkeypatch):
+    """A failed unlink must not eat the answer to a capture that worked.
+
+    `lock.unlink` sat unguarded in `ask`'s `finally`, and an exception raised
+    there does not join whatever is in flight - it REPLACES it. So a capture
+    that took its picture, got its reply and did everything right came back to
+    the caller as a PermissionError about a lock file.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    _answers_a_capture(monkeypatch, cfg)
+
+    # POSITIVE CONTROL FIRST, before the unlink is broken: the same call
+    # answers with nothing to report, so neither assertion below can pass by
+    # every capture having grown a note.
+    clean = sess.ask("capture", timeout=5.0)
+    assert clean.text == "PNG: C:\\x.png"
+    assert clean.note is None
+
+    _lock_will_not_go(monkeypatch, lock)
+    reply = sess.ask("capture", timeout=5.0)
+
+    assert reply.text == "PNG: C:\\x.png", (
+        "the capture's own answer was replaced by its housekeeping"
+    )
+    assert reply.note is not None and str(lock) in reply.note, (
+        f"note was {reply.note!r} - a lock that will not go is the one thing "
+        "on this path a human can act on, and it went unsaid"
+    )
+
+
+def test_a_lock_that_will_not_go_does_not_replace_the_error_in_flight(
+    sess, cfg, monkeypatch
+):
+    """The same guard on the other branch, and the more damaging one.
+
+    A capture that timed out has an error worth reading - the game is not
+    polling, the world is not loaded. Swapping it for a PermissionError about
+    a lock sends the reader to the filesystem for a problem that is in the
+    game.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+
+    def never(self, result, *, timeout, what):
+        # Consumed before the raise, standing in for the mod, which deletes a
+        # trigger before dispatching it and so has taken this one whether or
+        # not the answer ever comes back. Without it the SECOND call below
+        # fails claiming the trigger - a real error, but not this one.
+        cfg.artifact(cfg.artifacts.trigger, server=False).unlink(missing_ok=True)
+        raise session_mod.TriggerError("no reply came")
+
+    monkeypatch.setattr(session_mod.Session, "_await_text", never)
+
+    # POSITIVE CONTROL, again first: the error arrives as itself while the
+    # unlink still works.
+    with pytest.raises(session_mod.TriggerError, match="no reply came"):
+        sess.ask("capture", timeout=5.0)
+
+    _lock_will_not_go(monkeypatch, lock)
+
+    with pytest.raises(session_mod.TriggerError, match="no reply came"):
+        sess.ask("capture", timeout=5.0)
+
+
+def test_an_interrupt_in_the_boundary_wait_does_not_keep_the_lock(
+    sess, cfg, monkeypatch
+):
+    """Ctrl-C during the boundary sleep must not leave a lock behind.
+
+    This is the one place the lock outlives its session by DESIGN rather than
+    by crash. A crash takes the process with it and the next session's
+    deadline check tidies up; here the process survives, holding a name it
+    will never return to, and the caller who pressed Ctrl-C has no idea they
+    now own a file that blocks both sessions' captures.
+
+    `_claim_capture` spends nearly all its wall clock inside that sleep, so
+    "narrow" describes the code and not the odds.
+    """
+    _publish(cfg)
+    lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
+
+    # A capture that finished at the top of this second, so there IS a
+    # boundary to wait out. Without it the sleep below is never reached and
+    # this test would pass against code that releases nothing.
+    session_mod._write_stamp(stamp, math.floor(time.time()))
+
+    slept: list[float] = []
+    held: list[bool] = []
+
+    def interrupted(seconds):
+        slept.append(seconds)
+        held.append(lock.exists())
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(session_mod.time, "sleep", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        sess.ask("capture", timeout=30.0)
+
+    assert slept and 0 < slept[0] <= session_mod.STAMP_WAIT_MAX, (
+        f"the interrupt landed on some other sleep ({slept}) - the claim loop's "
+        "retry, say - and not on the boundary wait this test is about"
+    )
+    assert held == [True], (
+        "the lock was never taken, so its absence afterwards proves nothing"
+    )
+    assert not lock.exists(), (
+        "an interrupted capture kept the lock, and the process it belongs to "
+        "is still alive and will never come back for it"
+    )
+
+
+def test_a_capture_aimed_at_the_dedicated_server_takes_no_lock(sess, cfg, monkeypatch):
+    """The `and not server` half of the predicate, which nothing covered.
+
+    A dedicated server has no graphics device and refuses `capture` outright,
+    so there is no picture to serialise. Worse than useless: the lock it would
+    take is a DIFFERENT, `-server` suffixed file, so it serialises against
+    nothing while still charging the caller a boundary wait and still able to
+    block on itself.
+    """
+    _publish(cfg, server=True)
+    _publish(cfg)
+    _answers_a_capture(monkeypatch, cfg, text="REFUSED: capture on a server")
+
+    client_lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
+    server_lock = cfg.artifact(cfg.artifacts.capture_lock, server=True)
+
+    claimed: list[Path] = []
+    real_claim = session_mod.Session._claim_capture
+
+    def counting(self, lock, stamp, *, timeout):
+        claimed.append(lock)
+        return real_claim(self, lock, stamp, timeout=timeout)
+
+    monkeypatch.setattr(session_mod.Session, "_claim_capture", counting)
+
+    sess.ask("capture", server=True, timeout=5.0)
+
+    assert claimed == [], "the server side serialised against a lock nobody shares"
+    assert not server_lock.exists()
+
+    # POSITIVE CONTROL, same test: the same verb on the client side does take
+    # one, so this cannot pass by the predicate having been broken outright.
+    sess.ask("capture", timeout=5.0)
+
+    assert claimed == [client_lock]
+
+
 def test_a_budget_eaten_by_the_boundary_wait_leaves_no_request_behind(
     sess, cfg, monkeypatch
 ):
