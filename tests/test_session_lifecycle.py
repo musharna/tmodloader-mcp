@@ -540,7 +540,7 @@ def _fake_launch_world(monkeypatch, *, existing, after, ready_raises):
 
     monkeypatch.setattr(session_mod.subprocess, "Popen", fake_popen)
 
-    def fake_wait(cfg, *, mode, player, timeout):
+    def fake_wait(cfg, *, mode, player, timeout, port=None):
         if ready_raises:
             raise session_mod.SessionError("no live heartbeat within 300s")
 

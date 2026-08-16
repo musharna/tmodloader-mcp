@@ -69,6 +69,49 @@ def player_token(name: str | None) -> str | None:
     return f"{slug or 'player'}-{digest}"
 
 
+def server_address(port: int | None) -> str | None:
+    """A dedicated server's address, or None if there is no port to name it by.
+
+    BOTH THE TARGET AND THE TOKEN, one string. It is what a request written to
+    the server's trigger is addressed to (`diag@port7810`) AND what names the
+    answers that come back (`biomancy-diag-port7810-server.txt`). Two spellings
+    of one identity would be one more place for the two languages to disagree,
+    and nothing at runtime would notice them drifting — each side would compose
+    its own and simply never meet.
+
+    THE PORT, because it is the one value both sides hold independently with no
+    handshake to get wrong: this harness passes `-port` when it launches the
+    server, and `DevArtifacts.ServerAddress` reads the same argument back off
+    the server's own command line. It is unique by construction too — two
+    servers cannot bind one port, so two servers sharing a save directory
+    cannot share an address.
+
+    THE `port` PREFIX IS THE SECOND OF TWO GUARDS, and honestly it is the
+    weaker one. `heartbeat.client_files` tells a client's heartbeat from the
+    dedicated server's by matching `PLAYER_TOKEN_GRAMMAR` — a slug ending in a
+    dash and four hex characters — and excludes the server BY CONSTRUCTION,
+    because `server` does not end that way. A port CAN end that way: `7810` is
+    four hex digits.
+
+    Measured rather than argued, over the four spellings this could have had:
+    only `<mod>-hooks-server-7810.txt` is read back as a client. That needs the
+    side suffix BEFORE the token AND a bare port — either guard alone is
+    enough, and the composition order is the one that would still hold if this
+    prefix were dropped. So the prefix is belt and braces rather than the load
+    bearing member it was first written up as. It earns its place on legibility
+    instead: `diag@port7810` in a trigger file says what it is, and `diag@7810`
+    reads like somebody's character name.
+
+    A player really can be called `port7810`, and nothing here prevents it. The
+    two kinds of address cannot collide anyway, and not because of how they are
+    spelled: they are never read from the same file. A client polls
+    `<mod>-capture.trigger` and a dedicated server polls
+    `<mod>-capture-server.trigger`, so this form is only ever compared against
+    a server and a character name only ever against a client.
+    """
+    return None if port is None else f"port{port}"
+
+
 @dataclass(frozen=True)
 class Artifacts:
     """The eight filenames a session works with: six agreed with the mod, two
@@ -93,18 +136,29 @@ class Artifacts:
     """
 
     prefix: str
-    #: The client's player token, or None for the dedicated server and for a
-    #: client that has not got a character yet. See MOD_CONTRACT.md: an
-    #: unsuffixed heartbeat is not a legacy name, it MEANS "up, no character".
-    player: str | None = None
+    #: What names this side's answers, or None when nothing does.
+    #:
+    #: NOT ALWAYS A PLAYER, which is why it is no longer called one. A client's
+    #: is its player token; a dedicated server's is its address (`port7810`) —
+    #: see `server_address`. None for a client that has not got a character
+    #: yet, and for a server started without a `-port` to read. See
+    #: MOD_CONTRACT.md: an unsuffixed heartbeat is not a legacy name, it MEANS
+    #: "up, with nothing to be addressed by".
+    token: str | None = None
 
     def _named(self, stem: str, ext: str) -> str:
-        """`<prefix>-<stem>[-<player>].<ext>` — token before the extension.
+        """`<prefix>-<stem>[-<token>].<ext>` — token before the extension.
 
         After, and `biomancy-diag.txt-n43n-003f` stops being a text file to
         anything that reads extensions.
+
+        THE SIDE SUFFIX IS APPLIED AFTER THIS, by `Config.artifact`, giving
+        `<prefix>-<stem>-<token>-server.<ext>`. The mod composes the same two
+        pieces in `DevArtifacts.ForSide` and used to do it the other way round;
+        the two agreed only while a server had no token, which is exactly what
+        stopped being true. See `ADedicatedServerWithATokenMatchesTheHarnessesOrdering`.
         """
-        token = f"-{self.player}" if self.player else ""
+        token = f"-{self.token}" if self.token else ""
         return f"{self.prefix}-{stem}{token}.{ext}"
 
     @property
@@ -183,13 +237,35 @@ class Artifacts:
 
 
 def artifacts_for(mod_name: str, player: str | None = None) -> Artifacts:
-    """The artifact names one mod writes and this harness reads.
+    """The artifact names one mod writes and this harness reads, for a CLIENT.
 
     `player` is a RAW character name; the token rule is applied here so no
     caller has to remember to apply it, and so a caller cannot pass an
     already-tokenised name and get it tokenised twice.
+
+    A dedicated server's names come from `artifacts_for_server` instead — its
+    token is an address rather than a hashed name, and routing it through
+    `player_token` would digest a value both sides have to spell identically.
     """
-    return Artifacts(prefix=mod_name.lower(), player=player_token(player))
+    return Artifacts(prefix=mod_name.lower(), token=player_token(player))
+
+
+def artifacts_for_server(mod_name: str, port: int | None = None) -> Artifacts:
+    """The same names for a DEDICATED SERVER, carrying its address.
+
+    Only the answers pick the address up — the result, the diag dump, the
+    heartbeat. The trigger, the command list and the two capture files stay
+    untokened here exactly as they do for a client, and for the same reason:
+    the trigger is how one server learns a request is aimed at the other, so a
+    per-server trigger would make addressing meaningless. The split is free —
+    `_named` is what applies the token, and those four names do not go through
+    it.
+
+    The command list is shared deliberately rather than by omission. Two
+    servers out of one save directory are running one mod and publish identical
+    lists, so a per-server copy would be two files that can only ever agree.
+    """
+    return Artifacts(prefix=mod_name.lower(), token=server_address(port))
 
 
 #: How stale a heartbeat may be and still count as a live game, in seconds.
