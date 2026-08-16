@@ -11,7 +11,52 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-16
+
+The release where two sessions stop colliding on the one thing neither can see
+the other doing — and where the dedicated server, the only side that could
+never be addressed, finally gets a name.
+
+0.3.0 stopped two clients erasing each other's answers and left three ways they
+could still collide. Terraria stamps a capture's filename to the second before
+the mod is involved, so two captures inside one second produced ONE picture and
+two callers each told it was theirs. The lock that now serialises them was
+bounded by a 60-second guess that was wrong in both directions — it broke a
+live capture whose caller had legitimately asked for longer, and it wedged the
+other session for a full minute over a dead one. And a dedicated server had no
+address at all, so two of them sharing a save directory were indistinguishable
+on disk: the request went to whichever polled first, both wrote their answers
+to one set of filenames, and either session's cleanup could destroy the other's.
+
+Each was found by running it rather than by reading it. The capture collision
+was reproduced against a pre-fix checkout — 0 of 6 rounds passed, with six PNGs
+on disk for twelve requests, so half the pictures were not misattributed but
+lost — and the server's address was checked against a rebuilt mod, 7 of 7, with
+the refusal proved to be a refusal rather than a silence.
+
 ### Added
+
+- **`tests/live_server_address_check.py` — the server's address, run where the
+  mod actually reads it.** The change is inert unless the mod can read `-port`
+  off its own command line, and nothing in either suite reaches that: the
+  Python half tests what the harness composes, the C# half tests
+  `ServerAddress` against a command line handed to it, and `DevResponder.cs` —
+  where they meet, and the only caller of `Environment.GetCommandLineArgs()` —
+  is on no compile line at all.
+
+  Run 2026-08-16 against a rebuilt Biomancy, 7/7. The heartbeat filename is
+  the first proof and needs no request: `launch` accepts either name, so
+  getting that far says only that something answered, and
+  `biomancy-hooks-port7810-server.txt` says which. `side=server netmode=2` off
+  the dump confirms the answer came from the dedicated server rather than the
+  client.
+
+  ONE SERVER IS ENOUGH even though the defect is about two: the negative — a
+  request for `port9999` left unconsumed and unanswered — is the mod's own
+  leave-what-is-not-yours rule, and a second server would need a second world
+  where there is one. The pair is ordered so the refusal is a refusal:
+  without the control that follows it, "the trigger is still there" passes
+  just as well against a server that stopped polling.
 
 - **A dedicated server has an address: its port.** It had none — no
   `Main.LocalPlayer`, so `IsFor` refused every target — and what followed was
@@ -45,6 +90,36 @@ keeping, not because they broke a released API.
   since the per-player work recording that divergence and saying in as many
   words that giving a server a token could not be done safely without fixing
   it first.
+
+
+- **`tests/live_capture_check.py` — the collision, reproduced and closed
+  against the real capture camera.** No test in `tests/` could reach this
+  defect: Terraria names the PNG after the second it started writing it,
+  before the mod is involved, so the collision only exists where Terraria
+  does. Everything else here drives fakes or bare files and passes just as
+  happily with the serialisation deleted.
+
+  It launches a server and client, joins a second client, and fires `capture`
+  from two separate OS processes through a barrier — processes rather than
+  threads, because the lock under test is a filesystem claim BETWEEN sessions
+  and two threads in one interpreter share state the real case does not.
+
+  A pass proves nothing by itself, which is why the file documents its own
+  negative control: point `PYTHONPATH` at a pre-fix checkout and run it again.
+  Measured 2026-08-14 against `b2041a3` (0.3.0, serialisation absent), 0/6
+  rounds passed — both callers named one file every time, and SIX PNGs existed
+  on disk for TWELVE requests. Half the pictures were not misattributed but
+  overwritten and lost. Serialised, on the same clients minutes apart: 3/3,
+  one file per request.
+
+  It also settled why a pre-fix run is FASTER (1.2s against 5-8s). The PNG's
+  name is stamped when the capture starts and the write finishes seconds later
+  — `Capture ... 23_43_59.png` landed at 23:44:06 — so before the fix the
+  loser's `CaptureFind` returned the winner's file the moment it appeared. The
+  slower serialised number is the honest one: it is a session waiting for a
+  picture that is actually its own. The stamp is therefore conservative by a
+  wider margin than its design assumed, recording a reply that arrives after
+  the write completes, long after the name was chosen.
 
 ### Fixed
 
@@ -120,38 +195,6 @@ keeping, not because they broke a released API.
   lock while Terraria may still be writing the PNG. That residual is
   independent of the bound.
 
-### Added
-
-- **`tests/live_capture_check.py` — the collision, reproduced and closed
-  against the real capture camera.** No test in `tests/` could reach this
-  defect: Terraria names the PNG after the second it started writing it,
-  before the mod is involved, so the collision only exists where Terraria
-  does. Everything else here drives fakes or bare files and passes just as
-  happily with the serialisation deleted.
-
-  It launches a server and client, joins a second client, and fires `capture`
-  from two separate OS processes through a barrier — processes rather than
-  threads, because the lock under test is a filesystem claim BETWEEN sessions
-  and two threads in one interpreter share state the real case does not.
-
-  A pass proves nothing by itself, which is why the file documents its own
-  negative control: point `PYTHONPATH` at a pre-fix checkout and run it again.
-  Measured 2026-08-14 against `b2041a3` (0.3.0, serialisation absent), 0/6
-  rounds passed — both callers named one file every time, and SIX PNGs existed
-  on disk for TWELVE requests. Half the pictures were not misattributed but
-  overwritten and lost. Serialised, on the same clients minutes apart: 3/3,
-  one file per request.
-
-  It also settled why a pre-fix run is FASTER (1.2s against 5-8s). The PNG's
-  name is stamped when the capture starts and the write finishes seconds later
-  — `Capture ... 23_43_59.png` landed at 23:44:06 — so before the fix the
-  loser's `CaptureFind` returned the winner's file the moment it appeared. The
-  slower serialised number is the honest one: it is a session waiting for a
-  picture that is actually its own. The stamp is therefore conservative by a
-  wider margin than its design assumed, recording a reply that arrives after
-  the write completes, long after the name was chosen.
-
-### Fixed
 
 - **Two clients capturing in the same wall-clock second no longer collide.**
   Terraria's own capture camera names the output PNG and stamps that name to
@@ -231,6 +274,28 @@ keeping, not because they broke a released API.
   neighbours in the same loop went with it: a stale-lock break skipped the
   deadline check every other cycle performs, and the contention message named
   a holder on a path where the lock had just been unlinked.
+
+### Known
+
+- **Two dedicated servers genuinely racing for one trigger has not been
+  observed.** The mechanism is verified — a server derives its address from
+  its own `-port`, answers only what names it, and leaves what does not where
+  the other would find it — but each half was checked with ONE server and a
+  hand-written trigger. Running two needs a second world; this install has
+  one, and two dedicated servers on a single `.wld` is a corruption risk not
+  worth a test.
+
+- **A responder vendored before this release is not addressable.** It writes
+  the unsuffixed server names and answers untargeted requests exactly as it
+  always did, and `launch` accepts either heartbeat, so it degrades rather
+  than breaks — but two such servers stay indistinguishable. Re-copy
+  `responder/` and rebuild to get the address; `SHA256SUMS` is what tells you
+  a copy is behind, and it did on this one.
+
+- **A capture whose reply times out releases its lock while Terraria may
+  still be writing the PNG.** Carried unchanged from 0.3.0 and independent of
+  the deadline work: the lock is released in a `finally`, and the mod has the
+  request whether or not the answer came back.
 
 ## [0.3.0] - 2026-08-12
 
