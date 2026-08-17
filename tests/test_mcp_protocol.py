@@ -59,6 +59,7 @@ EXPECTED_TOOLS = {
     "trigger",
     "commands",
     "diag",
+    "wait_until",
     "shot",
     "captures",
     "read_capture",

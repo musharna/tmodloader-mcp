@@ -545,6 +545,91 @@ def diag(
     )
 
 
+class WaitOut(TypedDict):
+    matched: bool
+    #: The last reading taken, whether or not it matched. Null both when the
+    #: field genuinely read as absent and when no poll completed - the two are
+    #: told apart by `polls`, and conflating them in the type would be worse
+    #: than either.
+    last: Any
+    polls: int
+    elapsed: float
+    # Always present, never omitted - see `StatusOut`. Null unless the last
+    # poll was cut off by the timeout rather than answered.
+    note: str | None
+
+
+@mcp.tool(
+    title="Wait until the game reaches a state",
+    annotations=_READ_ONLY,
+    structured_output=True,
+)
+def wait_until(
+    field: str,
+    op: str,
+    value: str | None = None,
+    server: bool = False,
+    target: str | None = None,
+    timeout: float = 60.0,
+    poll: float = 2.0,
+) -> WaitOut:
+    """Poll `diag` until one of its fields satisfies a comparison.
+
+    Args:
+        field: A TOP-LEVEL diag field, exactly as `diag` reports it - `vats`,
+            `items`, `world-ready`. Not a path into one: `diag` splits
+            `key: value` and stops, so `npcs` is the whole string
+            `active=4 mutated=0` and there is no `npcs.active`.
+        op: One of `==`, `!=`, `<`, `<=`, `>`, `>=`, `contains`, `changed`.
+        value: What to compare against, as text - it is converted to whatever
+            type the field actually reads as. Omitted for `changed`, which
+            baselines on its first reading.
+        server: Watch the dedicated server's view instead of the client's.
+        target: Watch a specific client by name.
+        timeout: Seconds for the WHOLE call, spent across every poll rather
+            than granted to each.
+        poll: Seconds between polls.
+
+    Use this instead of sleeping and taking a diag. A guessed sleep is wrong in
+    both directions, and the short one is dangerous: the check reads the state
+    BEFORE the thing happened, which looks exactly like the feature being
+    broken.
+
+    THE COMPARISON IS TYPED. `diag` returns counters as ints and the
+    heartbeat's flags as bools; `world-ready == true` compares as a boolean and
+    `items >= 10` as a number, so neither `"10" < "9"` nor the truthiness of
+    `"False"` can come back here.
+
+    IT REFUSES WHAT CAN NEVER COME TRUE rather than waiting it out. An unknown
+    field names the fields that do exist; ordering a composite string says what
+    the value actually is. Both used to be spellable and would have reported a
+    timeout - blaming a game that was answering perfectly.
+
+    Not matching is an ANSWER, not an error: it returns `matched: false` with
+    the last reading it took, so a wait that expected nothing to happen is as
+    expressible as one that expected something to.
+    """
+    if _session is None:
+        raise RuntimeError("no session — call `launch` first")
+
+    got = _session.wait_until(
+        field,
+        op,
+        value,
+        server=server,
+        target=target,
+        timeout=timeout,
+        poll=poll,
+    )
+    return WaitOut(
+        matched=got.matched,
+        last=got.last,
+        polls=got.polls,
+        elapsed=got.elapsed,
+        note=got.note,
+    )
+
+
 @mcp.tool(
     title="Photograph part of the frame",
     annotations=_READ_ONLY,
