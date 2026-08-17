@@ -1199,3 +1199,198 @@ def test_a_spawn_that_fails_halfway_does_not_leak_the_half_that_started(monkeypa
         "failed to start"
     )
     assert 4808 not in windows.live
+
+
+# ---- join(): a second client into a running session ------------------------
+
+
+def _joinable(monkeypatch, tmp_path, *, spawns, ready_for=None, delay_ready=0):
+    """Wire `join`'s dependencies. Returns (cfg, session, windows).
+
+    `spawns` is what appears in the process table when a client is started;
+    `ready_for` is the player whose TOKENED heartbeat the fake mod eventually
+    writes. `delay_ready` withholds it for that many readiness polls, which is
+    how a test makes the wait actually wait.
+
+    Backed by the same fake process table `launch`'s tests use, so a kill here
+    changes what a later read sees rather than being recorded and believed.
+    """
+    cfg = cfg_for(tmp_path)
+    windows = FakeWindows({4808, 5150})  # a server and a client, already up
+    windows.install(monkeypatch)
+
+    session = Session(
+        cfg=cfg,
+        mode="server_client",
+        port=7810,
+        player="n43n",
+        world=r"C:\fake\World.wld",
+        started={4808, 5150},
+    )
+
+    polls = {"n": 0}
+
+    def fake_popen(*a, **k):
+        windows.live |= set(spawns)
+
+    monkeypatch.setattr(session_mod.subprocess, "Popen", fake_popen)
+
+    real_ready = session_mod._client_is_ready
+
+    def gated(cfg_, player):
+        if player == ready_for:
+            polls["n"] += 1
+            if polls["n"] > delay_ready:
+                _client_heartbeat(
+                    cfg_.artifact(
+                        artifacts_for(cfg_.mod_name, player).heartbeat, server=False
+                    )
+                )
+        return real_ready(cfg_, player)
+
+    monkeypatch.setattr(session_mod, "_client_is_ready", gated)
+    monkeypatch.setattr(session_mod.time, "sleep", lambda s: None)
+    return cfg, session, windows
+
+
+def test_a_joined_client_is_waited_for_and_its_pids_recorded(monkeypatch, tmp_path):
+    """The happy path, and the two things that make it teardown-safe.
+
+    The pid matters more than it looks: `stop` kills exactly what a session
+    started, so a client this harness spawned and did not record is a game
+    left running that nothing owns.
+    """
+    cfg, session, _ = _joinable(monkeypatch, tmp_path, spawns={6100}, ready_for="tst2")
+
+    back = session_mod.join(cfg, session, "tst2", timeout=30.0)
+
+    assert back is session
+    assert session.joined == ["tst2"]
+    assert 6100 in session.started, (
+        "the joined client's pid never reached the session, so `stop` will "
+        "leave it running and nothing else knows it exists"
+    )
+
+
+def test_a_join_waits_for_THIS_clients_heartbeat_not_the_shared_one(
+    monkeypatch, tmp_path
+):
+    """THE DEFECT in the code this was lifted from, one layer deeper.
+
+    `live_capture_check.py` waited for a new PID and called it done. Waiting
+    for a heartbeat instead is better but not sufficient: `_wait_ready`
+    accepts EITHER the unsuffixed `<mod>-hooks.txt` or the tokened name for
+    the launch client, and the unsuffixed one is a SLOT rather than a client -
+    every client that boots writes it on the way through the menu and nothing
+    deletes it, so with a client already running it holds that client's
+    record, frozen.
+
+    So a join that accepted it would return against the heartbeat of the game
+    that was ALREADY HERE, before the joining client existed at all. Planted
+    live and world-ready below, exactly as the running client would have left
+    it.
+
+    THE TIMEOUT HAS TO BE NON-ZERO, and this test did not survive its own
+    mutation until it was. With `timeout=0.0` the wait loop never runs, the
+    raise comes from the loop being SKIPPED, and `_client_is_ready` is never
+    consulted at all - so the test passed just as happily against a version
+    that accepted the shared slot. A tripwire nothing walks through.
+    """
+    cfg, session, _ = _joinable(monkeypatch, tmp_path, spawns={6100}, ready_for=None)
+
+    # The already-running client's shared-slot record: live, world-ready, and
+    # nothing to do with the client being joined. Nothing ever writes tst2's
+    # own heartbeat here, so this file is the ONLY thing on disk that could
+    # satisfy the wait.
+    _client_heartbeat(cfg.artifact(cfg.artifacts.heartbeat, server=False))
+
+    with pytest.raises(session_mod.SessionError, match="world-ready heartbeat"):
+        session_mod.join(cfg, session, "tst2", timeout=0.3)
+
+    # POSITIVE CONTROL, same test: with tst2's OWN heartbeat present the very
+    # same predicate says ready, so the refusal above is about WHICH file was
+    # watched and not about the wait being unsatisfiable.
+    _client_heartbeat(
+        cfg.artifact(artifacts_for(cfg.mod_name, "tst2").heartbeat, server=False)
+    )
+    assert session_mod._client_is_ready(cfg, "tst2")
+
+
+def test_a_join_refuses_a_character_already_in_the_session(monkeypatch, tmp_path):
+    """Two clients under one name share a player token, so their heartbeat,
+    reply, diag and shot are one file each between them - the collision
+    per-player naming removed, reachable again through the tool that adds
+    clients."""
+    cfg, session, _ = _joinable(monkeypatch, tmp_path, spawns={6100}, ready_for="tst2")
+
+    with pytest.raises(session_mod.SessionError, match="already in this session"):
+        session_mod.join(cfg, session, "n43n", timeout=30.0)
+
+    # Case-insensitively: the mod compares a target to its own name that way,
+    # so these are one client to the game and two player tokens to the disk -
+    # the worst of both.
+    with pytest.raises(session_mod.SessionError, match="already in this session"):
+        session_mod.join(cfg, session, "N43N", timeout=30.0)
+
+    # POSITIVE CONTROL, same test: a different name is accepted, so the guard
+    # is a guard and not a refusal to join anybody.
+    session_mod.join(cfg, session, "tst2", timeout=30.0)
+    assert session.joined == ["tst2"]
+
+    # And now THAT one is taken too.
+    with pytest.raises(session_mod.SessionError, match="already in this session"):
+        session_mod.join(cfg, session, "tst2", timeout=30.0)
+
+
+@pytest.mark.parametrize("name", [" n43n", "n43n ", "", "   "])
+def test_a_join_refuses_a_name_launch_would_refuse(monkeypatch, tmp_path, name):
+    """ONE RULE, asked of both doors. `launch` has always refused a name
+    `parse` cannot read back intact; a `join` that did not would let the same
+    unaddressable character in through the other entrance, and every request
+    to it would fail for a reason naming the request rather than the name."""
+    cfg, session, _ = _joinable(monkeypatch, tmp_path, spawns={6100}, ready_for=name)
+
+    with pytest.raises(session_mod.SessionError, match="not the name a request"):
+        session_mod.join(cfg, session, name, timeout=30.0)
+
+
+def test_a_join_that_never_becomes_ready_kills_only_what_it_started(
+    monkeypatch, tmp_path
+):
+    """WHOEVER SPAWNS OWNS THEM UNTIL IT CAN HAND THEM BACK - `launch`'s rule,
+    and a join needs it for the same reason: this function never returns, so
+    the session never learns the pid, and a client left up is held by nobody.
+
+    The part that is only true here: it must kill what THIS call started and
+    nothing else. The session already has a server and a client running, and
+    a failed join that took those down would turn a client that would not
+    start into a session that is gone.
+    """
+    cfg, session, windows = _joinable(
+        monkeypatch, tmp_path, spawns={6100}, ready_for=None
+    )
+
+    # Non-zero, so the wait actually runs and fails rather than being skipped
+    # - see the shared-slot test above for what a 0.0 here hides.
+    with pytest.raises(session_mod.SessionError, match="world-ready heartbeat"):
+        session_mod.join(cfg, session, "tst2", timeout=0.3)
+
+    assert windows.aimed == [6100], (
+        f"taskkill was aimed at {windows.aimed} - a failed join must reach the "
+        "client it started and nothing else"
+    )
+    assert 4808 in windows.live and 5150 in windows.live, (
+        "a failed join took down the server and client that were already "
+        "running, turning a client that would not start into no session at all"
+    )
+    assert session.joined == [], "a join that failed was recorded as having happened"
+
+
+def test_a_join_refuses_a_session_with_no_server(monkeypatch, tmp_path):
+    """There is nothing to join. Refused by name rather than left to a
+    readiness timeout, which would blame the client."""
+    cfg, session, _ = _joinable(monkeypatch, tmp_path, spawns={6100}, ready_for="tst2")
+    session.mode = "server"
+
+    with pytest.raises(session_mod.SessionError, match="no server for a client"):
+        session_mod.join(cfg, session, "tst2", timeout=30.0)

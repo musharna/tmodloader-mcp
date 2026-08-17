@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import operator
 import os
 import re
 import subprocess
@@ -24,7 +25,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from . import commands as commands_mod
 from . import inventory
@@ -582,6 +583,167 @@ def _release_trigger(cfg: Config, *, player: str | None, port: int | None) -> No
             trigger.unlink(missing_ok=True)
 
 
+#: The orderings, keyed as a caller writes them.
+_ORDERINGS = {
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+}
+
+#: Every comparison `wait_until` understands, in the order a refusal lists them.
+OPERATORS = ("==", "!=", "<", "<=", ">", ">=", "contains", "changed")
+
+#: How a caller spells a boolean. `diag` hands booleans back as bools - see the
+#: `_BOOLEAN` note there for why they are not left as text - so a value arriving
+#: over MCP as a string has to come back the same way it went in.
+_BOOLEAN_WORDS = {"true": True, "false": False}
+
+#: How a caller spells the mod's absence markers, which `diag` turns into None.
+#: `NONE`, `N/A (never sent to clients)` and `N/A (no local player)` are all one
+#: state by the time they get here, so there is one spelling for it.
+_ABSENT_WORDS = frozenset({"none", "null"})
+
+#: Distinguishes "no reading yet" from a reading of None, which is a real value
+#: the mod writes deliberately.
+_UNREAD = object()
+
+
+@dataclass(frozen=True)
+class Watch:
+    """What a `wait_until` saw, whether or not it got what it waited for.
+
+    `last` is the reason this is a record rather than a bool. A wait that
+    reports only "timed out" makes the caller take another diag to find out
+    why - against a state that has moved on since, so the reading that explains
+    the timeout is precisely the one they can no longer get.
+    """
+
+    matched: bool
+    elapsed: float
+    polls: int
+    last: Any
+    #: Set only when the LAST poll was cut off by the budget rather than
+    #: answered. Without it that case is indistinguishable from a condition
+    #: that simply did not come true, which is a game not responding wearing
+    #: the disguise of a game that is.
+    note: str | None = None
+
+
+def _check_comparison(op: str, value: str | None) -> None:
+    """Refuse a request no state of the game could satisfy, before asking it.
+
+    Both of these used to be expressible and would have run the whole clock
+    out, and a timeout blames the game: it sends the reader to look at a game
+    that was never asked anything it could answer.
+    """
+    if op not in OPERATORS:
+        raise TriggerError(
+            f"{op!r} is not a comparison this understands. The operators are "
+            f"{', '.join(OPERATORS)}."
+        )
+
+    if op == "changed":
+        if value is not None:
+            raise TriggerError(
+                "`changed` takes no value - it baselines on its first reading "
+                f"and fires when a later one differs. {value!r} reads as "
+                '"changed to", which is `==` and can be asked directly.'
+            )
+    elif value is None:
+        raise TriggerError(f"`{op}` needs a value to compare the field against")
+
+
+def _unknown_field_message(field: str, fields: dict[str, Any]) -> str:
+    """Name the fields that DO exist, which is what makes this actionable.
+
+    A misspelled field is the commonest reason a wait never matches, and the
+    real names are right there in the dump that was just read - so a refusal
+    that withheld them would send the reader to take the diag by hand that this
+    call already took.
+    """
+    return (
+        f"the {'server' if 'side' in fields else 'game'} reports no field named "
+        f"{field!r}, so no amount of waiting will produce one. It reports: "
+        f"{', '.join(sorted(fields))}. Indented list bodies (`records`) are not "
+        "fields and cannot be waited on."
+    )
+
+
+def _satisfied(field: str, live: Any, op: str, value: str) -> bool:
+    """Does this reading satisfy the comparison, and could it ever?
+
+    THE LINE BETWEEN FALSE AND A REFUSAL is the whole of this function. A
+    composite string will never become an integer, so ordering one is refused.
+    An ABSENCE is different in kind - `strain-readout: NONE` is the mod saying
+    "nothing showing right now", and the next poll may well show something - so
+    that is a plain False and the wait goes round again. Refusing it would make
+    this useless for the wait it is most obviously for.
+    """
+    if op in _ORDERINGS:
+        if live is None:
+            return False
+        if isinstance(live, bool) or not isinstance(live, int):
+            raise TriggerError(
+                f"{field!r} cannot be ordered: it reads {live!r}, which is not a "
+                f"count. `{op}` needs a number, and this field will not become "
+                "one - use `contains` for a composite line, or `==` for a "
+                "boolean or a name."
+            )
+        return _ORDERINGS[op](live, _as_number(field, value))
+
+    if op == "contains":
+        if live is None:
+            return False
+        if not isinstance(live, str):
+            raise TriggerError(
+                f"{field!r} cannot be searched for text: it reads {live!r}. "
+                "`contains` is for the composite lines the mod writes whole - "
+                "use `==` or an ordering for a count."
+            )
+        return value in live
+
+    equal = _equals(field, live, value)
+    return equal if op == "==" else not equal
+
+
+def _as_number(field: str, value: str) -> int:
+    try:
+        return int(value)
+    except ValueError:
+        raise TriggerError(
+            f"{value!r} is not a number, so it cannot be compared against the "
+            f"count {field!r}"
+        ) from None
+
+
+def _equals(field: str, live: Any, value: str) -> bool:
+    """Compare against the reading's OWN type, not against its text.
+
+    `diag` types its values on purpose: a counter comes back as an int and a
+    heartbeat flag as a bool, because `"10" < "9"` and the truthiness of
+    `"False"` are the two bugs that typing removed. Comparing as text here
+    would reintroduce both at the last possible moment, in the one place
+    nothing downstream can catch it.
+    """
+    if live is None:
+        return value.casefold() in _ABSENT_WORDS
+
+    if isinstance(live, bool):
+        want = _BOOLEAN_WORDS.get(value.casefold())
+        if want is None:
+            raise TriggerError(
+                f"{field!r} is a flag reading {str(live).lower()!r}, and "
+                f"{value!r} is neither `true` nor `false`"
+            )
+        return live is want
+
+    if isinstance(live, int):
+        return live == _as_number(field, value)
+
+    return live == value
+
+
 @dataclass
 class Session:
     """One driven game. Holds the pids it started so teardown can be surgical."""
@@ -602,6 +764,15 @@ class Session:
     #: configured default for the world that was asked for.
     world: str | None = None
     started: set[int] = field(default_factory=set)
+    #: Characters brought in by `join`, in the order they arrived. NOT
+    #: including `player`, which is this session's own and came up with
+    #: `launch` - the two are different things to a reader, and folding them
+    #: together would lose which client the session was started for.
+    #:
+    #: Names rather than pids because a name is what a caller addresses. The
+    #: pids go into `started`, where `stop` already looks, so teardown needs
+    #: no knowledge of this at all.
+    joined: list[str] = field(default_factory=list)
 
     # ---- artifacts -------------------------------------------------------
 
@@ -1222,6 +1393,98 @@ class Session:
         drop.replace(kept)
         return kept
 
+    def wait_until(
+        self,
+        field: str,
+        op: str,
+        value: str | None = None,
+        *,
+        server: bool = False,
+        target: str | None = None,
+        timeout: float = 60.0,
+        poll: float = 2.0,
+    ) -> Watch:
+        """Poll `diag` until one of its fields satisfies a comparison.
+
+        WHAT THIS REPLACES: every caller driving this server has written the
+        same loop by hand - send a trigger, sleep a number the author guessed,
+        take a diag, check a field, give up or go round again. A guessed sleep
+        is wrong in both directions, and the short one is the dangerous one: the
+        assertion reads the state BEFORE the thing happened, which looks exactly
+        like the feature being broken.
+
+        THE FIELD IS TOP-LEVEL AND NOTHING FURTHER. `diag` splits `key: value`
+        and stops, so `npcs` is the whole string `active=4 mutated=0` - there is
+        no `npcs.active`, and asking for one is refused rather than waited out.
+        `contains` is how a composite line is waited on, and it has to be: the
+        mod owns that formatting, and splitting it here would put this server
+        back in the business of parsing it badly.
+
+        A TIMEOUT RETURNS RATHER THAN RAISES, carrying the last reading it took.
+        The condition not coming true is an ANSWER - often the one being tested
+        for - and it is the caller's to interpret. A diag that fails inside the
+        budget still raises, because that is nobody having been asked.
+
+        ONE BUDGET ACROSS EVERY POLL, the same rule as `_left_of` one layer
+        down: `timeout` is what the whole call may take, not what each poll may.
+        """
+        _check_comparison(op, value)
+
+        began = time.monotonic()
+        deadline = began + timeout
+        polls = 0
+        last: Any = _UNREAD
+        baseline: Any = _UNREAD
+        note: str | None = None
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            polls += 1
+            try:
+                dump = self.diag(server=server, target=target, timeout=remaining)
+            except TriggerError as failed:
+                # A refusal or a silence INSIDE the budget is a real failure and
+                # is the caller's to see. At the very end of it, it is this
+                # call's own doing - the last poll is handed whatever is left,
+                # so a tight budget makes it time out on purpose - and raising
+                # there would report a game that is not responding, about a game
+                # that answered every earlier poll.
+                if time.monotonic() < deadline:
+                    raise
+                note = f"the last poll was cut short by the timeout: {failed}"
+                break
+
+            if field not in dump.fields:
+                raise TriggerError(_unknown_field_message(field, dump.fields))
+            last = dump.fields[field]
+
+            if op == "changed":
+                if baseline is _UNREAD:
+                    baseline = last
+                elif last != baseline:
+                    return Watch(True, time.monotonic() - began, polls, last)
+            # `value` is not None for any other operator - `_check_comparison`
+            # refused that before the first poll - and the empty string it
+            # falls back to would compare identically anyway.
+            elif _satisfied(field, last, op, value or ""):
+                return Watch(True, time.monotonic() - began, polls, last)
+
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            time.sleep(min(poll, left))
+
+        return Watch(
+            matched=False,
+            elapsed=time.monotonic() - began,
+            polls=polls,
+            last=None if last is _UNREAD else last,
+            note=note,
+        )
+
     # ---- waiting ---------------------------------------------------------
 
     def _left_of(self, deadline: float, timeout: float, *, what: str) -> float:
@@ -1348,6 +1611,89 @@ class Session:
             "(its contents kept changing, or it stayed empty). Nothing there is "
             "safe to read as an answer."
         )
+
+
+def _player_problem(player: str) -> str | None:
+    """Why this character name cannot be addressed, or None if it can.
+
+    EVERY request is addressed, so a name `parse` cannot read back intact
+    fails on every call rather than only on targeted ones. Asked once, where
+    the answer names the character, instead of arriving as a refusal on a
+    request the caller thought was simple.
+
+    WHAT THIS ACTUALLY CATCHES: whitespace, not `@` or `:`. `player` is only
+    ever placed in the TARGET position, the payload's terminal field - `parse`
+    takes everything after the first `@` as the target VERBATIM and never
+    re-splits it, so a name holding `@` or `:` reads back unchanged. Measured
+    against both this module's `parse` and the mod's own `DevCommands.Parse`
+    (responder/DevCommands.cs), which use the identical rule - a first
+    hypothesis for this guard checked those two characters directly and was
+    wrong, because neither one actually breaks anything. What `parse` DOES
+    change is whitespace: both sides trim the target, so a name with a leading
+    or trailing space - or one that is empty or whitespace-only - reads back
+    shorter than it was typed, or as no name at all. That is
+    indistinguishable from an ordinary name in a log or a config file, which
+    is exactly why it is worth catching once rather than as a silent mystery
+    on every request the session ever sends.
+
+    A FUNCTION RATHER THAN A BLOCK INSIDE `launch`, because `join` brings up a
+    client the same way and has to apply the same rule. Two copies of this
+    would be two rules, and the one that drifted would be the one nobody ran.
+    """
+    heard = parse(f"diag@{player}")
+    if heard is None or heard.target != player:
+        return (
+            f"the character name {player!r} is not the name a request will "
+            f"carry: a payload naming it reads back as {heard}, not as typed. "
+            "`parse` trims whitespace from the target, so a name padded with "
+            "spaces - or one that is empty or all whitespace - is addressed "
+            "shorter than it was typed, or to nobody at all, on every request "
+            "this session sends."
+        )
+    return None
+
+
+def _client_is_ready(cfg: Config, player: str) -> bool:
+    """Whether THIS player's client is up, live and in a world.
+
+    THE TOKENED NAME ONLY, and that is the whole reason this is separate from
+    the pair `_wait_ready` watches for the launch client. The unsuffixed
+    `<mod>-hooks.txt` is a SLOT, not a client: nothing deletes it when its
+    writer moves to a tokened name, every client that boots writes it again on
+    the way through the menu, and with two clients it holds ONE record
+    belonging to whoever started last - measured frozen at `polls: 1` and
+    still reading live 45 seconds after its writer had been in the world for a
+    minute.
+
+    `launch` accepts it anyway, correctly: its client may genuinely be sitting
+    at the menu with no character, and there is nothing else to watch. A JOIN
+    cannot, because by then there IS something else that writes that name -
+    the client already running - and accepting it would let the joining call
+    return against somebody else's stale menu record before the joining client
+    existed at all.
+
+    Sufficient as well as necessary: a join is always `-player <name>
+    -skipselect`, so its very first heartbeat is already the tokened one.
+    """
+    return _heartbeat_ready(
+        cfg.artifact(artifacts_for(cfg.mod_name, player).heartbeat, server=False)
+    )
+
+
+def _heartbeat_ready(path: Path) -> bool:
+    """Live AND in a world - the one definition of ready, used by both waits.
+
+    Both conditions, because they fail differently: a stale-but-ready
+    heartbeat means the process died after loading, and a fresh-but-not-ready
+    one means it is still loading. Checking only existence conflates them,
+    which is how a harness once sailed past three gates on a killed client's
+    file.
+
+    What `launch` and `join` disagree about is WHICH FILES to ask this of, not
+    what the answer means - so the predicate is shared and the candidate sets
+    are not.
+    """
+    return heartbeat_is_live(path) and world_is_ready(path.read_text(errors="replace"))
 
 
 def _clear_stale_artifacts(
@@ -1506,16 +1852,9 @@ def launch(
     # all. That is indistinguishable from an ordinary name in a log or a
     # config file, which is exactly why it is worth catching once here rather
     # than as a silent mystery on every request this session ever sends.
-    heard = parse(f"diag@{player}")
-    if heard is None or heard.target != player:
-        raise SessionError(
-            f"the character name {player!r} is not the name a request will "
-            f"carry: a payload naming it reads back as {heard}, not as typed. "
-            "`parse` trims whitespace from the target, so a name padded with "
-            "spaces - or one that is empty or all whitespace - is addressed "
-            "shorter than it was typed, or to nobody at all, on every request "
-            "this session sends."
-        )
+    problem = _player_problem(player)
+    if problem:
+        raise SessionError(problem)
 
     existing = _tml_pids(cfg)
     if existing:
@@ -1636,6 +1975,140 @@ def launch(
     return session
 
 
+def join(
+    cfg: Config, session: Session, player: str, *, timeout: float = 300.0
+) -> Session:
+    """Bring a SECOND client into a session that is already running.
+
+    The protocol has supported several clients since per-player naming - every
+    request carries an address and every answer carries a token - and the
+    LIFECYCLE supported exactly one. So the arrangement two whole releases
+    exist to make safe was, from this harness, unreachable: the only way to
+    get a second client was to spawn it by hand, which is what
+    `tests/live_capture_check.py` did.
+
+    Lifted from that function, with the three things it got away with in a
+    test and should not do here.
+
+    IT WAITS FOR A CLIENT, NOT FOR A PID. The lifted version watched for a new
+    tModLoader pid and called it done. A pid says a process started - not that
+    a character loaded, that the join was accepted, or that a world is under
+    it. `launch` holds its own client to a live, world-ready heartbeat and so
+    does this.
+
+    IT WATCHES THE TOKENED NAME ONLY - see `_client_is_ready`, which is where
+    that reasoning lives, because it is the difference between waiting for
+    this client and accepting the one that is already here.
+
+    IT REFUSES A DUPLICATE CHARACTER. Two clients under one name share a
+    player token, so their heartbeat, reply, diag and shot drop box are one
+    filename each - the exact collision per-player naming removed, reachable
+    again through the tool that adds clients. Terraria would also kick one of
+    them, but a kick arrives as a readiness timeout that names nothing.
+
+    THE PIDS GO INTO `session.started`, which is the whole of teardown: `stop`
+    kills exactly what a session started, so a client this harness spawned and
+    did not record is a game left running that nothing owns. `stop` needs no
+    knowledge of joining at all.
+    """
+    if session.mode != "server_client":
+        raise SessionError(
+            f"this session is {session.mode!r}, which has no server for a "
+            "client to join. Only `server_client` runs one."
+        )
+
+    problem = _player_problem(player)
+    if problem:
+        raise SessionError(problem)
+
+    # Case-insensitively, because the mod compares a target to its own name
+    # that way: `n43n` and `N43N` are one client to the game, and would be one
+    # client here too - answering each other's requests - while being two
+    # different player tokens and therefore two sets of files.
+    taken = [session.player, *session.joined]
+    if any(player.casefold() == name.casefold() for name in taken):
+        raise SessionError(
+            f"{player!r} is already in this session (it has {taken}). Two "
+            "clients under one character name share a player token, so their "
+            "heartbeat, reply, diag and shot would each be one file between "
+            "them - and the game will kick one of them besides."
+        )
+
+    before = _tml_pids(cfg)
+    client_cmd = [
+        str(cfg.dotnet),
+        "tModLoader.dll",
+        "-join",
+        "127.0.0.1",
+        "-port",
+        str(session.port),
+        "-player",
+        player,
+        "-skipselect",
+    ]
+
+    # SAME OWNERSHIP RULE `launch` HAS, and for the same reason: whoever spawns
+    # owns the process until it can hand it back. A client that starts and
+    # never becomes ready would otherwise stay up held by nobody, because this
+    # function never returned and the session never learned its pid.
+    try:
+        subprocess.Popen(
+            client_cmd,
+            cwd=str(cfg.tml_dir),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if _client_is_ready(cfg, player):
+                break
+            time.sleep(2)
+        else:
+            raise SessionError(
+                f"{player!r} did not report a live, world-ready heartbeat "
+                f"within {timeout:.0f}s at "
+                f"{cfg.artifact(artifacts_for(cfg.mod_name, player).heartbeat, server=False).name}. "
+                "The client requires Steam to be running and logged in; after "
+                "that, suspect the join rather than the client's startup - a "
+                "wrong port, a refused connection, or a character name the "
+                "server rejected."
+            )
+    except BaseException as failure:
+        # Through `stop`, not a second kill path: it is the one place that
+        # issues taskkill, waits out the settle and CHECKS for survivors, and
+        # a hand-rolled kill here would be a quieter version of it that agrees
+        # today. Aimed at a throwaway session holding only what THIS call
+        # started, so a failed join cannot take down the client that was
+        # already running.
+        stranded = _tml_pids(cfg) - before
+        if stranded:
+            try:
+                stop(
+                    cfg,
+                    Session(
+                        cfg=cfg,
+                        mode=session.mode,
+                        port=session.port,
+                        player=player,
+                        world=session.world,
+                        started=stranded,
+                    ),
+                )
+            except SessionError as leak:
+                # Attached, not raised over - same rule `launch` follows. Why
+                # the join failed is what the caller acts on; that a process
+                # also survived cleanup is something they need told, not
+                # something that should replace it.
+                failure.add_note(str(leak))
+        raise
+
+    session.started |= _tml_pids(cfg) - before
+    session.joined.append(player)
+    return session
+
+
 def _wait_ready(
     cfg: Config, *, mode: str, player: str, timeout: float, port: int | None = None
 ) -> None:
@@ -1694,10 +2167,7 @@ def _wait_ready(
         ]
 
     def _any_ready(paths: list[Path]) -> bool:
-        return any(
-            heartbeat_is_live(p) and world_is_ready(p.read_text(errors="replace"))
-            for p in paths
-        )
+        return any(_heartbeat_ready(p) for p in paths)
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
