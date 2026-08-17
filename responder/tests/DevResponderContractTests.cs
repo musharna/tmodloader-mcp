@@ -59,29 +59,35 @@ namespace TModLoaderMcp.DevBridge.Tests
         }
 
         /// <summary>
-        /// The three the harness relies on are registered BEFORE the mod's, so
+        /// The ones the harness relies on are registered BEFORE the mod's, so
         /// the published list always leads with them and a mod cannot displace
         /// one by registering the same verb first - Register throws on a
         /// duplicate, which is the behaviour that makes this ordering a rule
         /// rather than a preference.
+        ///
+        /// The list is spelled out rather than counted, so adding a base verb
+        /// without adding it here is the omission that gets noticed: a new verb
+        /// registered after the hook is exactly the mistake this catches, and it
+        /// cannot catch it for a verb it does not know about.
         /// </summary>
-        [Fact]
-        public void GenericVerbsAreRegisteredBeforeTheModsOwn() {
+        [Theory]
+        [InlineData("capture")]
+        [InlineData("diag")]
+        [InlineData("shot")]
+        [InlineData("tiles")]
+        [InlineData("entities")]
+        public void EveryGenericVerbIsRegisteredBeforeTheModsOwn(string verb) {
             string src = Source();
 
-            int capture = src.IndexOf("Register(\"capture\"");
-            int diag = src.IndexOf("Register(\"diag\"");
-            int shot = src.IndexOf("Register(\"shot\"");
+            int at = src.IndexOf("Register(\"" + verb + "\"");
             int hook = src.IndexOf("RegisterCommands(");
 
-            Assert.True(capture >= 0, "capture is not registered");
-            Assert.True(diag >= 0, "diag is not registered");
-            Assert.True(shot >= 0, "shot is not registered");
+            Assert.True(at >= 0, verb + " is not registered");
             Assert.True(hook >= 0, "the mod's hook is never called");
 
-            Assert.True(capture < hook && diag < hook && shot < hook,
-                "a generic verb is registered after the mod's hook, so a mod " +
-                "could take the name and the harness would lose the verb it needs");
+            Assert.True(at < hook,
+                verb + " is registered after the mod's hook, so a mod could take " +
+                "the name and the harness would lose the verb it needs");
         }
 
         /// <summary>

@@ -156,7 +156,22 @@ namespace TModLoaderMcp.DevBridge
 					"most " + DevMutationArgs.MaxArea + " of them).",
 				req => CountTiles(req.Argument));
 
-			// The mod's own, AFTER the four above. Register throws on a duplicate, so
+			// THE OTHER HALF OF THE WORLD. The comment above `tiles` argues that a
+			// diag reports whatever a mod chose to count, and that argument is
+			// about counting rather than about tiles - it applies unchanged to
+			// what is moving around on top of them. A mod that never thought to
+			// count its boss cannot be asked whether the boss is there.
+			//
+			// BOTH SIDES ANSWER, which is deliberate rather than an oversight. A
+			// dedicated server owns these arrays and a multiplayer client holds
+			// synced copies, so neither is refused - and asking both the same
+			// question is how a desync becomes visible instead of theoretical.
+			r.Register("entities", true,
+				"Count entity types, as <kind> or <kind>,<x>,<y>,<w>,<h> in tiles (" +
+					DevMutationArgs.EntityKindNames + ").",
+				req => CountEntities(req.Argument));
+
+			// The mod's own, AFTER the five above. Register throws on a duplicate, so
 			// a mod that tries to take one of these names fails at load with a sentence
 			// naming the verb - rather than silently replacing a verb the harness needs.
 			RegisterCommands(r);
@@ -625,6 +640,146 @@ namespace TModLoaderMcp.DevBridge
 			}
 
 			Report(sb.ToString());
+		}
+
+		/// <summary>
+		/// Count the entity types of one kind, optionally only inside a
+		/// rectangle.
+		///
+		/// THE RECTANGLE IS A FILTER, NOT A BUDGET. Every one of these walks the
+		/// whole fixed-size array whatever it was asked - 200 NPC slots, 400 item
+		/// slots - because that is where the answer lives. Naming a rectangle
+		/// removes entities from the count; it does not remove work, which is why
+		/// DevMutationArgs caps the tile query's rectangle and not this one.
+		///
+		/// THE NAME IS REPORTED BESIDE THE ID because these id spaces are opaque
+		/// and three of them are in play. "id=4 count=1" is a fact the reader
+		/// then has to go look up; "id=4 count=1 name=Eye of Cthulhu" is the
+		/// answer they wanted, and getting it wrong is visible instantly rather
+		/// than after a wiki search against the wrong list.
+		/// </summary>
+		private void CountEntities(string argument) {
+			if (!DevMutationArgs.TryResolveEntityQuery(argument, out string kind,
+					out bool everywhere, out int x, out int y, out int width,
+					out int height, out string problem)) {
+				Report("REFUSED: " + problem);
+				return;
+			}
+
+			// Same question as CountTiles asks, for the same reason: a side with
+			// no world has empty arrays, and reporting "0 active" there would be
+			// a confident answer to a question that was never asked of a world.
+			if (Main.maxTilesX <= 0 || Main.maxTilesY <= 0) {
+				Report("REFUSED: this side has no world loaded to look at");
+				return;
+			}
+
+			// Tile coordinates in, world units out - the entities are positioned
+			// in world units, and 1 tile is 16 of them. Doing it here rather than
+			// in the rules file keeps that constant next to the arrays it
+			// describes.
+			float left = x * 16f;
+			float top = y * 16f;
+			float right = (x + width) * 16f;
+			float bottom = (y + height) * 16f;
+
+			var counts = new SortedDictionary<int, int>();
+			Entity[] slots;
+			int used;
+			Func<Entity, int> typeOf;
+			Func<int, string> nameOf;
+
+			switch (kind) {
+				case DevMutationArgs.EntityNpc:
+					slots = Main.npc;
+					used = Main.maxNPCs;
+					typeOf = e => ((NPC)e).type;
+					nameOf = Lang.GetNPCNameValue;
+					break;
+
+				case DevMutationArgs.EntityItem:
+					slots = Main.item;
+					used = Main.maxItems;
+					typeOf = e => ((Item)e).type;
+					nameOf = Lang.GetItemNameValue;
+					break;
+
+				default:
+					slots = Main.projectile;
+					used = Main.maxProjectiles;
+					typeOf = e => ((Projectile)e).type;
+
+					// The odd one out: this returns a LocalizedText where the
+					// other two return a string.
+					nameOf = type => Lang.GetProjectileName(type).Value;
+					break;
+			}
+
+			if (slots == null) {
+				Report("REFUSED: this side has no " + kind + " array to look at");
+				return;
+			}
+
+			int active = 0;
+			int looked = Math.Min(used, slots.Length);
+
+			for (int i = 0; i < looked; i++) {
+				Entity entity = slots[i];
+
+				if (entity == null || !entity.active) {
+					continue;
+				}
+
+				if (!everywhere) {
+					Vector2 at = entity.Center;
+					if (at.X < left || at.X >= right || at.Y < top || at.Y >= bottom) {
+						continue;
+					}
+				}
+
+				active++;
+				int type = typeOf(entity);
+				counts[type] = counts.TryGetValue(type, out int seen) ? seen + 1 : 1;
+			}
+
+			var sb = new System.Text.StringBuilder();
+			sb.Append("OK: looked at ").Append(looked).Append(' ').Append(kind)
+				.Append(" slot(s)");
+
+			if (!everywhere) {
+				sb.Append(" in ").Append(width).Append('x').Append(height)
+					.Append(" tiles at ").Append(x).Append(',').Append(y);
+			}
+
+			sb.Append(", ").Append(active).Append(" active, ")
+				.Append(counts.Count).Append(" distinct type(s)");
+
+			foreach (KeyValuePair<int, int> pair in counts) {
+				sb.Append("\n  id=").Append(pair.Key)
+					.Append(" count=").Append(pair.Value)
+					.Append(" name=").Append(Named(nameOf, pair.Key));
+			}
+
+			Report(sb.ToString());
+		}
+
+		/// <summary>
+		/// A display name, or the reason there is not one.
+		///
+		/// Lang goes through the localisation tables, and a modded id whose
+		/// entry never loaded throws rather than returning empty. Letting that
+		/// escape would lose the whole count - every id in it, including the ones
+		/// that resolved - over one unnameable entry, so the id stays and the
+		/// name says what happened.
+		/// </summary>
+		private static string Named(Func<int, string> nameOf, int type) {
+			try {
+				string name = nameOf(type);
+				return string.IsNullOrWhiteSpace(name) ? "(unnamed)" : name;
+			}
+			catch (Exception e) {
+				return "(no name: " + e.GetType().Name + ")";
+			}
 		}
 
 		/// <summary>The body of &lt;mod&gt;-diag.txt. See docs/MOD_CONTRACT.md for the

@@ -264,16 +264,8 @@ namespace TModLoaderMcp.DevBridge
 				return false;
 			}
 
-			if (!TryWhole(parts[0], out x) || !TryWhole(parts[1], out y)
-					|| !TryWhole(parts[2], out width) || !TryWhole(parts[3], out height)) {
-				problem = "\"" + text + "\" holds something that is not a whole, " +
-					"non-negative number";
-				return false;
-			}
-
-			if (width == 0 || height == 0) {
-				problem = "a rectangle " + width + " by " + height +
-					" holds no tiles at all";
+			if (!TryRectangleFrom(parts, 0, text, out x, out y, out width,
+					out height, out problem)) {
 				return false;
 			}
 
@@ -284,6 +276,69 @@ namespace TModLoaderMcp.DevBridge
 			}
 
 			return true;
+		}
+
+		public const string EntityNpc = "npc";
+
+		public const string EntityItem = "item";
+
+		public const string EntityProjectile = "projectile";
+
+		public static string EntityKindNames => "npc, item, projectile";
+
+		/// <summary>
+		/// "&lt;kind&gt;", or "&lt;kind&gt;,x,y,w,h" to look in one rectangle.
+		///
+		/// NO DEFAULT KIND, for the reason ShotRegion has no default region: the
+		/// kinds have separate id spaces, so a query answered about the wrong one
+		/// returns a plausible list of numbers that means nothing. Refusing names
+		/// the three, which costs one round trip and cannot be misread.
+		///
+		/// THE RECTANGLE IS OPTIONAL AND UNCAPPED, which is the one place this
+		/// deliberately differs from TryResolveArea. There, the rectangle is the
+		/// work: every tile in it is visited, so an unbounded one walks five
+		/// million of them. Here the work is the entity array, which is a few
+		/// hundred fixed slots whatever is asked for - the rectangle only decides
+		/// which of them count. Capping it would refuse a query that is free.
+		///
+		/// A zero-sided rectangle is still refused, because it can match nothing
+		/// and would report an empty world rather than a mistake.
+		/// </summary>
+		public static bool TryResolveEntityQuery(string argument, out string kind,
+				out bool everywhere, out int x, out int y, out int width,
+				out int height, out string problem) {
+			kind = null;
+			everywhere = false;
+			x = 0;
+			y = 0;
+			width = 0;
+			height = 0;
+			problem = null;
+
+			string text = (argument ?? string.Empty).Trim();
+			string[] parts = text.Split(',');
+			string named = Normalise(parts[0]);
+
+			if (named != EntityNpc && named != EntityItem && named != EntityProjectile) {
+				problem = Unknown(parts[0], EntityKindNames);
+				return false;
+			}
+
+			kind = named;
+
+			if (parts.Length == 1) {
+				everywhere = true;
+				return true;
+			}
+
+			if (parts.Length != 5) {
+				problem = "\"" + text + "\" is neither a kind on its own nor a kind " +
+					"and a rectangle written <kind>,x,y,w,h in tile coordinates";
+				return false;
+			}
+
+			return TryRectangleFrom(parts, 1, text, out x, out y, out width,
+				out height, out problem);
 		}
 
 		/// <summary>
@@ -331,6 +386,41 @@ namespace TModLoaderMcp.DevBridge
 			}
 
 			return null;
+		}
+
+		/// <summary>
+		/// Four whole numbers starting at <paramref name="from"/>, and the two
+		/// things wrong with them that do not depend on what is being counted.
+		///
+		/// Shared by the tile query and the entity query so the pair cannot
+		/// drift into refusing "10,20,-4,5" with one sentence and "npc,10,20,-4,5"
+		/// with another. What is NOT shared is the cap: it belongs to the caller
+		/// that pays per tile, which is why it stays in TryResolveArea.
+		/// </summary>
+		private static bool TryRectangleFrom(string[] parts, int from, string text,
+				out int x, out int y, out int width, out int height,
+				out string problem) {
+			x = 0;
+			y = 0;
+			width = 0;
+			height = 0;
+			problem = null;
+
+			if (!TryWhole(parts[from], out x) || !TryWhole(parts[from + 1], out y)
+					|| !TryWhole(parts[from + 2], out width)
+					|| !TryWhole(parts[from + 3], out height)) {
+				problem = "\"" + text + "\" holds something that is not a whole, " +
+					"non-negative number";
+				return false;
+			}
+
+			if (width == 0 || height == 0) {
+				problem = "a rectangle " + width + " by " + height +
+					" holds no tiles at all";
+				return false;
+			}
+
+			return true;
 		}
 
 		/// <summary>

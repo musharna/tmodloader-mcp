@@ -23,7 +23,7 @@ loads it with no registration on your part.
 
 **4. Override `RegisterCommands`** if you want verbs of your own, or want any of
 the three opt-in classes below. Optional; the base class already answers
-`capture`, `diag`, `shot` and `tiles`, all of which only READ.
+`capture`, `diag`, `shot`, `tiles` and `entities`, all of which only READ.
 
 ```csharp
 using TModLoaderMcp.DevBridge;
@@ -45,8 +45,18 @@ and every handler needs it.
 ## Three opt-ins, each off until you ask
 
 The base class only READS: `capture` and `shot` photograph the frame, `diag`
-reports what your mod chose to report, and `tiles` counts tile types in a
-rectangle you name. None of them can change a save, so every consumer gets them.
+reports what your mod chose to report, `tiles` counts tile types in a rectangle
+you name, and `entities` counts NPCs, dropped items or projectiles — either
+everywhere or inside a rectangle. None of them can change a save, so every
+consumer gets them.
+
+`entities` takes a kind and no default: `entities:npc`, or
+`entities:npc,100,200,80,80` to look in one rectangle. Its rectangle is a
+filter rather than a budget — the entity arrays are a fixed few hundred slots
+whatever you ask for — so unlike `tiles` it is not capped, and a rectangle the
+tile query refuses is free here. Both sides answer it, which is deliberate:
+asking a server and a client the same question is how a desync becomes
+visible.
 
 Three classes do more than read, and each is a separate line you write:
 

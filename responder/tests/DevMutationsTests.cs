@@ -416,6 +416,119 @@ namespace TModLoaderMcp.DevBridge.Tests
                 out _));
         }
 
+        // ---- kinds and areas, for the entity query ---------------------------
+
+        [Theory]
+        [InlineData("npc", DevMutationArgs.EntityNpc)]
+        [InlineData("item", DevMutationArgs.EntityItem)]
+        [InlineData("projectile", DevMutationArgs.EntityProjectile)]
+        [InlineData("PROJECTILE", DevMutationArgs.EntityProjectile)]
+        [InlineData("  Npc  ", DevMutationArgs.EntityNpc)]
+        public void AKindOnItsOwnMeansEverywhere(string written, string expected) {
+            Assert.True(DevMutationArgs.TryResolveEntityQuery(written, out string kind,
+                out bool everywhere, out _, out _, out _, out _, out string problem),
+                problem);
+
+            Assert.Equal(expected, kind);
+            Assert.True(everywhere, "a kind with no rectangle did not mean everywhere");
+        }
+
+        [Fact]
+        public void AKindCanNameARectangleToLookIn() {
+            Assert.True(DevMutationArgs.TryResolveEntityQuery("npc,10,20,4,5",
+                out string kind, out bool everywhere, out int x, out int y,
+                out int w, out int h, out string problem), problem);
+
+            Assert.Equal(DevMutationArgs.EntityNpc, kind);
+            Assert.False(everywhere, "a rectangle was given and ignored");
+            Assert.Equal(10, x);
+            Assert.Equal(20, y);
+            Assert.Equal(4, w);
+            Assert.Equal(5, h);
+        }
+
+        /// <summary>
+        /// The kinds have separate id spaces, so a query answered about the
+        /// wrong one comes back as a plausible list of numbers meaning nothing.
+        /// The refusal lists the three, which is what makes it one round trip
+        /// rather than a guess.
+        /// </summary>
+        [Theory]
+        [InlineData("mob")]
+        [InlineData("npcs")]
+        [InlineData("player")]
+        [InlineData("")]
+        public void AnUnknownKindIsRefusedByNamingTheOnesThatExist(string written) {
+            Assert.False(DevMutationArgs.TryResolveEntityQuery(written, out _, out _,
+                out _, out _, out _, out _, out string problem),
+                "\"" + written + "\" was accepted as a kind");
+
+            Assert.Contains(DevMutationArgs.EntityNpc, problem);
+            Assert.Contains(DevMutationArgs.EntityItem, problem);
+            Assert.Contains(DevMutationArgs.EntityProjectile, problem);
+        }
+
+        [Theory]
+        [InlineData("npc,10,20")]
+        [InlineData("npc,10,20,4")]
+        [InlineData("npc,10,20,4,5,6")]
+        [InlineData("npc,a,b,c,d")]
+        [InlineData("npc,10,20,-4,5")]
+        public void HalfARectangleIsRefusedRatherThanTreatedAsNone(string written) {
+            Assert.False(DevMutationArgs.TryResolveEntityQuery(written, out _, out _,
+                out _, out _, out _, out _, out string problem),
+                "\"" + written + "\" was accepted");
+
+            Assert.False(string.IsNullOrWhiteSpace(problem));
+        }
+
+        [Theory]
+        [InlineData("npc,10,20,0,5")]
+        [InlineData("npc,10,20,4,0")]
+        public void AnEntityRectangleWithNoAreaIsRefusedToo(string written) {
+            Assert.False(DevMutationArgs.TryResolveEntityQuery(written, out _, out _,
+                out _, out _, out _, out _, out string problem));
+
+            Assert.Contains("no tiles", problem);
+        }
+
+        /// <summary>
+        /// THE ASYMMETRY WITH THE TILE QUERY, pinned so nobody "fixes" it into
+        /// consistency. A tile query pays per tile, so an unbounded rectangle is
+        /// five million visits and is capped. An entity query walks a few
+        /// hundred fixed array slots whatever rectangle it is handed, so the
+        /// same rectangle is free and capping it would refuse a query that costs
+        /// nothing.
+        ///
+        /// Both halves are asserted together: the entity query accepting a
+        /// rectangle the tile query refuses is the whole claim, and either half
+        /// alone would pass against code that had no cap anywhere.
+        /// </summary>
+        [Fact]
+        public void ARectangleTooBigToScanTileByTileIsStillFreeToFilterEntitiesBy() {
+            int side = 1;
+            while (side * side <= DevMutationArgs.MaxArea) {
+                side++;
+            }
+
+            string rectangle = "0,0," + side + "," + side;
+
+            Assert.True(DevMutationArgs.TryResolveEntityQuery("npc," + rectangle,
+                out _, out bool everywhere, out _, out _, out int w, out int h,
+                out string problem), problem);
+
+            Assert.False(everywhere);
+            Assert.Equal(side, w);
+            Assert.Equal(side, h);
+
+            // THE OTHER HALF: the identical rectangle is refused for tiles. If
+            // this ever passes, the cap has been deleted rather than scoped and
+            // the test above stopped meaning anything.
+            Assert.False(DevMutationArgs.TryResolveArea(rectangle, out _, out _,
+                out _, out _, out _),
+                "the tile query stopped capping, so the asymmetry above is vacuous");
+        }
+
         // ---- the opt-in, read rather than run -------------------------------
 
         private static readonly string[] AllVerbs = {
