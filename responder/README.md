@@ -41,6 +41,40 @@ public class MyDevResponder : DevResponder
 `Report` is `protected static` on the base class — it is how a handler answers,
 and every handler needs it.
 
+## Verbs that change the world, which are off
+
+Everything above READS. `capture`, `diag` and `shot` observe a world and write
+files outside it. `DevMutations` is five verbs that change the one you are
+sitting in — `time`, `weather`, `spawn`, `give`, `teleport` — and it is
+registered by nobody until you write this:
+
+```csharp
+protected override void RegisterCommands(DevCommandRegistry r) =>
+    DevMutations.RegisterInto(r, Report);
+```
+
+That line is the whole of the opt-in. Not a setting, not a marker file, not an
+environment variable — each of those can be switched on somewhere other than the
+source somebody will read when they ask why an NPC appeared in their world. It
+also means re-syncing this folder can never give your mod a power it did not
+have before, which is the property that makes vendoring an upgrade safe.
+
+`DevBridgeGate` still applies underneath: a played install runs none of it,
+whatever you register.
+
+Each verb refuses the side that cannot do it and names the side that can.
+`time`, `weather` and `spawn` are refused on a multiplayer **client** — the
+server owns the clock, the weather and the NPC array, and a client that changed
+them would be corrected by the next world packet, so the change would appear to
+work and then undo itself. `give` and `teleport` are refused on a **dedicated
+server**, which runs the world without standing in it. Singleplayer does
+everything, being both sides at once.
+
+The rules live in `DevMutationArgs.cs`, which imports nothing but `System` and
+is therefore tested by running it; `DevMutations.cs` imports Terraria and is the
+thin applier. If you want verbs of your own with the same property, that split
+is the one to copy.
+
 ## The heartbeat before you have a character
 
 **Keep writing the unsuffixed `<mod>-hooks.txt` heartbeat until a local player
@@ -131,6 +165,11 @@ compile line**, and CI runs it on a machine with no tModLoader installed. That
 is a stronger claim than reading the source and seeing no `using Biomancy` — it
 is checked by the compiler on every push.
 
-Two files are excluded from that project: `FrameShot.cs` and `DevResponder.cs`
-need Terraria, XNA and `ModSystem`, none of which exist on a build runner. They
-are covered by a source-scan contract test plus a live run against a real game.
+Three files are excluded from that project: `FrameShot.cs`, `DevResponder.cs`
+and `DevMutations.cs` need Terraria, XNA and `ModSystem`, none of which exist on
+a build runner. They are covered by source-scan contract tests plus a live run
+against a real game — and by
+[`template/`](../template/), a whole mod that compiles all eleven files against
+a real tModLoader. That template is also the worked example of everything on
+this page: it is the subclass, the diag grammar and the opt-in line, in a mod
+you can build.

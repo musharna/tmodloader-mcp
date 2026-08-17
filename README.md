@@ -253,11 +253,26 @@ checkout:
    the world is asked for rather than defaulted to one developer's self-test
    world. What keeps a default is what is not personal: Steam's install path
    and the Windows binaries under System32.
-4. A template mod. Mostly answered rather than done: `responder/` plus
-   [its README](responder/README.md) is a working mod-side half with the
-   subclass you need spelled out, which is most of what this item was asking
-   for. What is left is a whole compiling mod you can clone and run, and the
-   honest reason it has not been built is that nobody has yet needed one.
+4. ~~A template mod~~ — **done, and built rather than described.**
+   [`template/DevBridgeTemplate/`](template/) is a whole tModLoader mod: build
+   files, an empty `Mod` class, a `DevResponder` subclass, and a byte-identical
+   copy of `responder/`. Copy the folder into `ModSources/`, rename it, build.
+
+   It exists because three claims here were argued rather than checked. The
+   vendor test project compiles eight of the eleven files with nothing of any
+   mod's on the line; the other three need Terraria, XNA and `ModSystem`, so
+   until now NOTHING compiled the folder a consumer actually copies. This does,
+   against the real tModLoader — 0 errors, 0 warnings, with a deliberate syntax
+   error injected first to prove the vendored files were genuinely on the
+   compile line and not quietly skipped. It is also the worked example of the
+   documented subclass, which nothing had ever compiled either.
+
+   The copy is checked in rather than synced at build time, because
+   tModLoader's `-build` compiles the mod DIRECTORY and a file outside it is
+   not on the compile line at all — a template saying "copy `responder/` in
+   here" would not build as checked in. A test asserts the two directories are
+   byte-identical, so drift is a red test on the commit that caused it.
+
 5. ~~Per-player artifact naming~~ — **done, and run against two real clients.**
    A client's ANSWERS now carry a player token, so two developers sharing a
    save directory stop overwriting each other's heartbeat, diag dump, capture
@@ -290,7 +305,28 @@ checkout:
 
    What is NOT covered: two dedicated servers genuinely racing for one
    trigger. Each half of that mechanism was checked with one server and a
-   hand-written trigger; running two needs a second world.
+   hand-written trigger; running two needs a second world — which the template
+   mod above is now the cheapest route to.
+
+7. ~~Everything the harness can ask for only READS~~ — **done, and off by
+   default.** `DevMutations` adds five verbs that change the world rather than
+   observe it: `time`, `weather`, `spawn`, `give` and `teleport`. They are
+   registered by nobody until a mod writes
+   `DevMutations.RegisterInto(r, Report)`, which is the whole of the opt-in —
+   so re-syncing the vendored folder can never hand a mod the power to spawn
+   enemies into somebody's save.
+
+   Each verb refuses the side that cannot do it and names the side that can.
+   `time`, `weather` and `spawn` are refused on a multiplayer client, because
+   the server owns the clock, the weather and the NPC array — a client that
+   changed them would be corrected by the next world packet, so the change
+   appears to work and then undoes itself, which is far worse to debug than a
+   refusal. `give` and `teleport` are refused on a dedicated server, which runs
+   the world without standing in it.
+
+   The rules and the refusals live in a Terraria-free file so they are tested
+   by running them; the Terraria half is a thin applier compiled by the
+   template mod.
 
 The last thing that made this a tool for one mod is gone. The filenames, the
 paths and the command list were already yours — this side holds no opinion about

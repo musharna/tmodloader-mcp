@@ -13,6 +13,62 @@ keeping, not because they broke a released API.
 
 ### Added
 
+- **Verbs that change the world, and are off until a mod asks.**
+  `responder/DevMutations.cs` adds `time`, `weather`, `spawn`, `give` and
+  `teleport`. Everything in `responder/` until now READ — `capture`, `diag` and
+  `shot` observe a world and write files outside it — so these could not arrive
+  by upgrading a vendored folder: a mod re-syncing must not silently gain the
+  power to spawn enemies into somebody's save. Nothing registers them until a
+  mod writes `DevMutations.RegisterInto(r, Report)`, and `Report` being
+  `protected` on the base class makes "only a mod can turn these on" a rule the
+  compiler enforces rather than a convention. `DevBridgeGate` still applies
+  underneath: a played install runs none of it.
+
+  Each verb refuses the side that cannot do it and names the side that can.
+  `time`, `weather` and `spawn` are refused on a multiplayer client — the
+  server owns the clock, the weather and the NPC array, and a client that
+  changed them would be corrected by the next world packet, so the change would
+  appear to work and then undo itself. `give` and `teleport` are refused on a
+  dedicated server, which runs the world without standing in it. Singleplayer
+  does everything, being both sides at once.
+
+  Split into two files so the half worth testing is testable.
+  `DevMutationArgs.cs` imports nothing but `System` and holds every argument
+  rule and every refusal message; `DevMutations.cs` imports Terraria and is the
+  thin applier. Left as one file, the refusals would have sat on the wrong side
+  of the vendor project's compile line — and a verb that spawns the wrong thing
+  is caught the first time somebody looks at the world, where a refusal naming
+  the wrong side is never caught at all. `time` resolves to a FRACTION of a
+  phase rather than to ticks for the same reason: 54000 is a fact about the
+  game, and this file cannot see the game.
+
+  Two safety rules are enforced rather than trusted: a count is capped, because
+  `spawn:1,10000` is one keystroke from `spawn:1,1000` and would fill the NPC
+  array; and id `0` is refused specifically, because it parses, is in range,
+  means "nothing" in both of Terraria's id spaces, and is therefore the one
+  argument that would report success against a world it did not change.
+
+- **A template mod that compiles.** `template/DevBridgeTemplate/` is a whole
+  tModLoader mod — build files, an empty `Mod` class, a `DevResponder`
+  subclass, and a byte-identical copy of `responder/`. This closes README Phase
+  2 item 4, which had been "mostly answered rather than done" since the
+  responder was extracted.
+
+  It was built rather than described, and that is the point. The vendor test
+  project compiles eight of the eleven files with nothing of any mod's on the
+  line; the other three need Terraria, XNA and `ModSystem`, so nothing had ever
+  compiled the folder a consumer actually copies. This does, against the real
+  tModLoader: 0 errors, 0 warnings — with a deliberate syntax error injected
+  into the vendored `DevMutations.cs` first, which failed the build at the
+  expected line and proved the copy was genuinely on the compile line rather
+  than quietly skipped.
+
+  The copy is checked in rather than synced at build time because tModLoader's
+  `-build` compiles the mod DIRECTORY, so a template saying "copy `responder/`
+  in here" would not build as checked in — and a template nobody can build
+  proves none of this. A checked-in copy rots, so a test asserts the two
+  directories are byte-identical and prints the one-line `cp` that fixes them.
+
 - **`join` — a second client into a session that is already running.** The
   protocol has supported several clients since answers became per-player:
   every request carries an address, every answer carries a token. The

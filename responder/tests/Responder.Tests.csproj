@@ -11,14 +11,18 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
   </ItemGroup>
   <ItemGroup>
-    <!-- THE PROOF. Nothing of any mod's appears on this list. FrameShot is
-         absent because it imports Terraria and XNA, which are not on a build
-         machine; it is covered by the source scan in DevBridgeBoundaryTests
-         instead, and that limit is stated there. -->
+    <!-- THE PROOF. Nothing of any mod's appears on this list. FrameShot,
+         DevResponder and DevMutations are absent because they import Terraria
+         and XNA, which are not on a build machine; they are covered by the
+         source scans in VendorBoundaryTests, DevResponderContractTests and
+         DevMutationsTests instead, and that limit is stated in each. The
+         template mod under template/ compiles all ten against a real
+         tModLoader, which is the other half. -->
     <Compile Include="../DevArtifacts.cs" />
     <Compile Include="../DevBridgeGate.cs" />
     <Compile Include="../DevCommandRegistry.cs" />
     <Compile Include="../DevCommands.cs" />
+    <Compile Include="../DevMutationArgs.cs" />
     <Compile Include="../ShotRegion.cs" />
     <Compile Include="../CaptureBounds.cs" />
     <Compile Include="../CaptureFind.cs" />
@@ -33,6 +37,7 @@
     <Compile Include="ShotRegionTests.cs" />
     <Compile Include="CaptureBoundsTests.cs" />
     <Compile Include="CaptureFindTests.cs" />
+    <Compile Include="DevMutationsTests.cs" />
     <Compile Include="DevResponderContractTests.cs" />
     <Compile Include="VendorBoundaryTests.cs" />
   </ItemGroup>

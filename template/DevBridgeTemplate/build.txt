@@ -1,0 +1,4 @@
+displayName = Dev Bridge Template
+author = tmodloader-mcp
+version = 0.1.0
+buildIgnore = .git/*, .gitignore, *.tmod, obj/*, bin/*
