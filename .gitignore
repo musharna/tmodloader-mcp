@@ -8,3 +8,9 @@ dist/
 # .NET build artifacts
 bin/
 obj/
+
+# The API indexer's build output. The index it produces is cached under the
+# user's cache directory, keyed to the tModLoader it describes - neither
+# belongs in version control.
+tools/ApiIndex/bin/
+tools/ApiIndex/obj/

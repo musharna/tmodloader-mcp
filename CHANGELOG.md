@@ -13,6 +13,43 @@ keeping, not because they broke a released API.
 
 ### Added
 
+- **`api_search` — what the installed tModLoader actually exposes.** Writing
+  mod-side code here has meant answering two questions over and over, both
+  badly. "Does `Main.cloudAlpha` exist" was answered by GREPPING A 21MB DLL FOR
+  A SUBSTRING, which finds the name and cannot say what owns it, whether it is
+  a field or a method, or what type it is. "What does `QuickSpawnItem` take"
+  was answered by writing the call and letting the compiler decide — exact, but
+  only for code already written, and a build cycle per attempt.
+
+  Neither answers the question you have BEFORE writing anything: what is there.
+  `Main.maxRaining` is only findable if you already suspect the name.
+
+  Read from the assembly's own METADATA by `tools/ApiIndex`, which never loads
+  or runs it, so the answer cannot drift from the version installed — the
+  failure mode of every wiki page and every model's recollection of an API.
+  36,566 members across 2,240 types. Cached against the DLL's size and mtime,
+  so a game update invalidates the index by construction rather than by
+  anybody remembering.
+
+  Ranked, because an unranked substring search over 36,000 members answers
+  "rain" with `slimeRainKillCount` first and buries `raining` — a confident
+  answer about the wrong member. Exact short name, then short name contains,
+  then anywhere in the path, then the type; ties broken by path depth.
+
+- **`log_watch` — block until a log line appears.** `log_since` answers "what
+  has this log gained", which leaves a caller who is WAITING to write the loop
+  themselves: read, check, sleep a guessed number, give up eventually. The
+  offset is the mechanism — each poll resumes where the last stopped, so a line
+  is matched exactly once, never missed in the gap between polls and never
+  re-reported on the next. A watch that re-read from the top would match a line
+  written before the wait began and call it news, which is how "wait for the
+  crash" passes on the crash from the PREVIOUS run.
+
+  `offset=0` includes history deliberately: "did the mod load" is a question
+  about a line that is usually already there. Not matching returns rather than
+  raises, carrying the resume point; a MISSING log still raises, because that
+  is nobody having been asked.
+
 - **Verbs that change the world, and are off until a mod asks.**
   `responder/DevMutations.cs` adds `time`, `weather`, `spawn`, `give` and
   `teleport`. Everything in `responder/` until now READ — `capture`, `diag` and

@@ -70,6 +70,8 @@ EXPECTED_TOOLS = {
     "inventory",
     "prune_captures",
     "log_since",
+    "log_watch",
+    "api_search",
     "restart",
     "stop",
 }
