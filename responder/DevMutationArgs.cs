@@ -228,6 +228,64 @@ namespace TModLoaderMcp.DevBridge
 			return true;
 		}
 
+		/// <summary>The largest rectangle one `tiles` query may scan.
+		///
+		/// The smallest Terraria world is 4200 by 1200 tiles, so an unbounded
+		/// query is a request to walk five million of them and build a string
+		/// out of the answer. The cap refuses and names itself, for the same
+		/// reason MaxCount does: the second attempt should be a smaller
+		/// rectangle rather than a bug report about a game that stopped
+		/// answering.</summary>
+		public const int MaxArea = 128 * 128;
+
+		/// <summary>
+		/// "x,y,w,h" in TILE coordinates, for a rectangle to look at.
+		///
+		/// It lives beside the mutation rules because this file is the folder's
+		/// Terraria-free half — every argument rule that can be decided without
+		/// the game, and therefore every one that can be TESTED without it. The
+		/// file's name is older than that job and stays, because renaming a
+		/// vendored file breaks every consumer's copy for no gain.
+		/// </summary>
+		public static bool TryResolveArea(string argument, out int x, out int y,
+				out int width, out int height, out string problem) {
+			x = 0;
+			y = 0;
+			width = 0;
+			height = 0;
+			problem = null;
+
+			string text = (argument ?? string.Empty).Trim();
+			string[] parts = text.Split(',');
+
+			if (parts.Length != 4) {
+				problem = "\"" + text + "\" is not a rectangle written x,y,w,h in " +
+					"tile coordinates";
+				return false;
+			}
+
+			if (!TryWhole(parts[0], out x) || !TryWhole(parts[1], out y)
+					|| !TryWhole(parts[2], out width) || !TryWhole(parts[3], out height)) {
+				problem = "\"" + text + "\" holds something that is not a whole, " +
+					"non-negative number";
+				return false;
+			}
+
+			if (width == 0 || height == 0) {
+				problem = "a rectangle " + width + " by " + height +
+					" holds no tiles at all";
+				return false;
+			}
+
+			if (width * height > MaxArea) {
+				problem = width + " by " + height + " is " + (width * height) +
+					" tiles, past the limit of " + MaxArea + " one query may scan";
+				return false;
+			}
+
+			return true;
+		}
+
 		/// <summary>
 		/// Verbs that change something the SERVER owns: the clock, the weather,
 		/// the NPC array.

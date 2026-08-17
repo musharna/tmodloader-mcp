@@ -350,6 +350,72 @@ namespace TModLoaderMcp.DevBridge.Tests
             }
         }
 
+        // ---- areas, for the tile query --------------------------------------
+
+        [Fact]
+        public void ARectangleIsFourWholeNumbers() {
+            Assert.True(DevMutationArgs.TryResolveArea("10,20,4,5", out int x, out int y,
+                out int w, out int h, out string problem), problem);
+
+            Assert.Equal(10, x);
+            Assert.Equal(20, y);
+            Assert.Equal(4, w);
+            Assert.Equal(5, h);
+        }
+
+        [Theory]
+        [InlineData("10,20,4")]
+        [InlineData("10,20,4,5,6")]
+        [InlineData("10,20,-4,5")]
+        [InlineData("a,b,c,d")]
+        [InlineData("")]
+        public void WhatIsNotARectangleIsRefused(string written) {
+            Assert.False(DevMutationArgs.TryResolveArea(written, out _, out _, out _,
+                out _, out string problem), "\"" + written + "\" was accepted");
+
+            Assert.False(string.IsNullOrWhiteSpace(problem));
+        }
+
+        /// <summary>
+        /// A rectangle with a zero side is not a small query, it is no query -
+        /// and it would report "0 tiles, 0 distinct types", which reads exactly
+        /// like a region that exists and is empty.
+        /// </summary>
+        [Theory]
+        [InlineData("10,20,0,5")]
+        [InlineData("10,20,4,0")]
+        public void ARectangleWithNoAreaIsRefusedRatherThanAnsweredWithNothing(string written) {
+            Assert.False(DevMutationArgs.TryResolveArea(written, out _, out _, out _,
+                out _, out string problem));
+
+            Assert.Contains("no tiles", problem);
+        }
+
+        /// <summary>
+        /// The smallest Terraria world is 4200 by 1200 tiles, so an unbounded
+        /// query is a request to walk five million of them and build a string
+        /// out of the answer.
+        /// </summary>
+        [Fact]
+        public void AnAreaPastTheLimitIsRefusedAndTheLimitIsNamed() {
+            int side = 1;
+            while (side * side <= DevMutationArgs.MaxArea) {
+                side++;
+            }
+
+            Assert.False(DevMutationArgs.TryResolveArea(
+                "0,0," + side + "," + side, out _, out _, out _, out _,
+                out string problem));
+
+            Assert.Contains(DevMutationArgs.MaxArea.ToString(), problem);
+
+            // POSITIVE CONTROL: the limit itself is allowed, so this is a
+            // boundary rather than an off-by-one refusing the documented cap.
+            Assert.True(DevMutationArgs.TryResolveArea(
+                "0,0," + DevMutationArgs.MaxArea + ",1", out _, out _, out _, out _,
+                out _));
+        }
+
         // ---- the opt-in, read rather than run -------------------------------
 
         private static readonly string[] AllVerbs = {
@@ -393,12 +459,14 @@ namespace TModLoaderMcp.DevBridge.Tests
         /// mentioning DevMutations, which is a fact about a file and therefore
         /// checkable without a game.
         /// </summary>
-        [Fact]
-        public void DevResponderDoesNotRegisterTheMutatingVerbsForYou() {
-            string code = Source("DevResponder.cs");
-
+        [Theory]
+        [InlineData("DevMutations", "the world-changing verbs")]
+        [InlineData("DevCommandBridge", "the ability to run any mod's commands")]
+        [InlineData("DevChat", "a listener on chat, and a way to speak into it")]
+        public void DevResponderDoesNotRegisterAnOptInClassForYou(string name, string what) {
             var offenders = new List<string>();
-            foreach (string line in code.Split('\n')) {
+
+            foreach (string line in Source("DevResponder.cs").Split('\n')) {
                 string bare = line.TrimStart();
                 if (bare.StartsWith("//") || bare.StartsWith("///")) {
                     continue;
@@ -407,15 +475,41 @@ namespace TModLoaderMcp.DevBridge.Tests
                 int comment = line.IndexOf("//", StringComparison.Ordinal);
                 string codeOnly = comment >= 0 ? line.Substring(0, comment) : line;
 
-                if (codeOnly.Contains("DevMutations")) {
-                    offenders.Add(line.Trim());
+                // `name` and not a prefix of it: DevResponder legitimately names
+                // DevMutationArgs for the tile query's area rule, and that class
+                // registers nothing. Only an exact mention is an opt-in leaking
+                // into the base.
+                foreach (string token in codeOnly.Split(
+                        new[] { ' ', '\t', '.', '(', ')', ';', ',', '=', '>' },
+                        StringSplitOptions.RemoveEmptyEntries)) {
+                    if (token == name) {
+                        offenders.Add(line.Trim());
+                    }
                 }
             }
 
             Assert.True(offenders.Count == 0,
-                "DevResponder names DevMutations in code, so a mod vendoring this " +
-                "folder would get the world-changing verbs without asking: " +
+                "DevResponder names " + name + " in code, so a mod vendoring this " +
+                "folder would get " + what + " without asking: " +
                 string.Join(" | ", offenders));
+        }
+
+        /// <summary>
+        /// CONTROL for the scan above. Every name it checks has to be a name
+        /// that EXISTS - a typo would make the check pass against a folder that
+        /// registers everything for you, which is the state it exists to catch.
+        /// </summary>
+        [Theory]
+        [InlineData("DevMutations")]
+        [InlineData("DevCommandBridge")]
+        [InlineData("DevChat")]
+        public void EachOptInClassIsRealAndTakesTheReportChannel(string name) {
+            string code = Source(name + ".cs");
+
+            Assert.Contains("public static class " + name, code);
+            Assert.Matches(
+                new Regex(@"public\s+static\s+void\s+RegisterInto\s*\(\s*DevCommandRegistry\s+\w+\s*,\s*Action<string>\s+\w+\s*\)"),
+                code);
         }
 
         /// <summary>

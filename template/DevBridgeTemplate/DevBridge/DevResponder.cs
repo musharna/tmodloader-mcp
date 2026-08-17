@@ -140,7 +140,23 @@ namespace TModLoaderMcp.DevBridge
 					ShotRegion.Names + ").",
 				req => TakeShot(req.Argument));
 
-			// The mod's own, AFTER the three above. Register throws on a duplicate, so
+			// WHAT IS ACTUALLY IN THE WORLD, which nothing else here could ask.
+			// Terraria is a tile game and a diag reports whatever a mod chose to
+			// count; a picture shows tiles and cannot be compared to anything.
+			// This is in the base rather than behind an opt-in because it only
+			// READS, and reading a world the harness can already photograph adds
+			// no power to anybody.
+			//
+			// COUNTS BY TYPE rather than a grid of ids. A caller asking "did the
+			// placement work" wants to know that 40 of type 812 appeared, not to
+			// receive 16,000 numbers and count them - and the grid would be the
+			// same information in the form that makes it somebody else's job.
+			r.Register("tiles", true,
+				"Count tile types in a rectangle, as <x>,<y>,<w>,<h> in tiles (at " +
+					"most " + DevMutationArgs.MaxArea + " of them).",
+				req => CountTiles(req.Argument));
+
+			// The mod's own, AFTER the four above. Register throws on a duplicate, so
 			// a mod that tries to take one of these names fails at load with a sentence
 			// naming the verb - rather than silently replacing a verb the harness needs.
 			RegisterCommands(r);
@@ -546,6 +562,69 @@ namespace TModLoaderMcp.DevBridge
 			catch (Exception e) {
 				Report("ERROR: diag failed: " + e);
 			}
+		}
+
+		/// <summary>
+		/// Count the tile types in a rectangle.
+		///
+		/// CLAMPED TO THE WORLD RATHER THAN REFUSED AT THE EDGE. A caller asking
+		/// for a hundred tiles around something near the border means the tiles
+		/// that exist, and refusing the whole query for the part that does not
+		/// would make every edge case a special case for the caller. The reply
+		/// says how many were actually looked at, so a clamp is visible.
+		///
+		/// EMPTY IS A COUNT. "nothing there" and "the query did not run" are
+		/// different answers, and reporting the first as an empty string would
+		/// make them identical.
+		/// </summary>
+		private void CountTiles(string argument) {
+			if (!DevMutationArgs.TryResolveArea(argument, out int x, out int y,
+					out int width, out int height, out string problem)) {
+				Report("REFUSED: " + problem);
+				return;
+			}
+
+			// `Main.maxTilesX` rather than a null check on `Main.tile`: the
+			// tilemap is a STRUCT in 1.4, so comparing it to null does not
+			// compile at all. A world that has not loaded has no width, which is
+			// the same question asked of something that can answer it.
+			if (Main.maxTilesX <= 0 || Main.maxTilesY <= 0) {
+				Report("REFUSED: this side has no world loaded to look at");
+				return;
+			}
+
+			int right = Math.Min(x + width, Main.maxTilesX);
+			int bottom = Math.Min(y + height, Main.maxTilesY);
+			var counts = new SortedDictionary<int, int>();
+			int looked = 0;
+			int empty = 0;
+
+			for (int i = Math.Max(0, x); i < right; i++) {
+				for (int j = Math.Max(0, y); j < bottom; j++) {
+					looked++;
+					Tile tile = Main.tile[i, j];
+
+					if (!tile.HasTile) {
+						empty++;
+						continue;
+					}
+
+					int type = tile.TileType;
+					counts[type] = counts.TryGetValue(type, out int seen) ? seen + 1 : 1;
+				}
+			}
+
+			var sb = new System.Text.StringBuilder();
+			sb.Append("OK: looked at ").Append(looked)
+				.Append(" tile(s) of the ").Append(width * height)
+				.Append(" asked for, ").Append(empty).Append(" empty, ")
+				.Append(counts.Count).Append(" distinct type(s)");
+
+			foreach (KeyValuePair<int, int> pair in counts) {
+				sb.Append("\n  id=").Append(pair.Key).Append(" count=").Append(pair.Value);
+			}
+
+			Report(sb.ToString());
 		}
 
 		/// <summary>The body of &lt;mod&gt;-diag.txt. See docs/MOD_CONTRACT.md for the

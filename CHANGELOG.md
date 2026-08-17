@@ -13,6 +13,53 @@ keeping, not because they broke a released API.
 
 ### Added
 
+- **`command` — run the mod's own registered commands.** The biggest gap
+  against the Minecraft and Unity MCP ecosystems was the escape hatch: every
+  other verb here has to be ANTICIPATED, so a question nobody wrote a verb for
+  costs a C# edit, a rebuild and a relaunch. Those servers answer it with
+  `reflect_invoke` and `execute_code`, which buy unlimited reach and throw away
+  the property this design rests on — that everything is published, typed and
+  refusable.
+
+  A mod's own `ModCommand`s are the middle. The mod decided they exist, named
+  them and gave each a usage line, and most mods already have the debug commands
+  somebody would otherwise be adding a verb for. Running one is not new power —
+  it is the power a developer already has by typing into chat — and the set is
+  ENUMERABLE, so an unknown name is refused by listing the ones that exist
+  rather than by silence. `commandlist` asks for that list directly.
+
+  It needed no reflection, which was not obvious: `CommandLoader.HandleCommand`
+  is not public. `ModLoader.Mods`, `Mod.GetContent<ModCommand>()`,
+  `ModCommand.Action` and `CommandLoader.Matches` all are, and together they are
+  a complete public path — found with `api_search` rather than by grepping.
+  Output is captured by handing the command a `CommandCaller` that writes
+  replies down instead of to a screen, which is the interface tModLoader already
+  asks for.
+
+- **`chat` and `say` — hearing what the game said.** A screenshot shows that
+  chat happened and cannot be read as text, and `diag` reports only what a mod
+  chose to put in it. Neither reached `Main.NewText`, where most Terraria mods
+  print the things a developer wants to see. It was the one channel this
+  harness could not hear.
+
+  The recorder wraps rather than hooks. `Main.chatMonitor` is a public field of
+  a public interface and everything printed goes through it, so this installs a
+  second implementation that writes each line down and forwards every call — no
+  MonoMod detour, nothing a tModLoader update can silently change the shape of.
+  Guarded against double wrapping, because a mod reload would otherwise build a
+  chain of recorders each reporting the same line again. A dedicated server
+  draws no chat and is refused rather than answered with an empty list: "nothing
+  was said" and "this side cannot hear" are different answers.
+
+- **`tiles` — counting what is actually in the world.** Terraria is a tile game
+  and there was no tile query anywhere in the protocol. Counts BY TYPE rather
+  than a grid of ids: a caller asking "did the placement work" wants to know
+  that 40 of type 812 appeared, not to receive 16,000 numbers and count them.
+  Area-capped and clamped to the world's edges, with the number actually looked
+  at reported so a clamp is visible. In the base responder rather than behind an
+  opt-in, because reading a world the harness can already photograph adds no
+  power to anybody.
+
 - **`api_search` — what the installed tModLoader actually exposes.** Writing
   mod-side code here has meant answering two questions over and over, both
   badly. "Does `Main.cloudAlpha` exist" was answered by GREPPING A 21MB DLL FOR
