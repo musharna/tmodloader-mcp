@@ -46,7 +46,6 @@ keeping:
 import multiprocessing as mp
 import re
 import signal
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -161,41 +160,6 @@ def one_round(number: int, ctx) -> bool:
     return verdict
 
 
-def join_second_client(cfg, sess: Session) -> None:
-    """Join `PLAYERS[1]` to the running server and hand its pid to the session.
-
-    The pid goes into `sess.started` deliberately: `stop` kills exactly what a
-    session started, so a client this harness spawned and did not record is a
-    game left running that nothing owns.
-    """
-    before = session_mod._tml_pids(cfg)
-    subprocess.Popen(
-        [
-            str(cfg.dotnet),
-            "tModLoader.dll",
-            "-join",
-            "127.0.0.1",
-            "-port",
-            str(PORT),
-            "-player",
-            PLAYERS[1],
-            "-skipselect",
-        ],
-        cwd=str(cfg.tml_dir),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-    )
-
-    deadline = time.time() + 300
-    while time.time() < deadline:
-        new = session_mod._tml_pids(cfg) - before
-        if new:
-            sess.started |= new
-            break
-        time.sleep(2)
-
-
 def wait_armed(cfg, deadline: float) -> bool:
     """Both clients loaded, ticking, and listening on their trigger.
 
@@ -233,7 +197,7 @@ def main() -> int:
     print(f"session module: {session_mod.__file__}")
     sess = session_mod.launch(cfg, "server_client", port=PORT, player=PLAYERS[0])
     try:
-        join_second_client(cfg, sess)
+        session_mod.join(cfg, sess, PLAYERS[1], timeout=300.0)
         if not wait_armed(cfg, deadline=time.time() + 300):
             return 2
 

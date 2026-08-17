@@ -157,6 +157,11 @@ class StatusOut(TypedDict):
     # mode, port and player of a session while staying silent about the only
     # field that says WHICH WORLD is loaded.
     world: str | None
+    # Characters brought in by `join`, in arrival order - NOT including
+    # `player`, which came up with `launch`. Empty rather than null when a
+    # session is running with nobody joined: "none yet" and "no session" are
+    # different answers and a caller acts on them differently.
+    joined: list[str] | None
     started_pids: list[int] | None
 
 
@@ -338,6 +343,57 @@ def launch(
     )
 
 
+class JoinOut(TypedDict):
+    player: str
+    # Everyone joined so far, this call included, in arrival order. The
+    # session's own `player` is not in it - that client came up with `launch`.
+    joined: list[str]
+    started_pids: list[int]
+
+
+@mcp.tool(
+    title="Join a second client to the running session",
+    annotations=_MUTATES,
+    structured_output=True,
+)
+def join(player: str, timeout: float = 300.0) -> JoinOut:
+    """Bring another character into the session that is already running.
+
+    Args:
+        player: Character name. Must already exist — `-player` does not create
+            one — and must not be one this session already has, in any casing.
+        timeout: Seconds to wait for that client to report a live, world-ready
+            heartbeat of its own.
+
+    The protocol has supported several clients since answers became per-player;
+    the LIFECYCLE supported one, so the arrangement that work exists to make
+    safe could only be reached by spawning a game by hand. This is that, with
+    the waiting done properly.
+
+    It waits for THIS client, not for a process. A new pid says something
+    started — not that a character loaded, that the join was accepted, or that
+    a world is under it. And it watches only that player's own tokened
+    heartbeat: the unsuffixed `<mod>-hooks.txt` is a shared slot holding
+    whichever client booted last, so accepting it would return against the
+    heartbeat of the game that was already here.
+
+    Address the new client by name — `diag(target=...)`, `shot(target=...)` —
+    which already works, because addressing was never the half that was
+    missing. `stop` takes it down with everything else the session started.
+    """
+    global _session
+
+    if _session is None:
+        raise RuntimeError("no session — call `launch` first")
+
+    _session = session_mod.join(_cfg(), _session, player, timeout=timeout)
+    return JoinOut(
+        player=player,
+        joined=list(_session.joined),
+        started_pids=sorted(_session.started),
+    )
+
+
 @mcp.tool(
     title="Send a dev trigger to the game",
     annotations=_MUTATES,
@@ -486,6 +542,91 @@ def diag(
         side=diag_mod.side_of(dump.fields),
         fields=dump.fields,
         records=dump.records,
+    )
+
+
+class WaitOut(TypedDict):
+    matched: bool
+    #: The last reading taken, whether or not it matched. Null both when the
+    #: field genuinely read as absent and when no poll completed - the two are
+    #: told apart by `polls`, and conflating them in the type would be worse
+    #: than either.
+    last: Any
+    polls: int
+    elapsed: float
+    # Always present, never omitted - see `StatusOut`. Null unless the last
+    # poll was cut off by the timeout rather than answered.
+    note: str | None
+
+
+@mcp.tool(
+    title="Wait until the game reaches a state",
+    annotations=_READ_ONLY,
+    structured_output=True,
+)
+def wait_until(
+    field: str,
+    op: str,
+    value: str | None = None,
+    server: bool = False,
+    target: str | None = None,
+    timeout: float = 60.0,
+    poll: float = 2.0,
+) -> WaitOut:
+    """Poll `diag` until one of its fields satisfies a comparison.
+
+    Args:
+        field: A TOP-LEVEL diag field, exactly as `diag` reports it - `vats`,
+            `items`, `world-ready`. Not a path into one: `diag` splits
+            `key: value` and stops, so `npcs` is the whole string
+            `active=4 mutated=0` and there is no `npcs.active`.
+        op: One of `==`, `!=`, `<`, `<=`, `>`, `>=`, `contains`, `changed`.
+        value: What to compare against, as text - it is converted to whatever
+            type the field actually reads as. Omitted for `changed`, which
+            baselines on its first reading.
+        server: Watch the dedicated server's view instead of the client's.
+        target: Watch a specific client by name.
+        timeout: Seconds for the WHOLE call, spent across every poll rather
+            than granted to each.
+        poll: Seconds between polls.
+
+    Use this instead of sleeping and taking a diag. A guessed sleep is wrong in
+    both directions, and the short one is dangerous: the check reads the state
+    BEFORE the thing happened, which looks exactly like the feature being
+    broken.
+
+    THE COMPARISON IS TYPED. `diag` returns counters as ints and the
+    heartbeat's flags as bools; `world-ready == true` compares as a boolean and
+    `items >= 10` as a number, so neither `"10" < "9"` nor the truthiness of
+    `"False"` can come back here.
+
+    IT REFUSES WHAT CAN NEVER COME TRUE rather than waiting it out. An unknown
+    field names the fields that do exist; ordering a composite string says what
+    the value actually is. Both used to be spellable and would have reported a
+    timeout - blaming a game that was answering perfectly.
+
+    Not matching is an ANSWER, not an error: it returns `matched: false` with
+    the last reading it took, so a wait that expected nothing to happen is as
+    expressible as one that expected something to.
+    """
+    if _session is None:
+        raise RuntimeError("no session — call `launch` first")
+
+    got = _session.wait_until(
+        field,
+        op,
+        value,
+        server=server,
+        target=target,
+        timeout=timeout,
+        poll=poll,
+    )
+    return WaitOut(
+        matched=got.matched,
+        last=got.last,
+        polls=got.polls,
+        elapsed=got.elapsed,
+        note=got.note,
     )
 
 
@@ -639,6 +780,7 @@ def status() -> StatusOut:
             port=None,
             player=None,
             world=None,
+            joined=None,
             started_pids=None,
         )
 
@@ -648,6 +790,7 @@ def status() -> StatusOut:
         port=_session.port,
         player=_session.player,
         world=_session.world,
+        joined=list(_session.joined),
         started_pids=sorted(_session.started),
     )
 

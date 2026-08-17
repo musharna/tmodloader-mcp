@@ -11,6 +11,66 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Added
+
+- **`join` — a second client into a session that is already running.** The
+  protocol has supported several clients since answers became per-player:
+  every request carries an address, every answer carries a token. The
+  LIFECYCLE supported exactly one, so the arrangement two whole releases exist
+  to make safe was unreachable from this harness — the only way to get a
+  second client was to spawn a game by hand, which is what
+  `tests/live_capture_check.py` did. That function is now deleted and the live
+  check calls this instead, which is the point of moving it.
+
+  It waits for a CLIENT, not for a process. The lifted version watched for a
+  new tModLoader pid and called it done; a pid says something started, not
+  that a character loaded, that the join was accepted, or that a world is
+  under it.
+
+  And it watches only that player's own tokened heartbeat. The unsuffixed
+  `<mod>-hooks.txt` is a shared slot rather than a client — every client that
+  boots writes it on the way through the menu and nothing deletes it — so with
+  a client already running it holds THAT client's record, and accepting it
+  would let the call return against the heartbeat of the game that was already
+  here. This is the one the test suite missed on the first pass: written with
+  a zero timeout, the wait loop never ran, and the test passed just as happily
+  against a version that accepted the shared slot.
+
+  A duplicate character is refused, case-insensitively. Two clients under one
+  name share a player token, so their heartbeat, reply, diag and shot are one
+  file each between them — the collision per-player naming removed, reachable
+  again through the tool that adds clients. `stop` needs no knowledge of any
+  of this: the pids go into `session.started`, which is already exactly what
+  it kills. `status` gained `joined`.
+
+- **`wait_until` — waiting for a state instead of sleeping a guess.** Every
+  caller driving this server had written the same loop by hand: send a
+  trigger, sleep a number the author picked, take a diag, check a field, give
+  up or go round again. A guessed sleep is wrong in both directions, and the
+  short one is the dangerous one — the check reads the state BEFORE the thing
+  happened, which is indistinguishable from the feature being broken.
+
+  The comparison is TYPED, which is most of the value. `diag` already returns
+  counters as ints and the heartbeat's flags as bools, precisely because
+  `"10" < "9"` and the truthiness of `"False"` were real bugs; a wait that
+  string-matched them would have reintroduced both at the last possible
+  moment, in the one place nothing downstream can catch it. `world-ready ==
+true` compares as a boolean and `items >= 10` as a number.
+
+  It REFUSES what can never come true rather than waiting it out. An unknown
+  field names the fields that do exist; ordering a composite string says what
+  the value actually is — `npcs` is the whole line `active=4 mutated=0`, there
+  is no `npcs.active`, and `contains` is how that line is waited on. Both were
+  spellable and would have reported a timeout, which blames a game that was
+  answering perfectly. An ABSENCE is deliberately not in that category: a
+  field reading `NONE` may gain a value on the next poll, so it is a
+  non-match rather than a refusal.
+
+  Not matching is an answer, not an error: it returns `matched: false` with
+  the last reading it took, so a caller is never sent to take another diag
+  against a state that has since moved on. One budget across every poll, the
+  same rule `diag` and `shot` already follow within a single call.
+
 ## [0.4.0] - 2026-08-16
 
 The release where two sessions stop colliding on the one thing neither can see
@@ -90,7 +150,6 @@ the refusal proved to be a refusal rather than a silence.
   since the per-player work recording that divergence and saying in as many
   words that giving a server a token could not be done safely without fixing
   it first.
-
 
 - **`tests/live_capture_check.py` — the collision, reproduced and closed
   against the real capture camera.** No test in `tests/` could reach this
@@ -194,7 +253,6 @@ the refusal proved to be a refusal rather than a silence.
   Unchanged and still stated: a capture whose reply times out releases its
   lock while Terraria may still be writing the PNG. That residual is
   independent of the bound.
-
 
 - **Two clients capturing in the same wall-clock second no longer collide.**
   Terraria's own capture camera names the output PNG and stamps that name to

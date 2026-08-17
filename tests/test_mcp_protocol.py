@@ -55,9 +55,11 @@ from tmodloader_mcp import server as server_mod
 EXPECTED_TOOLS = {
     "build_mod",
     "launch",
+    "join",
     "trigger",
     "commands",
     "diag",
+    "wait_until",
     "shot",
     "captures",
     "read_capture",

@@ -31,8 +31,10 @@ What earns the surface here is that a running game is not stateless:
 | Tool              | What it buys over `bash`                                         |
 | ----------------- | ---------------------------------------------------------------- |
 | `launch` / `stop` | Session state across calls                                       |
+| `join`            | A second client into a session that is already running           |
 | `status`          | Asking whether a session exists without provoking an error       |
 | `diag`            | Structured fields AND the records under them, not text to `sed`  |
+| `wait_until`      | Waiting for a state on one budget, instead of sleeping a guess   |
 | `trigger`         | The write → poll → timeout → clean-up loop, written once         |
 | `shot`            | A path per call, a whole PNG behind it, refusals as refusals     |
 | `read_capture`    | The picture itself, for an agent not on this machine             |
