@@ -68,6 +68,39 @@ namespace DevBridgeTemplate
 					: local.name)
 				.Append('\n');
 
+			// WHERE THE PLAYER IS, AND WHAT THEY ARE CARRYING, in tiles and in
+			// occupied slots. Two counters rather than decoration: they are what
+			// makes `teleport` and `give` VERIFIABLE from outside. A verb whose
+			// only evidence is its own success report is a verb nobody can check
+			// - which is the failure this whole channel exists to remove.
+			// THE TILE THE CHARACTER IS STANDING ON, which is not the tile their
+			// position field names. `position` is the TOP-LEFT corner of a body
+			// about three tiles tall, so a character standing perfectly on tile
+			// 252 reports 249 - and a live run read that as a teleport that had
+			// missed by three tiles when it had in fact landed exactly. Centre
+			// horizontally, feet vertically: that is what "where are they" means
+			// to anybody comparing it against a spawn point.
+			sb.Append("player-tile: ")
+				.Append(local == null || !local.active
+					? "NONE"
+					: ((int)(local.Center.X / 16)).ToString() + "," +
+						((int)(local.Bottom.Y / 16)).ToString())
+				.Append('\n');
+
+			// BOTH NUMBERS, because one of them cannot see the commonest case.
+			// A live run gave five torches to a character already carrying
+			// torches: they merged into the existing stack, the occupied-slot
+			// count stayed at 25, and the check read that as the verb having
+			// done nothing. Slots answer "how full is the bag"; stacks answer
+			// "did anything arrive", which is the question `give` raises.
+			sb.Append("inventory-slots: ")
+				.Append(local == null || !local.active ? "NONE" : OccupiedSlots(local).ToString())
+				.Append('\n');
+
+			sb.Append("inventory-stacks: ")
+				.Append(local == null || !local.active ? "NONE" : HeldItems(local).ToString())
+				.Append('\n');
+
 			AppendNpcs(sb);
 			AppendItems(sb);
 
@@ -90,6 +123,49 @@ namespace DevBridgeTemplate
 		/// </summary>
 		protected override void RegisterCommands(DevCommandRegistry r) {
 			DevMutations.RegisterInto(r, Report);
+		}
+
+		/// <summary>
+		/// How many inventory slots hold something.
+		///
+		/// The MAIN inventory only - `Main.InventorySlotsTotal` stops before the
+		/// coin, ammo and equipment rows - because an item handed over by `give`
+		/// lands there, and counting the rest would move this number for reasons
+		/// that have nothing to do with the verb being checked.
+		/// </summary>
+		private static int OccupiedSlots(Player player) {
+			int held = 0;
+
+			for (int i = 0; i < Main.InventorySlotsTotal; i++) {
+				Item item = player.inventory[i];
+				if (item != null && !item.IsAir) {
+					held++;
+				}
+			}
+
+			return held;
+		}
+
+		/// <summary>
+		/// How many THINGS the player is carrying, counting stacks.
+		///
+		/// The counter that actually moves when `give` works. Five torches
+		/// handed to somebody already carrying torches occupy no new slot, so
+		/// the slot count above is blind to exactly the case a stackable item
+		/// produces - which a live run demonstrated by reporting 25 before and
+		/// 25 after a give that had in fact worked.
+		/// </summary>
+		private static int HeldItems(Player player) {
+			int held = 0;
+
+			for (int i = 0; i < Main.InventorySlotsTotal; i++) {
+				Item item = player.inventory[i];
+				if (item != null && !item.IsAir) {
+					held += item.stack;
+				}
+			}
+
+			return held;
 		}
 
 		private static string SideName() {

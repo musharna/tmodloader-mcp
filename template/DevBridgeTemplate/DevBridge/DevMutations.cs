@@ -258,9 +258,14 @@ namespace TModLoaderMcp.DevBridge
 				return;
 			}
 
-			// Placed a little above the tile so the arrival is standing on it
-			// rather than inside it.
-			var target = new Vector2(tileX * 16, tileY * 16 - player.height);
+			// A BODY IS NOT A POINT, and `position` is its top-left corner - so
+			// the tile a caller names has to be turned into the corner that puts
+			// the character ON it: half a body left, and a whole body up. This
+			// is vanilla's own spawn placement, and without it "teleport to tile
+			// 252" leaves the feet three tiles above it and the body half a tile
+			// to the right of it.
+			var target = new Vector2(
+				tileX * 16 - player.width / 2, tileY * 16 - player.height);
 			player.Teleport(target, 1);
 
 			if (Main.netMode == NetmodeID.MultiplayerClient) {

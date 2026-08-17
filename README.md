@@ -326,7 +326,12 @@ checkout:
 
    The rules and the refusals live in a Terraria-free file so they are tested
    by running them; the Terraria half is a thin applier compiled by the
-   template mod.
+   template mod and **driven against a real game, 16 of 16**
+   (`tests/live_mutations_check.py`). Every verb is verified by reading the
+   state back out afterwards rather than by its own success report, and the
+   multiplayer half is read from the side that did not make the change. The
+   first run found two defects — both in what the diag MEASURED rather than in
+   the verbs, and both invisible to any test that does not run a game.
 
 The last thing that made this a tool for one mod is gone. The filenames, the
 paths and the command list were already yours — this side holds no opinion about
