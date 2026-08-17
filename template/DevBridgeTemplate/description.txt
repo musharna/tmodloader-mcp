@@ -1,0 +1,4 @@
+A minimal tModLoader mod that answers the tmodloader-mcp harness.
+
+It is the responder folder, a subclass, and nothing else - the smallest thing
+that can be launched, asked for a diag, photographed and driven.
