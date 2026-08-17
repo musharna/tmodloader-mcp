@@ -48,6 +48,31 @@ keeping, not because they broke a released API.
   means "nothing" in both of Terraria's id spaces, and is therefore the one
   argument that would report success against a world it did not change.
 
+  **Run against a real game, 16 of 16** (`tests/live_mutations_check.py`, two
+  clients and a dedicated server on one world). Every verb is verified by
+  reading the state back out afterwards rather than by its own success report,
+  and the multiplayer half is read from the side that did NOT make the change:
+  `time:midnight` on the server arrives at the client, which is `WorldData`
+  going out. Every refusal is checked live too, each next to the same request
+  succeeding on the right side — a responder that refused everything would pass
+  the negatives alone.
+
+  The first run found two defects, both in the measurements rather than the
+  verbs, and both of a kind only a live run produces. `give` reported OK while
+  the occupied-slot count sat at 25 before and after: five torches had merged
+  into a stack of torches the character already carried, which is the COMMON
+  case for a stackable item. The diag now counts stacks as well as slots, and
+  the same give reads 80177 -> 80182. And `teleport` landed three tiles above
+  where it was asked to: `player-tile` was reporting `position`, the top-left
+  corner of a three-tile-tall body, so a teleport that landed exactly read as
+  one that had missed. It now reports the tile UNDER the character — centre
+  horizontally, feet vertically — and `teleport:spawn` lands on `2101,252`
+  when the world's spawn is `2101,252`.
+
+  The teleport applier was corrected in the same pass: it placed the character
+  half a body to the right of the named tile, because a tile is a point and a
+  body is not. It now offsets by half the width as vanilla's own spawn does.
+
 - **A template mod that compiles.** `template/DevBridgeTemplate/` is a whole
   tModLoader mod — build files, an empty `Mod` class, a `DevResponder`
   subclass, and a byte-identical copy of `responder/`. This closes README Phase
