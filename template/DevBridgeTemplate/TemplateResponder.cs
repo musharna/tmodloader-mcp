@@ -116,13 +116,21 @@ namespace DevBridgeTemplate
 		/// <summary>
 		/// This mod's own verbs, which here are only the shared ones.
 		///
-		/// THIS LINE IS THE OPT-IN. Everything else in DevBridge/ READS; these
-		/// five change the world you are sitting in, so nothing registers them
-		/// for you. Delete this override and the mod still answers `capture`,
-		/// `diag` and `shot` and can no longer spawn anything.
+		/// THESE THREE LINES ARE THE OPT-INS, and they are separate on purpose.
+		/// The base class already answers `capture`, `diag`, `shot` and `tiles`,
+		/// all of which only READ. Each line below adds something that does not:
+		///
+		///   DevMutations      changes the world you are sitting in
+		///   DevCommandBridge  runs any mod's registered ModCommands
+		///   DevChat           listens to chat, and can speak into it
+		///
+		/// Delete any one and the rest still work. Delete all three and this is
+		/// a read-only harness that cannot alter a save.
 		/// </summary>
 		protected override void RegisterCommands(DevCommandRegistry r) {
 			DevMutations.RegisterInto(r, Report);
+			DevCommandBridge.RegisterInto(r, Report);
+			DevChat.RegisterInto(r, Report);
 		}
 
 		/// <summary>

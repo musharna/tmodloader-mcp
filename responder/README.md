@@ -21,8 +21,9 @@ loads it with no registration on your part.
 
 **3. Override `CollectDiag`** — what your mod knows that is worth reading back.
 
-**4. Override `RegisterCommands`** if you want verbs of your own. Optional; the
-base class already answers `capture`, `diag` and `shot`.
+**4. Override `RegisterCommands`** if you want verbs of your own, or want any of
+the three opt-in classes below. Optional; the base class already answers
+`capture`, `diag`, `shot` and `tiles`, all of which only READ.
 
 ```csharp
 using TModLoaderMcp.DevBridge;
@@ -41,19 +42,46 @@ public class MyDevResponder : DevResponder
 `Report` is `protected static` on the base class — it is how a handler answers,
 and every handler needs it.
 
-## Verbs that change the world, which are off
+## Three opt-ins, each off until you ask
 
-Everything above READS. `capture`, `diag` and `shot` observe a world and write
-files outside it. `DevMutations` is five verbs that change the one you are
-sitting in — `time`, `weather`, `spawn`, `give`, `teleport` — and it is
-registered by nobody until you write this:
+The base class only READS: `capture` and `shot` photograph the frame, `diag`
+reports what your mod chose to report, and `tiles` counts tile types in a
+rectangle you name. None of them can change a save, so every consumer gets them.
+
+Three classes do more than read, and each is a separate line you write:
 
 ```csharp
-protected override void RegisterCommands(DevCommandRegistry r) =>
-    DevMutations.RegisterInto(r, Report);
+protected override void RegisterCommands(DevCommandRegistry r) {
+    DevMutations.RegisterInto(r, Report);      // changes the world
+    DevCommandBridge.RegisterInto(r, Report);  // runs any mod's ModCommands
+    DevChat.RegisterInto(r, Report);           // listens to chat, and speaks
+}
 ```
 
-That line is the whole of the opt-in. Not a setting, not a marker file, not an
+| Class              | Verbs                                      | What it lets through          |
+| ------------------ | ------------------------------------------ | ----------------------------- |
+| `DevMutations`     | `time` `weather` `spawn` `give` `teleport` | Changing the world you are in |
+| `DevCommandBridge` | `command` `commandlist`                    | Any registered `ModCommand`   |
+| `DevChat`          | `chat` `say`                               | Reading and writing chat      |
+
+**`DevCommandBridge` is the one worth understanding.** Every other verb here has
+to be anticipated — a question nobody wrote a verb for costs an edit, a rebuild
+and a relaunch. Other harnesses answer that with reflection or an eval tool,
+which buys unlimited reach and throws away the property this design rests on.
+Your own `ModCommand`s are the middle: you already decided they exist, named
+them and gave each a usage line, and most mods already have the debug commands
+somebody would otherwise be adding a verb for. Running one is not new power —
+it is the power you already have by typing into chat — and the set is
+enumerable, so an unknown name is refused by listing the ones that exist.
+
+**`DevChat` records by wrapping, not by hooking.** `Main.chatMonitor` is a
+public field of a public interface and everything printed to chat goes through
+it, so the recorder is a second implementation that writes each line down and
+forwards every call. No MonoMod detour, nothing a tModLoader update can silently
+change the shape of. It only installs on a client; a dedicated server draws no
+chat and is refused rather than answered with an empty list.
+
+Each line is the whole of its opt-in. Not a setting, not a marker file, not an
 environment variable — each of those can be switched on somewhere other than the
 source somebody will read when they ask why an NPC appeared in their world. It
 also means re-syncing this folder can never give your mod a power it did not
@@ -62,18 +90,21 @@ have before, which is the property that makes vendoring an upgrade safe.
 `DevBridgeGate` still applies underneath: a played install runs none of it,
 whatever you register.
 
-Each verb refuses the side that cannot do it and names the side that can.
-`time`, `weather` and `spawn` are refused on a multiplayer **client** — the
-server owns the clock, the weather and the NPC array, and a client that changed
-them would be corrected by the next world packet, so the change would appear to
-work and then undo itself. `give` and `teleport` are refused on a **dedicated
-server**, which runs the world without standing in it. Singleplayer does
-everything, being both sides at once.
+Every verb across all three refuses the side that cannot do it and names the
+side that can. `time`, `weather` and `spawn` are refused on a multiplayer
+**client** — the server owns the clock, the weather and the NPC array, and a
+client that changed them would be corrected by the next world packet, so the
+change would appear to work and then undo itself. `give`, `teleport` and `chat`
+are refused on a **dedicated server**, which runs the world without standing in
+it and draws nothing. A `Console` command is refused from a client and a `Chat`
+command from a server, using `CommandLoader.Matches` so the rule stays in the
+loader that owns it. Singleplayer does everything, being both sides at once.
 
-The rules live in `DevMutationArgs.cs`, which imports nothing but `System` and
-is therefore tested by running it; `DevMutations.cs` imports Terraria and is the
-thin applier. If you want verbs of your own with the same property, that split
-is the one to copy.
+The argument rules live in `DevMutationArgs.cs`, which imports nothing but
+`System` and is therefore tested by running it; the appliers import Terraria and
+are as thin as they can be made. If you want verbs of your own with the same
+property, that split is the one to copy — it is what keeps every refusal message
+under test on a machine with no game.
 
 ## The heartbeat before you have a character
 
