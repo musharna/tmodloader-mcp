@@ -13,6 +13,34 @@ keeping, not because they broke a released API.
 
 ### Added
 
+- **`entities` — the other half of the world.** `tiles` was argued for on the
+  grounds that a diag reports whatever a mod chose to count, so a mod that never
+  thought to count something cannot be asked about it. That argument is about
+  counting rather than about tiles, and it applies unchanged to what is moving
+  around on top of them — which is why the earlier decision to skip an entity
+  query as "already covered by diag records" was the inconsistent one.
+
+  Takes a kind and no default — `entities:npc`, `entities:item`,
+  `entities:projectile` — for the reason `shot` takes a region and no default:
+  the three id spaces are separate, so a query answered about the wrong one
+  comes back as a plausible list of numbers that means nothing. An unknown kind
+  is refused by naming the three. A rectangle may follow the kind, in the same
+  tile coordinates `tiles` uses.
+
+  **Its rectangle is a filter, not a budget.** A tile query pays per tile, so an
+  unbounded one walks five million of them and is capped. An entity query walks
+  a fixed few hundred array slots whatever it is handed, so the same rectangle
+  is free — it is therefore NOT capped, and a test asserts both halves together
+  so the exemption cannot quietly become a deleted cap.
+
+  Reports the display name beside each id, because three opaque id spaces are in
+  play and `id=4 count=1` is a fact the reader then has to go look up. A name
+  that fails to resolve is reported as itself rather than losing the whole count.
+
+  Neither side is refused: a dedicated server owns these arrays and a
+  multiplayer client holds synced copies, so asking both the same question is
+  how a desync becomes visible rather than theoretical.
+
 - **`command` — run the mod's own registered commands.** The biggest gap
   against the Minecraft and Unity MCP ecosystems was the escape hatch: every
   other verb here has to be ANTICIPATED, so a question nobody wrote a verb for
