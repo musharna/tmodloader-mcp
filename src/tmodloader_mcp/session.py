@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import operator
 import os
 import re
 import subprocess
@@ -24,7 +25,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from . import commands as commands_mod
 from . import inventory
@@ -580,6 +581,167 @@ def _release_trigger(cfg: Config, *, player: str | None, port: int | None) -> No
         trigger = cfg.artifact(cfg.artifacts.trigger, server=server)
         if _is_ours_to_clear(_pending_payload(trigger), addressee=addressees[server]):
             trigger.unlink(missing_ok=True)
+
+
+#: The orderings, keyed as a caller writes them.
+_ORDERINGS = {
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+}
+
+#: Every comparison `wait_until` understands, in the order a refusal lists them.
+OPERATORS = ("==", "!=", "<", "<=", ">", ">=", "contains", "changed")
+
+#: How a caller spells a boolean. `diag` hands booleans back as bools - see the
+#: `_BOOLEAN` note there for why they are not left as text - so a value arriving
+#: over MCP as a string has to come back the same way it went in.
+_BOOLEAN_WORDS = {"true": True, "false": False}
+
+#: How a caller spells the mod's absence markers, which `diag` turns into None.
+#: `NONE`, `N/A (never sent to clients)` and `N/A (no local player)` are all one
+#: state by the time they get here, so there is one spelling for it.
+_ABSENT_WORDS = frozenset({"none", "null"})
+
+#: Distinguishes "no reading yet" from a reading of None, which is a real value
+#: the mod writes deliberately.
+_UNREAD = object()
+
+
+@dataclass(frozen=True)
+class Watch:
+    """What a `wait_until` saw, whether or not it got what it waited for.
+
+    `last` is the reason this is a record rather than a bool. A wait that
+    reports only "timed out" makes the caller take another diag to find out
+    why - against a state that has moved on since, so the reading that explains
+    the timeout is precisely the one they can no longer get.
+    """
+
+    matched: bool
+    elapsed: float
+    polls: int
+    last: Any
+    #: Set only when the LAST poll was cut off by the budget rather than
+    #: answered. Without it that case is indistinguishable from a condition
+    #: that simply did not come true, which is a game not responding wearing
+    #: the disguise of a game that is.
+    note: str | None = None
+
+
+def _check_comparison(op: str, value: str | None) -> None:
+    """Refuse a request no state of the game could satisfy, before asking it.
+
+    Both of these used to be expressible and would have run the whole clock
+    out, and a timeout blames the game: it sends the reader to look at a game
+    that was never asked anything it could answer.
+    """
+    if op not in OPERATORS:
+        raise TriggerError(
+            f"{op!r} is not a comparison this understands. The operators are "
+            f"{', '.join(OPERATORS)}."
+        )
+
+    if op == "changed":
+        if value is not None:
+            raise TriggerError(
+                "`changed` takes no value - it baselines on its first reading "
+                f"and fires when a later one differs. {value!r} reads as "
+                '"changed to", which is `==` and can be asked directly.'
+            )
+    elif value is None:
+        raise TriggerError(f"`{op}` needs a value to compare the field against")
+
+
+def _unknown_field_message(field: str, fields: dict[str, Any]) -> str:
+    """Name the fields that DO exist, which is what makes this actionable.
+
+    A misspelled field is the commonest reason a wait never matches, and the
+    real names are right there in the dump that was just read - so a refusal
+    that withheld them would send the reader to take the diag by hand that this
+    call already took.
+    """
+    return (
+        f"the {'server' if 'side' in fields else 'game'} reports no field named "
+        f"{field!r}, so no amount of waiting will produce one. It reports: "
+        f"{', '.join(sorted(fields))}. Indented list bodies (`records`) are not "
+        "fields and cannot be waited on."
+    )
+
+
+def _satisfied(field: str, live: Any, op: str, value: str) -> bool:
+    """Does this reading satisfy the comparison, and could it ever?
+
+    THE LINE BETWEEN FALSE AND A REFUSAL is the whole of this function. A
+    composite string will never become an integer, so ordering one is refused.
+    An ABSENCE is different in kind - `strain-readout: NONE` is the mod saying
+    "nothing showing right now", and the next poll may well show something - so
+    that is a plain False and the wait goes round again. Refusing it would make
+    this useless for the wait it is most obviously for.
+    """
+    if op in _ORDERINGS:
+        if live is None:
+            return False
+        if isinstance(live, bool) or not isinstance(live, int):
+            raise TriggerError(
+                f"{field!r} cannot be ordered: it reads {live!r}, which is not a "
+                f"count. `{op}` needs a number, and this field will not become "
+                "one - use `contains` for a composite line, or `==` for a "
+                "boolean or a name."
+            )
+        return _ORDERINGS[op](live, _as_number(field, value))
+
+    if op == "contains":
+        if live is None:
+            return False
+        if not isinstance(live, str):
+            raise TriggerError(
+                f"{field!r} cannot be searched for text: it reads {live!r}. "
+                "`contains` is for the composite lines the mod writes whole - "
+                "use `==` or an ordering for a count."
+            )
+        return value in live
+
+    equal = _equals(field, live, value)
+    return equal if op == "==" else not equal
+
+
+def _as_number(field: str, value: str) -> int:
+    try:
+        return int(value)
+    except ValueError:
+        raise TriggerError(
+            f"{value!r} is not a number, so it cannot be compared against the "
+            f"count {field!r}"
+        ) from None
+
+
+def _equals(field: str, live: Any, value: str) -> bool:
+    """Compare against the reading's OWN type, not against its text.
+
+    `diag` types its values on purpose: a counter comes back as an int and a
+    heartbeat flag as a bool, because `"10" < "9"` and the truthiness of
+    `"False"` are the two bugs that typing removed. Comparing as text here
+    would reintroduce both at the last possible moment, in the one place
+    nothing downstream can catch it.
+    """
+    if live is None:
+        return value.casefold() in _ABSENT_WORDS
+
+    if isinstance(live, bool):
+        want = _BOOLEAN_WORDS.get(value.casefold())
+        if want is None:
+            raise TriggerError(
+                f"{field!r} is a flag reading {str(live).lower()!r}, and "
+                f"{value!r} is neither `true` nor `false`"
+            )
+        return live is want
+
+    if isinstance(live, int):
+        return live == _as_number(field, value)
+
+    return live == value
 
 
 @dataclass
@@ -1230,6 +1392,98 @@ class Session:
         kept = drop.with_name(f"{drop.stem}-{index:03d}-{region}{drop.suffix}")
         drop.replace(kept)
         return kept
+
+    def wait_until(
+        self,
+        field: str,
+        op: str,
+        value: str | None = None,
+        *,
+        server: bool = False,
+        target: str | None = None,
+        timeout: float = 60.0,
+        poll: float = 2.0,
+    ) -> Watch:
+        """Poll `diag` until one of its fields satisfies a comparison.
+
+        WHAT THIS REPLACES: every caller driving this server has written the
+        same loop by hand - send a trigger, sleep a number the author guessed,
+        take a diag, check a field, give up or go round again. A guessed sleep
+        is wrong in both directions, and the short one is the dangerous one: the
+        assertion reads the state BEFORE the thing happened, which looks exactly
+        like the feature being broken.
+
+        THE FIELD IS TOP-LEVEL AND NOTHING FURTHER. `diag` splits `key: value`
+        and stops, so `npcs` is the whole string `active=4 mutated=0` - there is
+        no `npcs.active`, and asking for one is refused rather than waited out.
+        `contains` is how a composite line is waited on, and it has to be: the
+        mod owns that formatting, and splitting it here would put this server
+        back in the business of parsing it badly.
+
+        A TIMEOUT RETURNS RATHER THAN RAISES, carrying the last reading it took.
+        The condition not coming true is an ANSWER - often the one being tested
+        for - and it is the caller's to interpret. A diag that fails inside the
+        budget still raises, because that is nobody having been asked.
+
+        ONE BUDGET ACROSS EVERY POLL, the same rule as `_left_of` one layer
+        down: `timeout` is what the whole call may take, not what each poll may.
+        """
+        _check_comparison(op, value)
+
+        began = time.monotonic()
+        deadline = began + timeout
+        polls = 0
+        last: Any = _UNREAD
+        baseline: Any = _UNREAD
+        note: str | None = None
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            polls += 1
+            try:
+                dump = self.diag(server=server, target=target, timeout=remaining)
+            except TriggerError as failed:
+                # A refusal or a silence INSIDE the budget is a real failure and
+                # is the caller's to see. At the very end of it, it is this
+                # call's own doing - the last poll is handed whatever is left,
+                # so a tight budget makes it time out on purpose - and raising
+                # there would report a game that is not responding, about a game
+                # that answered every earlier poll.
+                if time.monotonic() < deadline:
+                    raise
+                note = f"the last poll was cut short by the timeout: {failed}"
+                break
+
+            if field not in dump.fields:
+                raise TriggerError(_unknown_field_message(field, dump.fields))
+            last = dump.fields[field]
+
+            if op == "changed":
+                if baseline is _UNREAD:
+                    baseline = last
+                elif last != baseline:
+                    return Watch(True, time.monotonic() - began, polls, last)
+            # `value` is not None for any other operator - `_check_comparison`
+            # refused that before the first poll - and the empty string it
+            # falls back to would compare identically anyway.
+            elif _satisfied(field, last, op, value or ""):
+                return Watch(True, time.monotonic() - began, polls, last)
+
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            time.sleep(min(poll, left))
+
+        return Watch(
+            matched=False,
+            elapsed=time.monotonic() - began,
+            polls=polls,
+            last=None if last is _UNREAD else last,
+            note=note,
+        )
 
     # ---- waiting ---------------------------------------------------------
 
