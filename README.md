@@ -44,6 +44,8 @@ What earns the surface here is that a running game is not stateless:
 | `inventory`       | The worlds, characters and mods `launch` needs and cannot check  |
 | `prune_captures`  | Removing captures without a delete loose enough to reach a world |
 | `log_since`       | Only what a log gained, and whether it rotated under you         |
+| `log_watch`       | Blocking until a line appears, instead of a guessed sleep        |
+| `api_search`      | What the INSTALLED tModLoader actually exposes, with signatures  |
 | `restart`         | stop -> build -> launch in the one order that works              |
 
 Two **prompts** ship with it. `diagnose_silence` walks the four reasons the mod

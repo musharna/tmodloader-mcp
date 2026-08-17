@@ -29,6 +29,7 @@ from typing import Any, TypedDict
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.types import ToolAnnotations
 
+from . import api as api_mod
 from . import build as build_mod_impl
 from . import captures as captures_mod
 from . import commands as commands_mod
@@ -96,6 +97,30 @@ class LogSinceOut(TypedDict):
     lines: list[str]
     next_offset: int
     restarted: bool
+
+
+class ApiMemberOut(TypedDict):
+    path: str
+    kind: str
+    type: str
+
+
+class ApiSearchOut(TypedDict):
+    matches: list[ApiMemberOut]
+    #: How many members the index holds, so a thin index is visible rather than
+    #: reading as an API that does not have the thing you asked about.
+    indexed: int
+    truncated: bool
+
+
+class LogWatchOut(TypedDict):
+    matched: bool
+    #: The matching lines from the poll that matched, or empty on a timeout.
+    lines: list[str]
+    next_offset: int
+    restarted: bool
+    elapsed: float
+    polls: int
 
 
 class RestartOut(TypedDict):
@@ -1027,6 +1052,103 @@ def log_since(name: str, offset: int = 0, contains: str | None = None) -> LogSin
         lines=logs_mod.tail(since.text, contains=contains, lines=len(new_lines) or 1),
         next_offset=since.next_offset,
         restarted=since.restarted,
+    )
+
+
+@mcp.tool(
+    title="Search the tModLoader API surface",
+    annotations=_READ_ONLY,
+    structured_output=True,
+)
+def api_search(query: str, kind: str | None = None, limit: int = 40) -> ApiSearchOut:
+    """Find a type, field, property or method in the INSTALLED tModLoader.
+
+    Args:
+        query: Part of a name, or a type. `cloudAlpha`, `rain`, `QuickSpawnItem`,
+            `IEntitySource`. Case-insensitive.
+        kind: Narrow to one of type, field, property, method.
+        limit: How many matches to return, best first.
+
+    ANSWERS THE QUESTION YOU HAVE BEFORE YOU WRITE ANYTHING. A compile tells you
+    exactly whether the call you already wrote is right; it cannot tell you what
+    is there. `Main.maxRaining` is only findable if you already suspect the name.
+
+    READ FROM THE ASSEMBLY'S OWN METADATA, so it cannot drift from the version
+    installed — which is the failure mode of every wiki page and every model's
+    recollection of an API. It carries no prose, because it is not documentation:
+    it is the public surface, with signatures.
+
+    The index is built once per tModLoader version and cached against the DLL it
+    came from, so a game update invalidates it by construction rather than by
+    anybody remembering to. The first call after an update pays a few seconds.
+
+    Needs a .NET SDK, because the indexer is a small C# tool — it reads metadata
+    without loading or running the game assembly. Without one this refuses and
+    says so, rather than answering from a stale or absent index.
+    """
+    cfg = _cfg()
+    members = api_mod.parse(api_mod.ensure_index(cfg).read_text())
+    found = api_mod.search(members, query, kind=kind, limit=limit)
+
+    return ApiSearchOut(
+        matches=[ApiMemberOut(path=m.path, kind=m.kind, type=m.type) for m in found],
+        indexed=len(members),
+        truncated=len(found) == limit,
+    )
+
+
+@mcp.tool(
+    title="Wait for a line to appear in a log",
+    annotations=_READ_ONLY,
+    structured_output=True,
+)
+def log_watch(
+    name: str,
+    contains: str,
+    offset: int = 0,
+    timeout: float = 60.0,
+    poll: float = 1.0,
+) -> LogWatchOut:
+    """Block until a log line matches, instead of polling `log_since` by hand.
+
+    Args:
+        name: A log filename from `log_files`.
+        contains: Case-insensitive text to wait for. REQUIRED — without one
+            this matches the first line written and is `log_since` wearing a
+            longer name.
+        offset: Where to start reading. 0 includes the log's HISTORY, which is
+            usually what you want ("did the mod load" is a question about a
+            line that is already there). Pass a previous call's `next_offset`
+            to watch only what comes after it.
+        timeout: Seconds for the WHOLE call, spent across every poll.
+        poll: Seconds between reads.
+
+    THE OFFSET IS THE MECHANISM. Each poll resumes where the last stopped, so a
+    line is matched exactly once — never missed in the gap between two polls,
+    and never re-reported on the next. A watch that re-read the file from the
+    top would match a line written before the wait began and call it news,
+    which is how "wait for the crash" passes on the crash from the PREVIOUS run.
+
+    Not matching is an ANSWER, not an error: it returns `matched: false` with
+    the resume point, so "nothing was logged for 30s" is as expressible as
+    waiting for something. A MISSING log still raises, because that is nobody
+    having been asked rather than a line failing to arrive.
+
+    `restarted` means the log rotated during the wait — tModLoader zips the
+    previous run's logs and starts fresh, so your offset stopped meaning
+    anything and the lines you are holding came out of a different file.
+    """
+    cfg = _cfg()
+    got = logs_mod.watch_for(
+        cfg.tml_dir, name, contains=contains, offset=offset, timeout=timeout, poll=poll
+    )
+    return LogWatchOut(
+        matched=got.matched,
+        lines=got.lines,
+        next_offset=got.next_offset,
+        restarted=got.restarted,
+        elapsed=got.elapsed,
+        polls=got.polls,
     )
 
 

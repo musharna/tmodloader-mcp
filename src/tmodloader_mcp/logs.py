@@ -25,6 +25,7 @@ precisely the failure `logs` is reached for, and none of them were addressable.
 
 from __future__ import annotations
 
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -223,4 +224,109 @@ def read_since(tml_dir: Path, name: str, *, offset: int) -> Since:
         text=chunk.decode("utf-8", errors="replace"),
         next_offset=start + len(chunk),
         restarted=restarted,
+    )
+
+
+@dataclass(frozen=True)
+class Watched:
+    """What a `watch_for` saw, whether or not the line ever arrived.
+
+    `next_offset` is here for the same reason `Since` has one: a watch that
+    timed out without handing back a resume point forces the caller to start
+    again from zero, which is precisely where the lines they have already seen
+    are.
+    """
+
+    matched: bool
+    lines: list[str]
+    next_offset: int
+    #: True if the log rotated at ANY point during the wait, not only on the
+    #: last poll. The caller's original offset means nothing afterwards, and
+    #: lines read after it came out of a different file than the ones before.
+    restarted: bool
+    elapsed: float
+    polls: int
+
+
+def watch_for(
+    tml_dir: Path,
+    name: str,
+    *,
+    contains: str | None,
+    offset: int = 0,
+    timeout: float = 60.0,
+    poll: float = 1.0,
+) -> Watched:
+    """Block until a log line matches, or the budget runs out.
+
+    WHAT THIS REPLACES: `log_since` answers "what has this log gained", which
+    leaves a caller who is WAITING for something to write the loop themselves -
+    read, check, sleep a guessed number, read again, give up eventually. That
+    is the loop `Session.wait_until` removed for diag fields, wrong in the same
+    two directions, and the short one is the dangerous one: the check runs
+    before the line is written and reports that the thing never happened.
+
+    THE OFFSET IS THE MECHANISM. Each poll resumes where the last stopped, so a
+    line is matched exactly once - never missed in the gap between two polls,
+    and never re-reported on the next. A watch that re-read from the top would
+    match a line written before the wait began and call it news, which is how
+    "wait for the crash" passes on the crash from the PREVIOUS run.
+
+    `offset=0` therefore INCLUDES the log's history, deliberately: "did the mod
+    load" is a question about a line that is usually already there. Pass a
+    `next_offset` from an earlier call to watch only what comes after it.
+
+    A TIMEOUT RETURNS RATHER THAN RAISES, carrying the resume point. A missing
+    log still raises - that is not a line failing to arrive, it is nobody
+    having been asked, and waiting it out would report a timeout against a game
+    that is running perfectly.
+
+    ONE BUDGET ACROSS EVERY POLL, the rule `_left_of` and `wait_until` follow.
+    """
+    if not contains:
+        raise ValueError(
+            "watch_for needs `contains` to say what to wait for. Without one it "
+            "matches the first line written and is `read_since` wearing a "
+            "longer name"
+        )
+
+    began = time.monotonic()
+    deadline = began + timeout
+    polls = 0
+    restarted = False
+
+    while True:
+        polls += 1
+        # Read BEFORE checking the clock, so a zero budget still gets one look.
+        # A watch that never read at all would report "not found" about a file
+        # it had not opened.
+        since = read_since(tml_dir, name, offset=offset)
+        restarted = restarted or since.restarted
+        offset = since.next_offset
+
+        found = tail(
+            since.text, contains=contains, lines=len(since.text.splitlines()) or 1
+        )
+        if found:
+            return Watched(
+                matched=True,
+                lines=found,
+                next_offset=offset,
+                restarted=restarted,
+                elapsed=time.monotonic() - began,
+                polls=polls,
+            )
+
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        time.sleep(min(poll, left))
+
+    return Watched(
+        matched=False,
+        lines=[],
+        next_offset=offset,
+        restarted=restarted,
+        elapsed=time.monotonic() - began,
+        polls=polls,
     )
