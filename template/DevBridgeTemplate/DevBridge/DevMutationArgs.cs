@@ -278,6 +278,102 @@ namespace TModLoaderMcp.DevBridge
 			return true;
 		}
 
+		public const string SetTile = "settile";
+
+		public const string ClearTile = "cleartile";
+
+		public const string Despawn = "despawn";
+
+		/// <summary>Every active NPC rather than one type of them.</summary>
+		public const string Everything = "all";
+
+		/// <summary>
+		/// "x,y,w,h,type" in TILE coordinates: fill a rectangle with one tile.
+		///
+		/// CAPPED BY MaxArea, unlike the entity query and like `tiles`. This one
+		/// PAYS per tile - it places every one of them and then has to tell the
+		/// clients - so the cap is the same cap for the same reason.
+		///
+		/// ZERO IS A LEGAL TILE TYPE, which is the one place this differs from
+		/// TryResolveIdAndCount. In the NPC and item spaces 0 means "nothing", so
+		/// that method refuses it; in the TILE space 0 is Dirt, and refusing it
+		/// would refuse the commonest block in the game.
+		/// </summary>
+		public static bool TryResolveTileFill(string argument, out int x, out int y,
+				out int width, out int height, out int type, out string problem) {
+			x = 0;
+			y = 0;
+			width = 0;
+			height = 0;
+			type = 0;
+			problem = null;
+
+			string text = (argument ?? string.Empty).Trim();
+			string[] parts = text.Split(',');
+
+			if (parts.Length != 5) {
+				problem = "\"" + text + "\" is not a rectangle and a tile type " +
+					"written x,y,w,h,type in tile coordinates";
+				return false;
+			}
+
+			if (!TryRectangleFrom(parts, 0, text, out x, out y, out width,
+					out height, out problem)) {
+				return false;
+			}
+
+			if (width * height > MaxArea) {
+				problem = width + " by " + height + " is " + (width * height) +
+					" tiles, past the limit of " + MaxArea + " one request may place";
+				return false;
+			}
+
+			if (!TryWhole(parts[4], out type)) {
+				problem = "\"" + parts[4].Trim() + "\" is not a whole, non-negative " +
+					"tile type";
+				return false;
+			}
+
+			return true;
+		}
+
+		/// <summary>
+		/// "&lt;npcid&gt;" or "all": which NPCs to remove.
+		///
+		/// "all" spares TOWN NPCs, which the applier enforces and this cannot.
+		/// The distinction is worth the word: a town NPC that moved in is saved
+		/// with the world and does not come back on its own, so sweeping one away
+		/// while clearing a test's monsters is a change somebody notices days
+		/// later and cannot undo.
+		/// </summary>
+		public static bool TryResolveDespawn(string argument, out bool everything,
+				out int type, out string problem) {
+			everything = false;
+			type = 0;
+			problem = null;
+
+			string text = (argument ?? string.Empty).Trim();
+
+			if (Normalise(text) == Everything) {
+				everything = true;
+				return true;
+			}
+
+			if (!TryWhole(text, out type)) {
+				problem = "\"" + text + "\" is neither \"" + Everything +
+					"\" nor a whole, non-negative NPC id";
+				return false;
+			}
+
+			if (type == 0) {
+				problem = "0 is not an NPC id - it is how Terraria spells " +
+					"\"nothing\", so this would have succeeded and removed nothing";
+				return false;
+			}
+
+			return true;
+		}
+
 		public const string EntityNpc = "npc";
 
 		public const string EntityItem = "item";
@@ -317,14 +413,10 @@ namespace TModLoaderMcp.DevBridge
 
 			string text = (argument ?? string.Empty).Trim();
 			string[] parts = text.Split(',');
-			string named = Normalise(parts[0]);
 
-			if (named != EntityNpc && named != EntityItem && named != EntityProjectile) {
-				problem = Unknown(parts[0], EntityKindNames);
+			if (!TryResolveKind(parts[0], out kind, out problem)) {
 				return false;
 			}
-
-			kind = named;
 
 			if (parts.Length == 1) {
 				everywhere = true;
@@ -342,12 +434,86 @@ namespace TModLoaderMcp.DevBridge
 		}
 
 		/// <summary>
+		/// One of the three kinds, or why that word is not one of them.
+		///
+		/// Shared by the counting query and the detail query so the two cannot
+		/// come to disagree about what a kind is - a `find` that accepted a name
+		/// `entities` refused would be a difference nobody could explain.
+		/// </summary>
+		public static bool TryResolveKind(string written, out string kind,
+				out string problem) {
+			kind = null;
+			problem = null;
+
+			string named = Normalise(written);
+			if (named != EntityNpc && named != EntityItem && named != EntityProjectile) {
+				problem = Unknown(written, EntityKindNames);
+				return false;
+			}
+
+			kind = named;
+			return true;
+		}
+
+		/// <summary>
+		/// "&lt;kind&gt;", or "&lt;kind&gt;,&lt;id&gt;" for one type of it.
+		///
+		/// The detail query rather than the counting one. It takes an id where
+		/// `entities` takes a rectangle, because the question it answers is
+		/// "which ones, and what state are they in" - and the commonest way to
+		/// ask that is by the type you just spawned.
+		///
+		/// Zero is refused for the same reason TryResolveIdAndCount refuses it:
+		/// in both id spaces it means "nothing", so a query for it would run,
+		/// match nothing, and report an empty world rather than a mistake.
+		/// </summary>
+		public static bool TryResolveFind(string argument, out string kind,
+				out bool anyType, out int type, out string problem) {
+			kind = null;
+			anyType = false;
+			type = 0;
+			problem = null;
+
+			string text = (argument ?? string.Empty).Trim();
+			string[] parts = text.Split(',');
+
+			if (!TryResolveKind(parts[0], out kind, out problem)) {
+				return false;
+			}
+
+			if (parts.Length == 1) {
+				anyType = true;
+				return true;
+			}
+
+			if (parts.Length != 2) {
+				problem = "\"" + text + "\" is neither a kind on its own nor a kind " +
+					"and one id written <kind>,<id>";
+				return false;
+			}
+
+			if (!TryWhole(parts[1], out type)) {
+				problem = "\"" + parts[1].Trim() + "\" is not a whole, non-negative id";
+				return false;
+			}
+
+			if (type == 0) {
+				problem = "0 is not an id - it is how Terraria spells \"nothing\", " +
+					"so this would have matched nothing and reported an empty world";
+				return false;
+			}
+
+			return true;
+		}
+
+		/// <summary>
 		/// Verbs that change something the SERVER owns: the clock, the weather,
-		/// the NPC array.
+		/// the NPC array, the tiles.
 		/// </summary>
 		public static bool NeedsWorldAuthority(string verb) {
 			string v = Normalise(verb);
-			return v == Time || v == Weather || v == Spawn;
+			return v == Time || v == Weather || v == Spawn
+				|| v == SetTile || v == ClearTile || v == Despawn;
 		}
 
 		/// <summary>Verbs that need somebody standing in the world.</summary>

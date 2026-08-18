@@ -13,6 +13,59 @@ keeping, not because they broke a released API.
 
 ### Added
 
+- **`settile`, `cleartile` and `despawn` — the write half.** `tiles` could read
+  a world nothing could write, and `spawn` could create NPCs nothing could
+  remove. All three are `DevMutations` verbs, refused on a multiplayer client
+  like every other thing the server owns. The fills are capped by the same
+  `MaxArea` as the tile query, because placing pays per tile exactly as scanning
+  does — unlike the entity query, whose rectangle only filters.
+
+  Tile type **0 is accepted**, which is the one place the id rules diverge:
+  `spawn` and `give` refuse 0 because it means "nothing" in their id spaces, and
+  in the tile space it is Dirt. A test asserts both halves together so the
+  contrast cannot rot.
+
+  `despawn:all` **spares town NPCs.** They are saved with the world and do not
+  move back in on their own, so sweeping one away while clearing a test's
+  monsters is a change somebody notices days later and cannot undo. Naming a
+  town NPC's id explicitly still removes it — that is a request rather than
+  collateral.
+
+- **`find` and `players` — state a count cannot carry.** `entities` says the
+  boss is there; it cannot say the boss is at a third of its health. `find:npc`
+  or `find:npc,<id>` returns one line per entity with slot, position, name and
+  the state that kind actually has — health for an NPC, stack for a dropped
+  item, owner for a projectile — capped at 64 lines, with the number that
+  MATCHED reported alongside so the cap is visible rather than looking like the
+  whole answer.
+
+  `players` is a separate verb because players have no type. Counting them the
+  way `entities` counts would report "1 distinct type" for any number of
+  people, which is true and useless.
+
+- **`save_snapshot`, `save_restore`, `save_snapshots` — undoing a run.** Copies
+  the configured world and every character aside, and puts them back. Refuses
+  while tModLoader is running, naming the pids: a running game owns those files
+  and writes them on its own schedule, so a copy taken then is mid-write and a
+  restore is overwritten by the next save. `save_restore` saves what it is
+  about to overwrite under `auto-before-restore`, so a restore aimed at the
+  wrong label is recoverable rather than final.
+
+  **The premise this was built on turned out to be wrong, and measuring it is
+  the useful part.** It was justified by "runs quietly accumulate changes in the
+  save". Measured: a session launched, told to `settile` and `give`, then ended
+  with `stop()` wrote NEITHER the world file NOR the character file — both
+  byte-identical afterwards, the world's mtime six days old. `stop` force-kills
+  through taskkill and a killed Terraria saves nothing, so the ordinary short
+  run was already safe, by accident rather than design.
+
+  What is still unsafe, and what this is for: a run long enough for the server's
+  own autosave; a graceful exit, now or after any future change to how `stop`
+  works; and pointing `settile` at a world somebody cares about, where "probably
+  nothing was saved" is not the assurance you want. The live check reports
+  whether the game wrote anything rather than asserting it either way, and gets
+  its positive control by ruining the world file itself.
+
 - **`entities` — the other half of the world.** `tiles` was argued for on the
   grounds that a diag reports whatever a mod chose to count, so a mod that never
   thought to count something cannot be asked about it. That argument is about

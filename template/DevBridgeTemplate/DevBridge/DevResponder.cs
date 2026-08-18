@@ -171,7 +171,21 @@ namespace TModLoaderMcp.DevBridge
 					DevMutationArgs.EntityKindNames + ").",
 				req => CountEntities(req.Argument));
 
-			// The mod's own, AFTER the five above. Register throws on a duplicate, so
+			// WHICH ONES, rather than how many. A count says the boss is there and
+			// cannot say it is at a third of its health - and that second question
+			// is what a mod under test is usually about.
+			r.Register("find", true,
+				"List entities one line each, as <kind> or <kind>,<id> (" +
+					DevMutationArgs.EntityKindNames + ").",
+				req => FindEntities(req.Argument));
+
+			// SEPARATE FROM `entities` because players have no type. Counting them
+			// by one would report "1 distinct type" for any number of people.
+			r.Register("players", false,
+				"List the connected players, with position and health.",
+				_ => ListPlayers());
+
+			// The mod's own, AFTER the seven above. Register throws on a duplicate, so
 			// a mod that tries to take one of these names fails at load with a sentence
 			// naming the verb - rather than silently replacing a verb the harness needs.
 			RegisterCommands(r);
@@ -684,36 +698,8 @@ namespace TModLoaderMcp.DevBridge
 			float bottom = (y + height) * 16f;
 
 			var counts = new SortedDictionary<int, int>();
-			Entity[] slots;
-			int used;
-			Func<Entity, int> typeOf;
-			Func<int, string> nameOf;
-
-			switch (kind) {
-				case DevMutationArgs.EntityNpc:
-					slots = Main.npc;
-					used = Main.maxNPCs;
-					typeOf = e => ((NPC)e).type;
-					nameOf = Lang.GetNPCNameValue;
-					break;
-
-				case DevMutationArgs.EntityItem:
-					slots = Main.item;
-					used = Main.maxItems;
-					typeOf = e => ((Item)e).type;
-					nameOf = Lang.GetItemNameValue;
-					break;
-
-				default:
-					slots = Main.projectile;
-					used = Main.maxProjectiles;
-					typeOf = e => ((Projectile)e).type;
-
-					// The odd one out: this returns a LocalizedText where the
-					// other two return a string.
-					nameOf = type => Lang.GetProjectileName(type).Value;
-					break;
-			}
+			ArrayFor(kind, out Entity[] slots, out int used,
+				out Func<Entity, int> typeOf, out Func<int, string> nameOf);
 
 			if (slots == null) {
 				Report("REFUSED: this side has no " + kind + " array to look at");
@@ -758,6 +744,183 @@ namespace TModLoaderMcp.DevBridge
 				sb.Append("\n  id=").Append(pair.Key)
 					.Append(" count=").Append(pair.Value)
 					.Append(" name=").Append(Named(nameOf, pair.Key));
+			}
+
+			Report(sb.ToString());
+		}
+
+		/// <summary>
+		/// Which array a kind means, and how to read a type and a name out of it.
+		///
+		/// Shared by the counting query and the detail query so the two cannot
+		/// come to disagree about which array `item` refers to - a `find` reading
+		/// projectiles while `entities` counted items would be a discrepancy with
+		/// no visible cause.
+		/// </summary>
+		private static void ArrayFor(string kind, out Entity[] slots, out int used,
+				out Func<Entity, int> typeOf, out Func<int, string> nameOf) {
+			switch (kind) {
+				case DevMutationArgs.EntityNpc:
+					slots = Main.npc;
+					used = Main.maxNPCs;
+					typeOf = e => ((NPC)e).type;
+					nameOf = Lang.GetNPCNameValue;
+					return;
+
+				case DevMutationArgs.EntityItem:
+					slots = Main.item;
+					used = Main.maxItems;
+					typeOf = e => ((Item)e).type;
+					nameOf = Lang.GetItemNameValue;
+					return;
+
+				default:
+					slots = Main.projectile;
+					used = Main.maxProjectiles;
+					typeOf = e => ((Projectile)e).type;
+
+					// The odd one out: this returns a LocalizedText where the
+					// other two return a string.
+					nameOf = type => Lang.GetProjectileName(type).Value;
+					return;
+			}
+		}
+
+		/// <summary>The most entities one `find` reports one line each for.
+		///
+		/// A cap rather than everything: 1000 projectile slots during a boss
+		/// fight is a reply nobody reads and a file the harness then has to carry
+		/// through a trigger round trip. The reply says how many MATCHED as well
+		/// as how many are shown, so the cap is visible rather than looking like
+		/// the whole answer.</summary>
+		private const int MaxFound = 64;
+
+		/// <summary>
+		/// One line per entity, rather than a count of them.
+		///
+		/// WHAT `entities` CANNOT ANSWER. A count says a boss is there; it cannot
+		/// say the boss is at a third of its health and drifting off-screen, and
+		/// those are the questions a mod under test is actually about. The detail
+		/// differs by kind because the kinds differ: an NPC has health, a dropped
+		/// item has a stack size, a projectile belongs to somebody.
+		/// </summary>
+		private void FindEntities(string argument) {
+			if (!DevMutationArgs.TryResolveFind(argument, out string kind,
+					out bool anyType, out int type, out string problem)) {
+				Report("REFUSED: " + problem);
+				return;
+			}
+
+			if (Main.maxTilesX <= 0 || Main.maxTilesY <= 0) {
+				Report("REFUSED: this side has no world loaded to look at");
+				return;
+			}
+
+			ArrayFor(kind, out Entity[] slots, out int used,
+				out Func<Entity, int> typeOf, out Func<int, string> nameOf);
+
+			if (slots == null) {
+				Report("REFUSED: this side has no " + kind + " array to look at");
+				return;
+			}
+
+			int matched = 0;
+			int looked = Math.Min(used, slots.Length);
+			var lines = new List<string>();
+
+			for (int i = 0; i < looked; i++) {
+				Entity entity = slots[i];
+
+				if (entity == null || !entity.active) {
+					continue;
+				}
+
+				int found = typeOf(entity);
+				if (!anyType && found != type) {
+					continue;
+				}
+
+				matched++;
+				if (lines.Count >= MaxFound) {
+					continue;
+				}
+
+				var line = new System.Text.StringBuilder();
+				line.Append("  slot=").Append(i)
+					.Append(" id=").Append(found)
+					.Append(" name=").Append(Named(nameOf, found))
+					.Append(" tile=").Append((int)(entity.Center.X / 16f))
+					.Append(',').Append((int)(entity.Center.Y / 16f));
+
+				// Tile coordinates, not world units: every wiki coordinate and
+				// the game's own map are in tiles, and `teleport` already takes
+				// them - so a position read here can be handed straight back.
+				if (entity is NPC npc) {
+					line.Append(" life=").Append(npc.life).Append('/').Append(npc.lifeMax);
+				}
+				else if (entity is Item item) {
+					line.Append(" stack=").Append(item.stack);
+				}
+				else if (entity is Projectile shot) {
+					line.Append(" owner=").Append(shot.owner);
+				}
+
+				lines.Add(line.ToString());
+			}
+
+			var sb = new System.Text.StringBuilder();
+			sb.Append("OK: ").Append(matched).Append(' ').Append(kind)
+				.Append(anyType ? "" : " of type " + type)
+				.Append(" active, showing ").Append(lines.Count)
+				.Append(" of ").Append(looked).Append(" slot(s)");
+
+			foreach (string line in lines) {
+				sb.Append('\n').Append(line);
+			}
+
+			Report(sb.ToString());
+		}
+
+		/// <summary>
+		/// Who is connected, and where.
+		///
+		/// NOT part of `entities`, deliberately. That verb counts by TYPE, and
+		/// players have no type - they have names. Bending them into a count
+		/// would produce "1 distinct type" for any number of people, which is
+		/// true and useless.
+		///
+		/// Both sides answer. A server sees everyone; a client sees its own
+		/// synced view, and the two disagreeing is worth being able to see.
+		/// </summary>
+		private void ListPlayers() {
+			if (Main.player == null) {
+				Report("REFUSED: this side has no player array to look at");
+				return;
+			}
+
+			int looked = Math.Min(Main.maxPlayers, Main.player.Length);
+			var lines = new List<string>();
+
+			for (int i = 0; i < looked; i++) {
+				Player player = Main.player[i];
+
+				if (player == null || !player.active) {
+					continue;
+				}
+
+				lines.Add("  slot=" + i +
+					" name=" + (string.IsNullOrEmpty(player.name) ? "(unnamed)" : player.name) +
+					" tile=" + (int)(player.Center.X / 16f) + "," +
+						(int)(player.Bottom.Y / 16f) +
+					" life=" + player.statLife + "/" + player.statLifeMax);
+			}
+
+			var sb = new System.Text.StringBuilder();
+			sb.Append("OK: looked at ").Append(looked).Append(" player slot(s), ")
+				.Append(lines.Count).Append(" active");
+
+			foreach (string line in lines) {
+				sb.Append('\n').Append(line);
 			}
 
 			Report(sb.ToString());

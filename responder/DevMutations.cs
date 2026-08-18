@@ -71,6 +71,21 @@ namespace TModLoaderMcp.DevBridge
 			r.Register(DevMutationArgs.Teleport, true,
 				"Move the local player to \"spawn\" or to tile coordinates x,y.",
 				req => Teleport(req.Argument, report));
+
+			r.Register(DevMutationArgs.SetTile, true,
+				"Fill a rectangle with one tile type, as <x>,<y>,<w>,<h>,<type> in " +
+					"tiles (at most " + DevMutationArgs.MaxArea + "). Server side.",
+				req => SetTile(req.Argument, report));
+
+			r.Register(DevMutationArgs.ClearTile, true,
+				"Remove every tile in a rectangle, as <x>,<y>,<w>,<h> in tiles (at " +
+					"most " + DevMutationArgs.MaxArea + "). Server side.",
+				req => ClearTile(req.Argument, report));
+
+			r.Register(DevMutationArgs.Despawn, true,
+				"Remove active NPCs, as <npcid> or \"" + DevMutationArgs.Everything +
+					"\" (which spares town NPCs). Server side.",
+				req => Despawn(req.Argument, report));
 		}
 
 		/// <summary>
@@ -280,6 +295,154 @@ namespace TModLoaderMcp.DevBridge
 		}
 
 		/// <summary>
+		/// Fill a rectangle with one tile type.
+		///
+		/// CLAMPED TO THE WORLD RATHER THAN REFUSED AT THE EDGE, the same way the
+		/// tile query is, and the reply says how many were actually written so a
+		/// clamp is visible rather than silent.
+		///
+		/// `forced: true` because the alternative is a placement that quietly
+		/// does nothing: PlaceTile normally refuses where a tile already is, so
+		/// filling over existing ground would report success and change none of
+		/// it. `plr: -1` says no player did this, which keeps it out of anybody's
+		/// building history.
+		/// </summary>
+		private static void SetTile(string argument, Action<string> report) {
+			if (!Allowed(DevMutationArgs.SetTile, report)) {
+				return;
+			}
+
+			if (!DevMutationArgs.TryResolveTileFill(argument, out int x, out int y,
+					out int width, out int height, out int type, out string problem)) {
+				report("REFUSED: " + problem);
+				return;
+			}
+
+			int right = Math.Min(x + width, Main.maxTilesX);
+			int bottom = Math.Min(y + height, Main.maxTilesY);
+			int placed = 0;
+			int looked = 0;
+
+			for (int i = Math.Max(0, x); i < right; i++) {
+				for (int j = Math.Max(0, y); j < bottom; j++) {
+					looked++;
+					WorldGen.PlaceTile(i, j, type, mute: true, forced: true, plr: -1,
+						style: 0);
+
+					if (Main.tile[i, j].HasTile && Main.tile[i, j].TileType == type) {
+						placed++;
+					}
+				}
+			}
+
+			SyncTiles(x, y, width, height);
+
+			// PLACED IS COUNTED BACK OFF THE TILEMAP rather than from PlaceTile's
+			// return, because a tile type that cannot go where it was asked -
+			// anything needing a wall or a floor - fails per tile and would
+			// otherwise be reported as a fill that worked.
+			report("OK: placed " + placed + " tile(s) of type " + type + " over " +
+				looked + " looked at, of the " + (width * height) + " asked for");
+		}
+
+		/// <summary>
+		/// Remove every tile in a rectangle.
+		///
+		/// `noItem: true` so the ground does not turn into several hundred
+		/// dropped items - which would be a second change nobody asked for, and
+		/// one that then has to be cleaned up itself.
+		/// </summary>
+		private static void ClearTile(string argument, Action<string> report) {
+			if (!Allowed(DevMutationArgs.ClearTile, report)) {
+				return;
+			}
+
+			if (!DevMutationArgs.TryResolveArea(argument, out int x, out int y,
+					out int width, out int height, out string problem)) {
+				report("REFUSED: " + problem);
+				return;
+			}
+
+			int right = Math.Min(x + width, Main.maxTilesX);
+			int bottom = Math.Min(y + height, Main.maxTilesY);
+			int cleared = 0;
+			int looked = 0;
+
+			for (int i = Math.Max(0, x); i < right; i++) {
+				for (int j = Math.Max(0, y); j < bottom; j++) {
+					looked++;
+					if (!Main.tile[i, j].HasTile) {
+						continue;
+					}
+
+					WorldGen.KillTile(i, j, fail: false, effectOnly: false, noItem: true);
+					if (!Main.tile[i, j].HasTile) {
+						cleared++;
+					}
+				}
+			}
+
+			SyncTiles(x, y, width, height);
+
+			report("OK: cleared " + cleared + " tile(s) over " + looked +
+				" looked at, of the " + (width * height) + " asked for");
+		}
+
+		/// <summary>
+		/// Remove active NPCs, by type or all of them.
+		///
+		/// TOWN NPCs ARE SPARED by "all". They are saved with the world and do
+		/// not move back in on their own, so sweeping one away while clearing a
+		/// test's monsters is a change somebody notices days later and cannot
+		/// undo. Naming a town NPC's id explicitly still removes it - that is a
+		/// request rather than collateral.
+		/// </summary>
+		private static void Despawn(string argument, Action<string> report) {
+			if (!Allowed(DevMutationArgs.Despawn, report)) {
+				return;
+			}
+
+			if (!DevMutationArgs.TryResolveDespawn(argument, out bool everything,
+					out int type, out string problem)) {
+				report("REFUSED: " + problem);
+				return;
+			}
+
+			int removed = 0;
+			int spared = 0;
+
+			for (int i = 0; i < Main.maxNPCs; i++) {
+				NPC npc = Main.npc[i];
+				if (npc == null || !npc.active) {
+					continue;
+				}
+
+				if (everything) {
+					if (npc.townNPC) {
+						spared++;
+						continue;
+					}
+				}
+				else if (npc.type != type) {
+					continue;
+				}
+
+				npc.active = false;
+				removed++;
+
+				// The client's copy of a slot is not cleared by the server simply
+				// forgetting it; without this the NPC stays on screen, alive to
+				// everyone but the server, until something else touches the slot.
+				if (Main.netMode == NetmodeID.Server) {
+					NetMessage.SendData(MessageID.SyncNPC, number: i);
+				}
+			}
+
+			report("OK: removed " + removed + " NPC(s)" +
+				(everything ? ", spared " + spared + " town NPC(s)" : " of type " + type));
+		}
+
+		/// <summary>
 		/// Tell the clients what changed, on the side that is allowed to.
 		///
 		/// Only time and weather need this: NPC.NewNPC syncs itself, and the two
@@ -289,6 +452,21 @@ namespace TModLoaderMcp.DevBridge
 		private static void Sync() {
 			if (Main.netMode == NetmodeID.Server) {
 				NetMessage.SendData(MessageID.WorldData);
+			}
+		}
+
+		/// <summary>
+		/// Tell the clients which tiles changed.
+		///
+		/// A separate call from Sync because it carries a rectangle: WorldData
+		/// says nothing about tiles, and without this the clients keep drawing
+		/// and colliding with the ground that used to be there until something
+		/// else makes them re-read the section.
+		/// </summary>
+		private static void SyncTiles(int x, int y, int width, int height) {
+			if (Main.netMode == NetmodeID.Server) {
+				NetMessage.SendTileSquare(-1, x, y, width, height,
+					TileChangeType.None);
 			}
 		}
 	}
