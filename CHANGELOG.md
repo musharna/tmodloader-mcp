@@ -9,6 +9,35 @@ predates any tag, so the "breaking" notes below describe changes nobody could
 have been depending on — they are recorded because the reasoning is worth
 keeping, not because they broke a released API.
 
+## [Unreleased]
+
+### Fixed
+
+- **Three broken anchors in `docs/MOD_CONTRACT.md`**, all pointing at the same
+  heading and all missing one hyphen: `#modcapturetrigger--the-request` where
+  GitHub generates `#mod-capturetrigger--the-request`. A broken anchor does not
+  fail loudly — the link renders, the reader clicks, and the page does not
+  move — so these sat there for weeks and were found only by writing a checker.
+
+### Added
+
+- **`tests/test_doc_links.py`** — every relative link and anchor in the
+  published documentation, checked against the real files rather than a
+  fixture. Includes the checker shown failing on both a bad anchor and a
+  missing file, because a link checker that returns an empty list
+  unconditionally passes every document ever written.
+
+### Documentation
+
+- **The README's "Phase 2" section is gone** — 105 lines of struck-through
+  development diary, every item already recorded in this file. Replaced with
+  33 lines of **Known limits**, which is what a reader deciding whether to
+  adopt this actually needs: it has only run on one install, two dedicated
+  servers racing for one trigger is unobserved, there is no escape hatch by
+  design, and a stopped session saves nothing but must not be relied on to.
+- The status blockquote no longer recites release notes. It says what the
+  project is, and points at this file for what changed.
+
 ## [0.5.0] - 2026-08-17
 
 The release where the world stops being read-only. `tiles` could count a world

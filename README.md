@@ -7,28 +7,18 @@ Game engines have grown MCP servers — Unity, Unreal, Godot and Defold all have
 one, so an assistant can see a real scene instead of guessing from a prompt.
 tModLoader has not had one. This is that.
 
-> **Status: alpha.** No path defaults to anybody's install any more — the two
-> that named a person are required, the world is asked for rather than guessed,
-> and no command list is kept here to be wrong about. The mod-side half is now
-> yours too: [`responder/`](responder/) is a folder you copy into your mod and
-> subclass, and CI compiles it with nothing of any mod's on the compile line.
+> **Status: alpha** — see [Known limits](#known-limits) before adopting it.
+> Nothing defaults to anybody's install, the mod-side half is a folder you
+> vendor ([`responder/`](responder/)), and CI compiles it with nothing of any
+> mod's on the compile line.
 >
-> **Two sessions can share one save directory.** Two clients stopped
-> overwriting each other's answers in 0.3.0; 0.4.0 closed the three ways they
-> could still collide — captures landing in one wall-clock second, the lock
-> that serialises them being bounded by a guess, and a dedicated server having
-> no address to be told apart by. Every one of those was found by RUNNING it,
-> which is the thing about this project most worth knowing: the suite passes
-> against several of them. See [Phase 2](#phase-2--what-would-make-this-yours).
->
-> **0.5.0 makes the world writable and readable in detail** — `settile`,
-> `cleartile` and `despawn` beside the queries that could only look; `find` and
-> `players` for the state a count cannot carry; `api_search` over the installed
-> assembly's own metadata; `command` for running a mod's own debug commands
-> without an eval hatch; and `save_snapshot` / `save_restore` so a run that
-> changes a world can be undone. That last one is worth reading the CHANGELOG
-> for: the premise it was built on turned out to be false, and measuring it is
-> the part that mattered.
+> **The thing most worth knowing about this project is that its hardest bugs
+> were found by RUNNING it.** Two clients overwriting each other's answers, a
+> capture lock bounded by a guess, a dedicated server with no address to be
+> told apart by, and — most recently — a save-snapshot feature whose entire
+> premise turned out to be false when somebody finally measured it. The unit
+> suite passed against every one of those. [`CHANGELOG.md`](CHANGELOG.md) is
+> the record.
 
 ## Why an MCP server rather than a shell script
 
@@ -280,110 +270,38 @@ checkout:
 "args": ["run", "--directory", "/path/to/tmodloader-mcp", "tmodloader-mcp"]
 ```
 
-## Phase 2 — what would make this yours
+## Known limits
 
-1. ~~Artifact filenames are one mod's~~ — **done.** Every artifact name is
-   derived from the mod's internal name, which tModLoader takes from the source
-   folder. Nothing needs setting for the usual case; `TMODLOADER_MOD_NAME`
-   exists for a checkout whose folder is named something else.
-2. ~~Let the mod publish its own command list, and extract the responder~~ —
-   **done, both halves.** `compose` takes the list the running side published
-   and has no fallback, deliberately: a guess about which commands exist is
-   exactly what this replaces, and a fallback would be that guess wearing a
-   different name. And the responder itself now lives in
-   [`responder/`](responder/) — a folder you copy into your mod and subclass,
-   with its own test project compiling it against nothing of any mod's.
-3. ~~Make `TMODLOADER_MOD_SOURCE` required and drop the machine-specific
-   defaults~~ — **done.** The save directory and mod source are required, and
-   the world is asked for rather than defaulted to one developer's self-test
-   world. What keeps a default is what is not personal: Steam's install path
-   and the Windows binaries under System32.
-4. ~~A template mod~~ — **done, and built rather than described.**
-   [`template/DevBridgeTemplate/`](template/) is a whole tModLoader mod: build
-   files, an empty `Mod` class, a `DevResponder` subclass, and a byte-identical
-   copy of `responder/`. Copy the folder into `ModSources/`, rename it, build.
+Everything below is a fact about this repository rather than a plan. The
+history it replaced — seven rounds of "what would make this yours", every item
+struck through — now lives in [`CHANGELOG.md`](CHANGELOG.md), which is where a
+changelog belongs.
 
-   It exists because three claims here were argued rather than checked. The
-   vendor test project compiles eight of the eleven files with nothing of any
-   mod's on the line; the other three need Terraria, XNA and `ModSystem`, so
-   until now NOTHING compiled the folder a consumer actually copies. This does,
-   against the real tModLoader — 0 errors, 0 warnings, with a deliberate syntax
-   error injected first to prove the vendored files were genuinely on the
-   compile line and not quietly skipped. It is also the worked example of the
-   documented subclass, which nothing had ever compiled either.
+**It has only ever run on one install.** One machine, one tModLoader
+(1.4.4.9), one world, one character. Every live check in `tests/` drives a real
+game rather than a mock, which is the strongest evidence this project has — and
+it is still evidence from a single configuration. That is what the alpha
+classifier is for, and the first thing an outside user is likely to find is
+something install-specific.
 
-   The copy is checked in rather than synced at build time, because
-   tModLoader's `-build` compiles the mod DIRECTORY and a file outside it is
-   not on the compile line at all — a template saying "copy `responder/` in
-   here" would not build as checked in. A test asserts the two directories are
-   byte-identical, so drift is a red test on the commit that caused it.
+**Two dedicated servers racing for one trigger is unobserved.** A server is
+addressed by its port and answers under that name, and each half of that
+mechanism was checked with one server and a hand-written trigger. Running two
+at once needs a second world; [`template/`](template/) is the cheapest route to
+one.
 
-5. ~~Per-player artifact naming~~ — **done, and run against two real clients.**
-   A client's ANSWERS now carry a player token, so two developers sharing a
-   save directory stop overwriting each other's heartbeat, diag dump, capture
-   reply and shot drop box. Requests could already be addressed; answers could
-   not be told apart, which is the half this closed.
+**There is no escape hatch, deliberately.** Other harnesses ship
+`reflect_invoke` or `execute_code`. `command` is the answer here: it runs a
+mod's OWN registered `ModCommand`s, which the mod already decided existed,
+named, and gave a usage line. That keeps every reachable action published,
+typed and refusable. Arbitrary evaluation would buy unlimited reach and throw
+that away, so a question nobody wrote a verb for still costs an edit, a
+rebuild and a relaunch.
 
-   The two-client run is the part worth reading: it caught a regression the
-   change itself introduced, a lost-update race nobody had predicted, and —
-   once that race was fixed — a deeper limit it had been hiding. Both are
-   closed now: every request carries the session's own player by default, so
-   the **untargeted** coin flip is gone, and the trigger is **claimed rather
-   than overwritten** — a second request waits for the slot instead of
-   silently replacing what is in it. The trigger still holds **one request at
-   a time**, not a queue; that is the mechanism now, not a limitation to work
-   around. See
-   [`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#what-a-live-two-client-run-found).
-
-6. ~~Two sessions sharing one save directory still collide in three places~~ —
-   **done in 0.4.0, all three run rather than reasoned about.** Two `capture`
-   requests inside one wall-clock second used to produce ONE picture and two
-   callers each told it was theirs; they are serialised now, and the pre-fix
-   control is the number worth quoting — 0 of 6 rounds passed, with six PNGs
-   on disk for twelve requests, so half the pictures were not misattributed
-   but lost. The lock doing that serialising carries its holder's own deadline
-   instead of a 60-second guess that was wrong in both directions. And a
-   **dedicated server is addressed by its port** (`diag@port7810`), which is
-   also what names its answers — before that, two servers on one save
-   directory were indistinguishable on disk, so the request went to whichever
-   polled first and either session's cleanup could destroy the other's.
-
-   What is NOT covered: two dedicated servers genuinely racing for one
-   trigger. Each half of that mechanism was checked with one server and a
-   hand-written trigger; running two needs a second world — which the template
-   mod above is now the cheapest route to.
-
-7. ~~Everything the harness can ask for only READS~~ — **done, and off by
-   default.** `DevMutations` adds five verbs that change the world rather than
-   observe it: `time`, `weather`, `spawn`, `give` and `teleport`. They are
-   registered by nobody until a mod writes
-   `DevMutations.RegisterInto(r, Report)`, which is the whole of the opt-in —
-   so re-syncing the vendored folder can never hand a mod the power to spawn
-   enemies into somebody's save.
-
-   Each verb refuses the side that cannot do it and names the side that can.
-   `time`, `weather` and `spawn` are refused on a multiplayer client, because
-   the server owns the clock, the weather and the NPC array — a client that
-   changed them would be corrected by the next world packet, so the change
-   appears to work and then undoes itself, which is far worse to debug than a
-   refusal. `give` and `teleport` are refused on a dedicated server, which runs
-   the world without standing in it.
-
-   The rules and the refusals live in a Terraria-free file so they are tested
-   by running them; the Terraria half is a thin applier compiled by the
-   template mod and **driven against a real game, 16 of 16**
-   (`tests/live_mutations_check.py`). Every verb is verified by reading the
-   state back out afterwards rather than by its own success report, and the
-   multiplayer half is read from the side that did not make the change. The
-   first run found two defects — both in what the diag MEASURED rather than in
-   the verbs, and both invisible to any test that does not run a game.
-
-The last thing that made this a tool for one mod is gone. The filenames, the
-paths and the command list were already yours — this side holds no opinion about
-any of them — and now the responder that answers them is a folder in this
-repository rather than a class inside Biomancy. Biomancy runs on the vendored
-copy, which is what keeps the claim honest: the reference implementation is a
-consumer of this folder, not the owner of it.
+**A stopped session saves nothing.** `stop` force-kills, so a run that changes
+the world usually leaves no trace on disk — measured, not assumed. Do not rely
+on that: a run long enough to autosave, or a graceful exit, does write. Take a
+`save_snapshot` before anything that mutates a world you care about.
 
 ## Licence
 
