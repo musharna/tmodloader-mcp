@@ -163,6 +163,7 @@ def windows_tools(tmp_path) -> dict[str, str]:
         made[variable] = str(path)
     return made
 
+
 def test_a_usable_config_reports_nothing(tmp_path):
     """Positive control for `check` itself.
 
