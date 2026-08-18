@@ -112,7 +112,7 @@ punctuation the slug throws away is still what the digest sees.
 
 **CASE IS PART OF THAT, AND ADDRESSING IS NOT.** `n43n` and `N43N` slug the
 same and digest differently — `n43n-003f` against `n43n-b6ff` — while the
-addressing check in [the trigger](#modcapturetrigger--the-request) compares
+addressing check in [the trigger](#mod-capturetrigger--the-request) compares
 names case-insensitively. So a client answers a target it does not spell the
 same way, and then writes under the spelling it does. **Address a client by
 its character name exactly**; the harness can only resolve this for its own
@@ -635,7 +635,7 @@ The stamp is written on that path too, so the next claimant still misses the
 second the timeout happened in — it just cannot know about a write that had
 not happened yet. This case is reached whenever the reply wait runs out,
 whatever timeout the caller gave — see [the shared-budget
-rule](#modcapturetrigger--the-request): `capture` spends that ONE timeout
+rule](#mod-capturetrigger--the-request): `capture` spends that ONE timeout
 across the lock claim, the boundary wait, the trigger claim and the reply
 wait, so contention on the lock alone can consume most of even a generous
 timeout before the reply wait ever starts. Worked case: `ask("capture",
@@ -676,7 +676,7 @@ OTHER session rather than merely with a previous run of this one — the trigger
 `<mod>-capture.lock` and `<mod>-capture.stamp`, all three excluded from the
 clear for that reason and the other two covered below. Deleting the trigger on
 the way in or out is the same overwrite the
-[claim rule](#modcapturetrigger--the-request) exists to prevent, committed by
+[claim rule](#mod-capturetrigger--the-request) exists to prevent, committed by
 the housekeeping instead of by the write. `launch` and `stop` both used to do
 it unconditionally, which meant one developer starting a game destroyed the
 other's in-flight request while their game was still polling for it.
