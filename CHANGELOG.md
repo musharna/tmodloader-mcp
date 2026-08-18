@@ -9,7 +9,148 @@ predates any tag, so the "breaking" notes below describe changes nobody could
 have been depending on — they are recorded because the reasoning is worth
 keeping, not because they broke a released API.
 
-## [Unreleased]
+## [0.6.0] - 2026-08-17
+
+Everything in this release comes out of one full audit of the repository —
+four review passes (core concurrency, I/O, the C# responder, security), every
+finding either fixed here or documented as an accepted residual where the fix
+would cost more than the failure.
+
+### Fixed — the two critical findings
+
+- **The tool surface is now serialised by an explicit lock.** `server.py`'s
+  header claimed synchronous tools serialise on the event loop; under mcp 2.x
+  they run in worker threads beneath a concurrent dispatcher, so two calls
+  from one batching client ran in real parallel — consuming each other's
+  replies, double-launching into one save directory, clearing `_session`
+  under each other. Every tool and resource now runs under `_ONE_AT_A_TIME`
+  via `@_serialized`, and an ast-scan test refuses any future tool that
+  skips it.
+- **The mutation area cap survives 32-bit arithmetic.**
+  `settile:0,0,65536,65536,0` computed an area of 2^32 — exactly zero as an
+  int — sailed under `MaxArea`, and rewrote the entire world as dirt; every
+  product past 2^31 went negative and passed the same way. Both cap sites
+  now multiply in 64 bits, with the overflow boundary pinned in tests.
+
+### Fixed — the responder (C#)
+
+- **A throwing handler no longer crashes the game silently.** Dispatch wraps
+  `command.Handler` in a catch that Reports the exception; before, a
+  Terraria-level throw left the update hook with the trigger already
+  consumed and no reply written, so the harness timed out against a dead
+  game with nothing on disk saying why.
+- **`settile` checks `TileLoader.TileCount`** the way `spawn` and `give`
+  check their ceilings — load-bearing here because `PlaceTile` indexes
+  arrays sized to that count, so an oversized id was an
+  `IndexOutOfRangeException` rather than a refusal.
+- **The pre-arm trigger clear checks addressing before deleting.** A second
+  client's first settled poll used to destroy a request addressed to the
+  client already in-world serving it.
+- **Consumption is a `File.Move`, not a delete** — a delete succeeds silently
+  on a file somebody else just deleted, so two overlapping polls could both
+  consume one untargeted request and both dispatch.
+- **An unreadable trigger is retried, not served.** A transient read failure
+  used to fall through to `Parse(null)` — the legacy bare-trigger capture —
+  consuming a request nobody read and photographing nobody's question. Three
+  failed polls now clear it loudly instead.
+- **`SyncTiles` sends the clamped rectangle, chunked to 100-tile squares.**
+  Edge fills made the server serialise out-of-world tiles through 1.4's
+  unchecked Tilemap indexer, and a legal 16384x1 fill exceeded packet 20's
+  byte-sized dimensions.
+- **`DevChat`'s recorder is unwound on unload** (via a small `ModSystem`, so
+  `DevResponder` still never names an opt-in class). Left wrapped, it pinned
+  the old load's assembly across Build+Reload and re-wrapped per reload.
+- **`FrameShot` writes the PNG aside and moves it into place**, closing the
+  torn-drop-box case a mid-write crash left behind; **`Settle()` throttles
+  its recursive PNG listing** to every 30th tick; **`ListPlayers` reports
+  tile Y from `Center`**, agreeing with `find` about where a body stands;
+  **`settile` counts pre-existing tiles separately** from placed ones.
+
+### Fixed — the harness (Python)
+
+- **Replies are correlated to requests.** The reply file is per player, so a
+  late reply to a timed-out request was returned as the answer to the next
+  one — for `shot`, a wrong picture confidently labeled. Payloads now carry
+  `#r-<hex>` when the responder publishes `# replies: tagged`, replies echo
+  it as their first line, and a stable reply wearing another request's id is
+  waited past. Gated on the published capability, so older vendored
+  responders keep working untagged.
+- **`log_watch` can no longer permanently miss its line.** `read_since`
+  consumed unterminated fragments and advanced past them, splitting any line
+  that straddled two polls where nothing could match it whole. Only whole
+  lines are consumed now (with a stated exception for a single line longer
+  than the byte cap).
+- **Log rotation is detected by identity, not only by shrinkage.** A new run
+  that outgrew the old offset was read mid-stream as a quiet continuation,
+  silently skipping the head of the new run. `log_since`/`log_watch` carry a
+  `fingerprint` of the log's head for this.
+- **Re-taking a snapshot cannot destroy both copies.** `take` deleted the old
+  snapshot before the swap; a transient `/mnt/c` lock failing the swap then
+  took the staging copy down with it. The old copy is moved aside and
+  restored on failure.
+- **`restore`'s undo swallow is narrow.** It caught every `SaveError` — disk
+  full included — and proceeded to overwrite the live save with no backup
+  while `undo: null` claimed there was nothing to save. Only the new
+  `NothingToSnapshot` is waved through.
+- **`restore` removes files the snapshot does not hold** (within its scope),
+  so a world snapshotted before its `.twld` existed no longer restores into
+  a mismatched pair. Reported as `removed`, and covered by the undo.
+- **`stop` pins kills to process creation time.** Windows recycles pids, so
+  a session client that died on its own could hand its number to the
+  developer's own game — which `stop` then killed. The CIM query now returns
+  creation stamps, recorded at adoption and checked at teardown.
+- **A broken process query is no longer an empty one.** `_tml_pids` returned
+  `set()` when PowerShell failed, so `stop` aimed at nothing and reported
+  success, releasing a session that left a running game owned by nobody.
+  Every caller that acts on the answer now refuses instead; cleanup paths
+  that are already unwinding a worse failure stay tolerant.
+- **Breaking a stale capture lock takes the lock it judged.** Unlink-by-name
+  could remove the fresh lock another session claimed after breaking the
+  same stale one — the recovery path producing the very collision the lock
+  prevents. The break is a rename, verified against the judged mtime, with
+  a fresh lock put back via `os.link` (which refuses to clobber a newer
+  claim). The same rename-verify shape now guards `_release_trigger`.
+- **A capture claim that wins with no budget left withdraws its own
+  request** instead of leaving an unserialised capture behind the released
+  lock; `_break_stale_lock` also no longer crashes on its own documented
+  race (the second `stat` is gone).
+- **`_await_png` tolerates the writer's share lock** — DrvFs surfaces
+  `FileShare.None` as EACCES mid-write, which is "still being written"
+  wearing an exception, not a failure.
+- **`shot` slugs the region in the kept filename** (`top-left` → `topleft`),
+  so every capture it reports is one `captures`/`read_capture` can see.
+- **`log_since` is bounded** (512KB per call, cut at a line boundary, with
+  `truncated` and a resume point), the **API index cache is written via
+  staging-and-rename** so a killed indexer cannot install a truncated index
+  that passes the validity check forever, **`prune_captures` tolerates the
+  other session pruning concurrently**, heartbeat reads survive the
+  stat-then-read race, protocol files pin `encoding="utf-8"` on both ends,
+  and `${VAR}/suffix` placeholders are diagnosed as unsubstituted rather
+  than traveling as literal paths (`C:\Cash$Mod` stays a real path).
+
+### Security / packaging
+
+- **The sdist no longer ships `docs/superpowers/`** — internal planning
+  notes carrying real usernames and machine paths rode the wholesale `docs`
+  include into every built tarball. Never published (the package has not
+  been uploaded anywhere), so the leak was latent; the include now names
+  `docs/MOD_CONTRACT.md` alone. The `save_restore` manifest is also no
+  longer trusted with paths: a tampered `files` entry that escapes the save
+  directory reads as an untrustworthy snapshot, same as an unparseable one.
+
+### Documented residuals (deliberate)
+
+- The stamp-boundary wait assumes the WSL and Windows wall clocks share
+  fractional-second alignment; a miss costs one collision, the bounded
+  failure this mechanism already accepts.
+- The pid diff still adopts anything that starts tModLoader during the
+  launch window; the creation stamps pin `stop` to those processes but
+  cannot pin the diff to our spawns.
+- The rename-verify put-backs (lock break, trigger release, late-claim
+  withdrawal) each keep a microsecond-scale three-party window, priced in
+  their docstrings.
+
+Unreleased work folded into this release from between 0.5.0 and the audit:
 
 ### Fixed
 
