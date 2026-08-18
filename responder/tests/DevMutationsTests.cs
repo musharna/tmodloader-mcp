@@ -417,6 +417,26 @@ namespace TModLoaderMcp.DevBridge.Tests
                 out _));
         }
 
+        /// <summary>
+        /// The cap must survive 32-bit arithmetic, because a product that wraps
+        /// is precisely the request the cap exists to stop: 65536 x 65536 IS
+        /// zero as an int, and 46341 x 46341 is just past 2^31 and negative -
+        /// both sailed under the limit and asked the game to walk the whole
+        /// world.
+        /// </summary>
+        [Theory]
+        [InlineData("0,0,65536,65536")]
+        [InlineData("0,0,46341,46341")]
+        [InlineData("0,0,2000000000,2000000000")]
+        public void AnAreaWhoseProductOverflowsIsStillPastTheLimit(string written) {
+            Assert.False(DevMutationArgs.TryResolveArea(written, out _, out _,
+                out _, out _, out string problem),
+                "\"" + written + "\" was accepted - the cap computed its product " +
+                "in 32 bits");
+
+            Assert.Contains(DevMutationArgs.MaxArea.ToString(), problem);
+        }
+
         // ---- kinds and areas, for the entity query ---------------------------
 
         [Theory]
@@ -603,6 +623,23 @@ namespace TModLoaderMcp.DevBridge.Tests
                 out _, out _));
         }
 
+        /// <summary>
+        /// The fill's cap survives overflow for the scan's reason, and it is
+        /// the worse of the two to lose: `settile:0,0,65536,65536,0` wrapped to
+        /// an area of zero and rewrote the whole world as dirt.
+        /// </summary>
+        [Theory]
+        [InlineData("0,0,65536,65536,0")]
+        [InlineData("0,0,46341,46341,53")]
+        public void AFillWhoseProductOverflowsIsStillPastTheLimit(string written) {
+            Assert.False(DevMutationArgs.TryResolveTileFill(written, out _, out _,
+                out _, out _, out _, out string problem),
+                "\"" + written + "\" was accepted - the cap computed its product " +
+                "in 32 bits");
+
+            Assert.Contains(DevMutationArgs.MaxArea.ToString(), problem);
+        }
+
         // ---- despawning ------------------------------------------------------
 
         [Theory]
@@ -724,11 +761,39 @@ namespace TModLoaderMcp.DevBridge.Tests
             return File.ReadAllText(path);
         }
 
-        /// <summary>POSITIVE CONTROL for the two scans below.</summary>
+        /// <summary>POSITIVE CONTROL for the scans below.</summary>
         [Fact]
         public void TheSourcesAreActuallyRead() {
             Assert.Contains("namespace TModLoaderMcp.DevBridge", Source("DevMutations.cs"));
             Assert.Contains("namespace TModLoaderMcp.DevBridge", Source("DevResponder.cs"));
+        }
+
+        /// <summary>
+        /// SetTile checks the live tile ceiling the way spawn and give check
+        /// theirs - and this one is load-bearing rather than merely polite:
+        /// PlaceTile indexes arrays sized to TileLoader.TileCount, so an id
+        /// past the end is an IndexOutOfRangeException out of the dispatch,
+        /// not a refusal. A source scan because DevMutations imports Terraria
+        /// and cannot be on this compile line; the argument layer cannot know
+        /// the ceiling, so the check can only live in the applier.
+        /// </summary>
+        [Fact]
+        public void SetTileChecksTheLiveTileCeiling() {
+            Assert.Contains("TileLoader.TileCount", Source("DevMutations.cs"));
+        }
+
+        /// <summary>
+        /// The tile sync sends the CLAMPED rectangle, in chunks. Unclamped, an
+        /// edge fill made the server serialise out-of-world tiles through
+        /// 1.4's unchecked Tilemap indexer; unchunked, a legal 16384x1 fill
+        /// exceeded the byte-sized dimensions packet 20 carries.
+        /// </summary>
+        [Fact]
+        public void TheTileSyncClampsAndChunks() {
+            string src = Source("DevMutations.cs");
+
+            Assert.Contains("SyncSquare", src);
+            Assert.Contains("private const int SyncSquare", src);
         }
 
         /// <summary>

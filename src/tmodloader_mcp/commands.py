@@ -53,11 +53,24 @@ class Command:
     summary: str = ""
 
 
+#: The capability line a responder writes when its replies echo a request id.
+#: Spelled as a comment because a comment is the one line format every
+#: EXISTING parser of this file already skips - an older harness reading a
+#: newer responder sees nothing new at all. The exact string is a contract
+#: with `DevCommandRegistry.Publish`, pinned on both sides.
+TAGGED_REPLIES = "# replies: tagged"
+
+
 @dataclass(frozen=True)
 class CommandSet:
     """The verbs a running mod publishes, in the order it registered them."""
 
     commands: tuple[Command, ...]
+    #: Whether this responder echoes a request id as its reply's first line.
+    #: False for every list published before the capability existed, which is
+    #: what lets the harness drive an older vendored responder without sending
+    #: an id that copy would read as part of a target.
+    tagged_replies: bool = False
 
     def __contains__(self, name: object) -> bool:
         return isinstance(name, str) and name.lower() in self._by_name
@@ -95,10 +108,14 @@ def parse_published(text: str) -> CommandSet:
     """
     found: list[Command] = []
     seen: set[str] = set()
+    tagged = False
 
     for number, raw in enumerate(text.replace("\r\n", "\n").split("\n"), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
+            # One comment is a capability rather than prose - see
+            # TAGGED_REPLIES for why it wears this format anyway.
+            tagged = tagged or line == TAGGED_REPLIES
             continue
 
         parts = raw.split("\t")
@@ -133,7 +150,7 @@ def parse_published(text: str) -> CommandSet:
         seen.add(name)
         found.append(Command(name=name, takes_argument=flag == "arg", summary=summary))
 
-    return CommandSet(commands=tuple(found))
+    return CommandSet(commands=tuple(found), tagged_replies=tagged)
 
 
 def read(path: Path) -> CommandSet:

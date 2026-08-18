@@ -16,15 +16,15 @@ from tmodloader_mcp import config
 # Captured from real `wslpath -w` output on WSL2, because CI has no wslpath and
 # a translation this file invented for itself would be checked against nothing.
 #
-#   /mnt/c/Users/user/.../Biomancy  ->  C:\Users\a2b32\...\Biomancy
+#   /mnt/c/Users/someone/.../Biomancy  ->  C:\Users\someone\...\Biomancy
 #   /mnt/c/Program Files (x86)/Steam ->  C:\Program Files (x86)\Steam
-#   /home/user                   ->  \\wsl.localhost\Ubuntu\home\mjarnold
+#   /home/someone                   ->  \\wsl.localhost\Ubuntu\home\mjarnold
 REAL_TRANSLATIONS = [
     ("/mnt/c/Program Files (x86)/Steam", r"C:\Program Files (x86)\Steam"),
     (
-        "/mnt/c/Users/user/Documents/My Games/Terraria/tModLoader/ModSources/Biomancy",
+        "/mnt/c/Users/someone/Documents/My Games/Terraria/tModLoader/ModSources/Biomancy",
         (
-            r"C:\Users\a2b32\Documents\My Games\Terraria\tModLoader"
+            r"C:\Users\someone\Documents\My Games\Terraria\tModLoader"
             r"\ModSources\Biomancy"
         ),
     ),
@@ -37,7 +37,7 @@ def test_a_drive_path_translates_the_way_wslpath_does(wsl, win):
     assert config.windows_path_for(Path(wsl)) == win
 
 
-@pytest.mark.parametrize("wsl", ["/home/user", "/mnt/wsl", "/", "relative/path"])
+@pytest.mark.parametrize("wsl", ["/home/someone", "/mnt/wsl", "/", "relative/path"])
 def test_a_path_with_no_drive_letter_is_not_guessed_at(wsl):
     """`wslpath` answers these with a \\\\wsl.localhost\\ UNC, and whether
     tModLoader can build from one is not something this repo has established.

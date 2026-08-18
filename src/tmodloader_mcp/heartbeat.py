@@ -141,7 +141,17 @@ def read(
         # made-up 0.0 would read as the freshest possible heartbeat.
         return Heartbeat(side="unknown", present=True, live=False, age=None, fields={})
 
-    fields = diag.parse(path.read_text(errors="replace"))
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        # Deleted or locked between the stat above and this read - another
+        # launch's stale-artifact clear taking the unsuffixed slot, most
+        # likely. The stat's guard two branches up already names the right
+        # answer for a file that stops cooperating mid-read: present but
+        # unreadable, never an exception out of a diagnostic.
+        return Heartbeat(side="unknown", present=True, live=False, age=None, fields={})
+
+    fields = diag.parse(text)
     return Heartbeat(
         side=side_of(fields),
         present=True,

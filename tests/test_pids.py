@@ -60,3 +60,33 @@ def test_the_query_filters_on_the_command_line_not_the_process_name():
 def test_the_query_asks_cim_because_only_cim_exposes_the_command_line():
     """tasklist cannot report a command line, which is why this is not tasklist."""
     assert "Get-CimInstance" in session._PID_QUERY
+
+
+# ---- creation stamps -------------------------------------------------------
+
+
+def test_pid_and_stamp_pairs_are_parsed_and_the_pid_alone_still_works():
+    """The query emits "pid stamp" now; a line holding only a pid - the old
+    format, or a CreationDate the query could not read - carries an empty
+    stamp, which matches anything (see below) rather than blocking a kill."""
+    stamps = session.parse_pid_stamps("38552 133850000000000000\n43876\n")
+
+    assert stamps == {38552: "133850000000000000", 43876: ""}
+    assert session.parse_pids("38552 133850000000000000\n") == {38552}
+
+
+def test_a_recycled_pid_is_not_the_same_process():
+    """The pin that stops `stop` killing the developer's own game: Windows
+    recycles pids, so a matching NUMBER with a different creation time is a
+    different process. Unknown stamps on either side weaken back to the old
+    pid-only rule - the pin exists to stop a WRONG kill, not to refuse a
+    right one over missing metadata."""
+    assert not session._same_process("111", "222")
+    assert session._same_process("111", "111")
+    assert session._same_process("", "222")
+    assert session._same_process("111", "")
+    assert session._same_process(None, "222")
+
+
+def test_the_query_asks_for_the_creation_time():
+    assert "CreationDate" in session._PID_QUERY

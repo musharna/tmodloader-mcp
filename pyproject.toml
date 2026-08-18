@@ -52,7 +52,14 @@ include = [
     # either. `tests/` is excluded from the copy but shipped here, because it is
     # the proof that the folder carries no mod's code.
     "responder",
-    "docs",
+    # THE ONE FILE, not `docs` wholesale. The wholesale include shipped
+    # docs/superpowers/ - internal planning notes carrying real usernames and
+    # machine paths - in every built tarball, verified by listing the 0.4.0
+    # sdist. Nothing was ever uploaded, so the leak stayed latent; this line
+    # is what keeps it that way. Anything added under docs/ stays out of the
+    # sdist until it is named here, which is the right default for a
+    # directory that mixes contract with diary.
+    "docs/MOD_CONTRACT.md",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",

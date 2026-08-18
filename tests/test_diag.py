@@ -143,8 +143,8 @@ def test_zero_is_a_value_not_an_absence():
 
 def test_values_containing_colons_survive():
     """Paths have colons; splitting on every colon truncates them."""
-    got = diag.parse("shot-path: C:\\Users\\a2b32\\biomancy-shot.png\n")
-    assert got["shot-path"] == "C:\\Users\\a2b32\\biomancy-shot.png"
+    got = diag.parse("shot-path: C:\\Users\\someone\\biomancy-shot.png\n")
+    assert got["shot-path"] == "C:\\Users\\someone\\biomancy-shot.png"
 
 
 def test_unknown_keys_are_kept():
@@ -217,7 +217,7 @@ HEARTBEAT_SAMPLE = """\
 hooks-seen: PostUpdateEverything,PostUpdateInput,UpdateUI
 gameMenu: False
 dedServ: False
-savepath: C:\\Users\\a2b32\\Documents\\My Games\\Terraria\\tModLoader
+savepath: C:\\Users\\someone\\Documents\\My Games\\Terraria\\tModLoader
 trigger-exists: False
 world-ready: True
 capture-ready: True

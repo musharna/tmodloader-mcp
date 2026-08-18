@@ -41,6 +41,13 @@ MOD_NAME = re.compile(r"^[A-Za-z0-9]+$")
 #: hand-written copies of a regex are two regexes.
 PLAYER_TOKEN_GRAMMAR = r"[a-z0-9][a-z0-9-]*-[0-9a-f]{4}"
 
+#: A request id as it rides on a payload: `#r-` then 4-32 lowercase hex. The
+#: shape is deliberately unlikely as prose - a bare `#beef` inside a free-text
+#: argument is four hex characters somebody typed, and a marker loose enough
+#: to strip it would silently change what `say` says. Anchored to the END,
+#: because the id is appended last, after the target.
+_REQUEST_ID = re.compile(r"#(r-[0-9a-f]{4,32})$")
+
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
@@ -316,6 +323,12 @@ class Request:
     command: str
     target: str | None = None
     argument: str | None = None
+    #: The request id the payload carries, or None. Purely a correlator: the
+    #: mod echoes it as the reply's first line so a late reply to a timed-out
+    #: request cannot be read as the answer to the next one. It never
+    #: addresses and never argues - a payload without one is served exactly
+    #: as it always was.
+    request_id: str | None = None
 
 
 def parse(payload: str) -> Request | None:
@@ -345,8 +358,21 @@ def parse(payload: str) -> Request | None:
     catch the mod changing its GRAMMAR — only its vocabulary is published.
     """
     text = payload.strip()
+
+    # The id comes off FIRST, from the very end, because `compose` appends it
+    # last - after the target. A tail the grammar rejects is payload and stays
+    # exactly where it was written; see _REQUEST_ID for why the grammar is
+    # narrow. Mirrors DevCommands.Parse, as every rule here must.
+    request_id = None
+    tagged = _REQUEST_ID.search(text)
+    if tagged:
+        request_id = tagged.group(1)
+        text = text[: tagged.start()].rstrip()
+
     if not text:
-        return Request("capture")
+        # A bare tagged trigger is still the historical bare trigger - a
+        # capture - now with an id to answer under.
+        return Request("capture", request_id=request_id)
 
     target = None
     at = text.find("@")
@@ -364,7 +390,7 @@ def parse(payload: str) -> Request | None:
         if not argument or not text:
             return None
 
-    return Request(text.lower(), target, argument)
+    return Request(text.lower(), target, argument, request_id)
 
 
 def compose(
@@ -373,8 +399,16 @@ def compose(
     argument: str | None = None,
     *,
     commands: CommandSet,
+    request_id: str | None = None,
 ) -> str:
-    """Build a trigger payload: `cmd`, `cmd:arg`, `cmd@who`, `cmd:arg@who`.
+    """Build a trigger payload: `cmd`, `cmd:arg`, `cmd@who`, `cmd:arg@who` -
+    each optionally suffixed `#<request_id>`.
+
+    `request_id` is attached ONLY when the caller says so, and the caller says
+    so only when the published command list advertises `# replies: tagged` -
+    see `CommandSet.tagged_replies`. An old responder never sees an id it
+    would read as part of a target, and an old harness against a new responder
+    simply never sends one.
 
     Validated here so a typo is refused before it reaches a game that would
     simply not recognise it. The mod refuses an unserved verb rather than
@@ -442,6 +476,16 @@ def compose(
             + (f" - {known.summary}" if known.summary else "")
         )
 
+    if request_id is not None and not _REQUEST_ID.fullmatch(f"#{request_id}"):
+        # The harness generates these itself, so this is a guard against a
+        # future caller inventing a shape the mod would leave in the payload -
+        # which turns the correlator into a silent argument change.
+        raise TriggerError(
+            f"{request_id!r} is not a request id: the grammar is r- then 4-32 "
+            "lowercase hex characters, and anything else rides the payload as "
+            "text instead of being stripped as an id"
+        )
+
     # The mod's own spelling, not the caller's. Resolution is case-insensitive
     # on both sides, so `DIAG` names a real command — but the round trip below
     # compares against what the game HEARS, which is lowercased, and a caller's
@@ -451,8 +495,10 @@ def compose(
         payload = f"{payload}:{argument}"
     if target is not None:
         payload = f"{payload}@{target}"
+    if request_id is not None:
+        payload = f"{payload}#{request_id}"
 
-    meant = Request(known.name, target, argument)
+    meant = Request(known.name, target, argument, request_id)
     heard = parse(payload)
     if heard != meant:
         raise TriggerError(

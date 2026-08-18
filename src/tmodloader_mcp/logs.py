@@ -25,6 +25,8 @@ precisely the failure `logs` is reached for, and none of them were addressable.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import time
 import zipfile
 from dataclasses import dataclass
@@ -104,7 +106,10 @@ def read(tml_dir: Path, name: str, *, previous: bool = False) -> str:
             f"{available(tml_dir)}"
         )
 
-    return target.read_text(errors="replace")
+    # UTF-8 by name, matching `_from_archive`'s explicit decode: the default
+    # is the locale's, and a log read differently on two machines is a diff
+    # nobody can explain.
+    return target.read_text(encoding="utf-8", errors="replace")
 
 
 def _from_archive(tml_dir: Path, name: str) -> str:
@@ -158,6 +163,52 @@ def tail(text: str, *, contains: str | None = None, lines: int = 80) -> list[str
     return kept[-lines:] if lines else []
 
 
+#: How much of a log's head the identity fingerprint covers. Enough to span
+#: the run-specific opening lines (timestamps, versions) that make two runs'
+#: heads differ; small enough that computing it per call costs nothing.
+_FINGERPRINT_BYTES = 4096
+
+
+def _fingerprint(handle) -> str:
+    """This log's identity right now: `<bytes covered>:<hash>`.
+
+    The covered LENGTH rides along because the head of a young log is still
+    growing - hashing "the first 4KB" of a 100-byte file and comparing it
+    against the hash of the same file at 5KB would call ordinary growth a
+    rotation. Recording how many bytes the hash covers lets the comparison
+    re-hash exactly that many, which an append-only file can never change.
+    """
+    handle.seek(0)
+    head = handle.read(_FINGERPRINT_BYTES)
+    return f"{len(head)}:{hashlib.md5(head).hexdigest()[:12]}"
+
+
+def _same_log(handle, recorded: str) -> bool:
+    """Whether this file is the one `recorded` was taken from.
+
+    Anything unreadable about the recorded fingerprint - an old caller's
+    absent one, a hand-mangled value - is NO INFORMATION, and no information
+    must not invent a rotation: the offset-versus-size check still catches
+    the shrinking case exactly as it always did.
+    """
+    head_text, _, digest = recorded.partition(":")
+    try:
+        covered = int(head_text)
+    except ValueError:
+        return True
+
+    if covered <= 0 or not digest:
+        return True
+
+    handle.seek(0)
+    head = handle.read(covered)
+    if len(head) < covered:
+        # The file cannot even hold the head it used to have.
+        return False
+
+    return hashlib.md5(head).hexdigest()[:12] == digest
+
+
 @dataclass(frozen=True)
 class Since:
     """New log text, and where to resume.
@@ -170,9 +221,24 @@ class Since:
     text: str
     next_offset: int
     restarted: bool
+    #: This log's identity, to hand back on the next call. What catches the
+    #: rotation `offset > size` cannot: a new run that has already outgrown
+    #: the old offset, whose head this call would otherwise read mid-stream
+    #: as a quiet continuation - silently skipping the start of the new run.
+    fingerprint: str = ""
+    #: True when `limit` stopped the read short of the file's end. The caller
+    #: resumes from `next_offset`; nothing was dropped.
+    truncated: bool = False
 
 
-def read_since(tml_dir: Path, name: str, *, offset: int) -> Since:
+def read_since(
+    tml_dir: Path,
+    name: str,
+    *,
+    offset: int,
+    fingerprint: str | None = None,
+    limit: int | None = None,
+) -> Since:
     """Whatever was appended to a log after `offset` bytes, and the next offset.
 
     NOT A LIVE TAIL, and cannot be one. Tools here are synchronous and the game
@@ -192,9 +258,34 @@ def read_since(tml_dir: Path, name: str, *, offset: int) -> Since:
     empty log forever, which reads exactly like a quiet game. When the file is
     shorter than the offset the read starts from zero and says so, because "here
     is the whole thing again" is only correct if the caller is told why.
+
+    `fingerprint` closes the rotation the size check cannot see: a new run
+    that has already OUTGROWN the old offset. Without it the read starts at
+    byte `offset` of the new file - mid-stream, `restarted=False` - and the
+    head of the new run, which holds exactly the "did the mod load" lines a
+    watcher is usually for, is silently skipped. Pass the previous call's
+    back; None is the old contract and gets the old (size-only) check.
+
+    ONLY WHOLE LINES ARE CONSUMED. The file is read to its end mid-write, so
+    the final line is as likely as not a fragment - and returning it while
+    advancing `next_offset` past it split every line that straddled a poll
+    across two chunks, where nothing could ever match it whole: a `watch_for`
+    needle landing there timed out reporting that a line on disk never
+    happened. An unterminated tail is left for the next call, when its
+    newline has arrived. One deliberate exception: a single line longer than
+    `limit` passes through mid-line, because withholding it would make no
+    call ever progress past it.
+
+    `limit` bounds the BYTES one call returns - a resume point is what makes
+    a bound safe, since the remainder is not dropped but waiting. Without one
+    the whole remaining log comes back, which for `offset=0` on a long
+    session is tens of MB in one answer.
     """
     if offset < 0:
         raise ValueError(f"offset={offset} is not a position in a file")
+
+    if limit is not None and limit <= 0:
+        raise ValueError(f"limit={limit} reads nothing, which is not a read")
 
     if name != Path(name).name or not name.endswith(".log"):
         raise LogError(
@@ -209,13 +300,29 @@ def read_since(tml_dir: Path, name: str, *, offset: int) -> Since:
             f"{available(tml_dir)}"
         )
 
-    size = target.stat().st_size
-    restarted = offset > size
-    start = 0 if restarted else offset
-
     with target.open("rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        restarted = offset > size or (
+            fingerprint is not None and not _same_log(handle, fingerprint)
+        )
+        start = 0 if restarted else offset
+
+        remaining = max(0, size - start)
+        budget = remaining if limit is None else min(limit, remaining)
+        truncated = budget < remaining
+
         handle.seek(start)
-        chunk = handle.read()
+        chunk = handle.read(budget)
+        current = _fingerprint(handle)
+
+    cut = chunk.rfind(b"\n")
+    if cut >= 0:
+        chunk = chunk[: cut + 1]
+    elif not truncated:
+        # No newline and no cap in the way: the whole chunk is one
+        # unterminated fragment, still being written. Next call, whole line.
+        chunk = b""
+    # else: one line longer than the cap - the stated exception above.
 
     # Decoded with replacement rather than strictly: a byte offset can land in
     # the middle of a multi-byte character, and one mangled glyph at a chunk
@@ -224,6 +331,8 @@ def read_since(tml_dir: Path, name: str, *, offset: int) -> Since:
         text=chunk.decode("utf-8", errors="replace"),
         next_offset=start + len(chunk),
         restarted=restarted,
+        fingerprint=current,
+        truncated=truncated,
     )
 
 
@@ -246,6 +355,10 @@ class Watched:
     restarted: bool
     elapsed: float
     polls: int
+    #: The log's identity at the last poll, for resuming - `Since` has one for
+    #: the same reason, and a watch that timed out is resumed exactly like a
+    #: read that returned.
+    fingerprint: str = ""
 
 
 def watch_for(
@@ -254,6 +367,7 @@ def watch_for(
     *,
     contains: str | None,
     offset: int = 0,
+    fingerprint: str | None = None,
     timeout: float = 60.0,
     poll: float = 1.0,
 ) -> Watched:
@@ -300,9 +414,14 @@ def watch_for(
         # Read BEFORE checking the clock, so a zero budget still gets one look.
         # A watch that never read at all would report "not found" about a file
         # it had not opened.
-        since = read_since(tml_dir, name, offset=offset)
+        #
+        # The fingerprint rides from poll to poll, which is what lets a
+        # rotation DURING the wait be seen even when the new run outgrows the
+        # old offset between two polls - the case the size check alone misses.
+        since = read_since(tml_dir, name, offset=offset, fingerprint=fingerprint)
         restarted = restarted or since.restarted
         offset = since.next_offset
+        fingerprint = since.fingerprint
 
         found = tail(
             since.text, contains=contains, lines=len(since.text.splitlines()) or 1
@@ -315,6 +434,7 @@ def watch_for(
                 restarted=restarted,
                 elapsed=time.monotonic() - began,
                 polls=polls,
+                fingerprint=fingerprint,
             )
 
         left = deadline - time.monotonic()
@@ -329,4 +449,5 @@ def watch_for(
         restarted=restarted,
         elapsed=time.monotonic() - began,
         polls=polls,
+        fingerprint=fingerprint or "",
     )

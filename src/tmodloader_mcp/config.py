@@ -52,12 +52,20 @@ REQUIRED_TO_LAUNCH = (*REQUIRED, "TMODLOADER_WORLD_WIN")
 #: out, where `wsl` is a directory rather than a drive letter.
 _DRIVE_MOUNT = re.compile(r"^/mnt/(?P<drive>[A-Za-z])(?=/|$)")
 
-#: A variable reference that nothing ever substituted: `${FOO}` or `$FOO`, whole
-#: and alone. `.mcp.json` passes the two required paths through as `${NAME}` so
-#: that nobody's checkout carries anybody's disk, and the client expands them
+#: A variable reference that nothing ever substituted: `${FOO}` or `$FOO`.
+#: `.mcp.json` passes the two required paths through as `${NAME}` so that
+#: nobody's checkout carries anybody's disk, and the client expands them
 #: against ITS OWN environment — so a client launched without them exports the
 #: placeholder verbatim rather than failing.
-_UNEXPANDED = re.compile(r"^\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)$")
+#:
+#: The BRACED form is caught anywhere in the value, the bare form only when it
+#: is the whole of it. `${TMODLOADER_SAVE_DIR}/Worlds` is the placeholder
+#: failure with a suffix attached, and the fully-anchored rule let it travel
+#: as a literal path - diagnosed downstream as "no save directory", a true
+#: sentence about a directory nobody meant. The bare form stays anchored
+#: because `$` mid-path is a real Windows spelling - `C:\Cash$Mod` names a
+#: directory, not a variable - and the test that pins it says so.
+_UNEXPANDED = re.compile(r"^\$[A-Za-z_]\w*$|\$\{[A-Za-z_]\w*\}")
 
 
 def windows_path_for(path: Path) -> str | None:
@@ -170,8 +178,8 @@ class Config:
 
 
 def _is_unexpanded(value: str) -> bool:
-    """Whether a value is a variable reference nobody substituted."""
-    return _UNEXPANDED.match(value) is not None
+    """Whether a value holds a variable reference nobody substituted."""
+    return _UNEXPANDED.search(value) is not None
 
 
 def _setting(src, key: str, default: str) -> str:

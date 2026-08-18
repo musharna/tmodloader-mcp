@@ -336,7 +336,7 @@ def _reply_costing(monkeypatch, cfg: FakeCfg, spend: list[float], *, png: bool):
 def _records_the_budget(monkeypatch, method: str, given: list[float]):
     real = getattr(Session, method)
 
-    def watching(self, path, *, timeout, what):
+    def watching(self, path, *, timeout, what, tag=None):
         given.append(timeout)
         return real(self, path, timeout=timeout, what=what)
 
@@ -721,9 +721,9 @@ def test_the_claim_wait_spends_the_callers_timeout_not_a_second_budget(
     seen: list[float] = []
     real_await = Session._await_text
 
-    def spy(self, path, *, timeout, what):
+    def spy(self, path, *, timeout, what, tag=None):
         seen.append(timeout)
-        return real_await(self, path, timeout=timeout, what=what)
+        return real_await(self, path, timeout=timeout, what=what, tag=tag)
 
     monkeypatch.setattr(Session, "_await_text", spy)
     _replies_when_triggered(
@@ -1152,7 +1152,7 @@ def test_launch_refuses_a_character_name_padded_with_whitespace(monkeypatch):
     unusable for anybody.
     """
     cfg = FakeCfg(Path("/nonexistent"))
-    monkeypatch.setattr(session_mod, "_tml_pids", lambda c: set())
+    monkeypatch.setattr(session_mod, "_pid_table", lambda c: {})
 
     # An ordinary name has nothing for `parse` to trim, so the guard must let
     # it through - what stops `launch` here is `FakeCfg` lacking the rest of a
@@ -1508,7 +1508,7 @@ def test_a_caller_whose_capture_broke_a_stale_lock_is_told(sess, cfg, monkeypatc
     old = time.time() - (session_mod.CAPTURE_LOCK_STALE + 5)
     os.utime(lock, (old, old))
 
-    def answer(self, result, *, timeout, what):
+    def answer(self, result, *, timeout, what, tag=None):
         # Stands in for the game reading and discarding the trigger it just
         # answered - see `test_a_capture_holds_the_lock_and_a_diag_does_not`,
         # which names why: nothing else in this fake environment ever does,
@@ -1617,7 +1617,7 @@ def test_a_capture_holds_the_lock_and_a_diag_does_not(sess, cfg, monkeypatch):
     trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
     seen = []
 
-    def watch(self, result, *, timeout, what):
+    def watch(self, result, *, timeout, what, tag=None):
         # `self` here is bound to `sess`: this replaces a class attribute,
         # not an instance one, and Python's descriptor protocol hands the
         # instance to the first positional slot on every call through it.
@@ -1652,7 +1652,7 @@ def test_the_capture_lock_is_released_even_when_the_reply_never_comes(
     lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
     stamp = cfg.artifact(cfg.artifacts.capture_stamp, server=False)
 
-    def never(self, result, *, timeout, what):
+    def never(self, result, *, timeout, what, tag=None):
         raise session_mod.TriggerError("no reply")
 
     monkeypatch.setattr(session_mod.Session, "_await_text", never)
@@ -1679,7 +1679,7 @@ def _answers_a_capture(monkeypatch, cfg: FakeCfg, text: str = "PNG: C:\\x.png"):
     request rather than on whatever the test is about.
     """
 
-    def answer(self, result, *, timeout, what):
+    def answer(self, result, *, timeout, what, tag=None):
         cfg.artifact(cfg.artifacts.trigger, server=False).unlink(missing_ok=True)
         cfg.artifact(cfg.artifacts.trigger, server=True).unlink(missing_ok=True)
         return text
@@ -1788,7 +1788,7 @@ def test_a_lock_that_will_not_go_does_not_replace_the_error_in_flight(
     _publish(cfg)
     lock = cfg.artifact(cfg.artifacts.capture_lock, server=False)
 
-    def never(self, result, *, timeout, what):
+    def never(self, result, *, timeout, what, tag=None):
         # Consumed before the raise, standing in for the mod, which deletes a
         # trigger before dispatching it and so has taken this one whether or
         # not the answer ever comes back. Without it the SECOND call below
@@ -1946,7 +1946,7 @@ def test_a_budget_eaten_by_the_boundary_wait_leaves_no_request_behind(
     # having become an error.
     served = []
 
-    def answer(self, result, *, timeout, what):
+    def answer(self, result, *, timeout, what, tag=None):
         served.append(trigger.read_text())
         trigger.unlink(missing_ok=True)
         return "PNG: C:\\x.png"
@@ -2111,3 +2111,120 @@ def test_a_deadline_written_by_another_process_is_read_by_this_one(
         if holder.is_alive():
             holder.terminate()
             holder.join(timeout=5)
+
+
+# ---- breaking a lock takes the lock it judged, not whatever holds the name --
+
+
+def test_breaking_puts_back_a_fresh_lock_that_replaced_the_stale_one(
+    tmp_path, monkeypatch
+):
+    """THE RECOVERY PATH'S OWN RACE. Two waiters judge one stale lock
+    expired; A breaks it and immediately re-claims; B's removal then lands on
+    A's brand-new, valid lock - and both sessions capture at once, the very
+    same-second collision the lock exists to prevent, produced by its own
+    recovery. The break is a rename now, verified against the mtime the
+    judgement was made on, and a lock that turns out to be somebody else's
+    fresh claim goes back where its holder believes it is."""
+    lock = tmp_path / "biomancy-capture.lock"
+    lock.write_text("1234\nnot-a-deadline")
+    old = time.time() - 300
+    os.utime(lock, (old, old))
+
+    fresh_payload = session_mod._lock_payload(time.time() + 60.0)
+    real_deadline = session_mod._lock_deadline
+
+    def holder_swaps_between_stat_and_rename(path):
+        value = real_deadline(path)
+        # After this call's stat: the other waiter breaks the stale lock and
+        # re-claims - a new inode, mtime NOW, sitting at the same name.
+        path.unlink()
+        path.write_text(fresh_payload)
+        return value
+
+    monkeypatch.setattr(
+        session_mod, "_lock_deadline", holder_swaps_between_stat_and_rename
+    )
+
+    broke = session_mod._break_stale_lock(lock)
+
+    assert broke is None, "this call claimed a break it did not perform"
+    assert lock.is_file(), "the fresh lock was stolen out from under its holder"
+    assert lock.read_text() == fresh_payload
+    assert not list(tmp_path.glob("*.breaking")), "the rename-aside leaked"
+
+
+def test_a_genuinely_stale_lock_still_breaks(tmp_path):
+    """POSITIVE CONTROL for the verify: same age, nobody racing."""
+    lock = tmp_path / "biomancy-capture.lock"
+    lock.write_text("1234\nnot-a-deadline")
+    old = time.time() - 300
+    os.utime(lock, (old, old))
+
+    broke = session_mod._break_stale_lock(lock)
+
+    assert broke is not None and not broke.by_deadline
+    assert not lock.exists()
+    assert not list(tmp_path.glob("*.breaking"))
+
+
+# ---- a capture claim that wins too late withdraws itself --------------------
+
+
+def test_a_capture_claim_with_no_budget_left_takes_its_request_back(
+    sess, cfg, monkeypatch
+):
+    """The out-of-time residual: `_claim` wrote the request and raised, and
+    `ask`'s finally then released the lock and stamped NOW - so the game
+    served the request LATER, with no lock held, in a second past the stamp.
+    For a capture the claim withdraws its own request instead: nothing on
+    disk, nothing unserialised."""
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    with pytest.raises(TriggerError, match="withdrawn"):
+        sess._claim(trigger, "capture@n43n", timeout=0.05, withdraw_if_late=True)
+
+    assert not trigger.exists(), "the request stayed behind with the lock released"
+
+
+def test_an_ordinary_claim_with_no_budget_left_still_leaves_its_request(sess, cfg):
+    """POSITIVE CONTROL - the asymmetry is the design. A non-capture request
+    already on disk is one the game may still serve, and withdrawing it would
+    be the lost update; only a capture pays the unserialised-PNG cost."""
+    trigger = cfg.artifact(cfg.artifacts.trigger, server=False)
+
+    with pytest.raises(TriggerError, match="may still answer"):
+        sess._claim(trigger, "diag@n43n", timeout=0.05)
+
+    assert trigger.exists(), "a non-capture claim was withdrawn"
+    assert trigger.read_text() == "diag@n43n"
+
+
+# ---- the PNG wait tolerates the writer's share lock --------------------------
+
+
+def test_a_png_mid_write_under_a_share_lock_is_waited_out_not_crashed(
+    sess, cfg, monkeypatch
+):
+    """The responder writes the drop box with FileShare.None and DrvFs
+    enforces Windows share modes, so a read landing inside the write window
+    is EACCES - "still being written" wearing an exception. It used to escape
+    as a raw PermissionError, failing shots that completed milliseconds
+    later."""
+    drop = cfg.artifact(artifacts_for(cfg.mod_name, SELF).shot, server=False)
+    drop.write_bytes(_png())
+
+    denials = {"left": 2}
+    real_read = Path.read_bytes
+
+    def share_locked(self):
+        if self == drop and denials["left"] > 0:
+            denials["left"] -= 1
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", share_locked)
+
+    sess._await_png(drop, timeout=5.0, what="shot PNG")
+
+    assert denials["left"] == 0, "the reader never hit the share lock at all"

@@ -104,6 +104,7 @@ namespace TModLoaderMcp.DevBridge
 		public override void Unload() {
 			_names = null;
 			_commands = null;
+			_replyTag = null;
 		}
 
 		private DevCommandRegistry BuildCommands() {
@@ -276,7 +277,17 @@ namespace TModLoaderMcp.DevBridge
 
 		private readonly SortedSet<string> _hooksSeen = new SortedSet<string>(StringComparer.Ordinal);
 		private bool _menuState;
-		private bool _heartbeatStale = true;
+
+		// volatile because OnWorldLoad/OnWorldUnload are the one pair of hooks
+		// here that do NOT run on the main thread - singleplayer world load runs
+		// on a ThreadPool callback and a joining client's runs on the network
+		// thread (see _enteredWorld's docstring for the call sites, read out of
+		// the assembly) - while Tick reads these from the update hooks. The same
+		// applies to _armed below. _enteredWorld is a DateTime and cannot be
+		// volatile; a torn read needs a 32-bit runtime, which tModLoader has not
+		// shipped on since 1.4, and the 3-second WorldSettle dwarfs any
+		// visibility latency - so it is left as the comment it deserves.
+		private volatile bool _heartbeatStale = true;
 
 		/// <summary>
 		/// Last observed trigger presence. Tracked because the heartbeat REPORTS
@@ -336,8 +347,20 @@ namespace TModLoaderMcp.DevBridge
 		/// request into a landmine that detonated on world entry. Presence cannot
 		/// distinguish "the user just asked" from "this was lying here before we
 		/// were able to look".
+		///
+		/// volatile for _heartbeatStale's reason: OnWorldLoad/OnWorldUnload
+		/// write it off the main thread.
 		/// </summary>
-		private bool _armed;
+		private volatile bool _armed;
+
+		/// <summary>
+		/// Consecutive polls on which the trigger existed and could not be read.
+		/// A transient share violation retries; only a persistent one is acted
+		/// on - see the read in Tick for why acting on the first would be worse.
+		/// </summary>
+		private int _triggerReadFailures;
+
+		private const int TriggerReadRetries = 3;
 
 		// Four hooks, because which of them ticks depends on game state and that
 		// dependence is undocumented. All are Public+Virtual on ModSystem -
@@ -441,13 +464,66 @@ namespace TModLoaderMcp.DevBridge
 
 			if (!present) {
 				_armed = true;
+				_triggerReadFailures = 0;
 				return;
 			}
+
+			// Read BEFORE anything decides to delete - including the pre-arm
+			// clear below, which used to delete without looking and so destroyed
+			// requests addressed to a client that was already in-world serving
+			// them, whenever a second client's first settled poll landed in the
+			// window.
+			string raw;
+			try {
+				raw = File.ReadAllText(trigger);
+			}
+			catch (Exception e) {
+				// NOT Parse(null). A null used to fall through to the historical
+				// bare-trigger default, so a transient read failure - an
+				// antivirus lock, a share violation across the Windows/DrvFs
+				// boundary - consumed a request this side never read and
+				// answered it with a capture nobody asked for. A file that
+				// cannot be read right now is left for the next poll; one that
+				// cannot be read for several is cleared LOUDLY, because a slot
+				// that holds one request cannot hold an unreadable one forever.
+				if (++_triggerReadFailures < TriggerReadRetries) {
+					return;
+				}
+
+				_triggerReadFailures = 0;
+				try {
+					File.Delete(trigger);
+				}
+				catch {
+					// The report below says what happened either way.
+				}
+
+				Report("ERROR: the trigger existed but could not be read for " +
+					TriggerReadRetries + " polls running (" + e.Message + "), so " +
+					"it was cleared without being served");
+				return;
+			}
+
+			_triggerReadFailures = 0;
+			DevRequest request = DevCommands.Parse(raw);
 
 			if (!_armed) {
 				// Present on our very first settled look, so it predates us. Clear
 				// it rather than serve it - this is the landmine that crashed the
 				// engine - and say so, instead of failing silently.
+				//
+				// But WHOSE it is still matters here, exactly as it does below:
+				// two clients share this file, and the one that settles second
+				// must not destroy a live request the first is serving right now.
+				// The landmine is a request served to a world not yet drawable,
+				// which can only be one THIS side would serve - so only that kind
+				// is cleared: addressed to this side, unaddressed, or unreadable.
+				// One addressed to somebody else is left where its owner will
+				// find it, and this side simply does not arm on this poll.
+				if (!request.IsMalformed && !request.IsFor(LocalAddress)) {
+					return;
+				}
+
 				try {
 					File.Delete(trigger);
 				}
@@ -456,6 +532,7 @@ namespace TModLoaderMcp.DevBridge
 				}
 
 				_armed = true;
+				_replyTag = request.Id;
 				Report("IGNORED: a trigger was already on disk when this world " +
 					"became capturable, so it was armed before the game could poll. " +
 					"Serving one at that moment crashed the engine once. Re-run " +
@@ -463,43 +540,57 @@ namespace TModLoaderMcp.DevBridge
 				return;
 			}
 
-			// Read the command BEFORE deleting, obviously, but delete before acting
-			// on it: a trigger still present after a throw would re-fire on every
-			// poll forever.
-			string raw = null;
-			try {
-				raw = File.ReadAllText(trigger);
-			}
-			catch {
-				// Unreadable is not fatal - Parse(null) means the historical
-				// bare-trigger behaviour, a capture.
-			}
-
 			// ADDRESSED TO SOMEBODY ELSE? Leave it exactly where it is.
 			//
-			// This has to happen BEFORE the delete below, and that ordering is the
+			// This has to happen BEFORE the claim below, and that ordering is the
 			// whole mechanism: two clients share one Main.SavePath and therefore
 			// one trigger file, so a client that consumed a request meant for the
 			// other would both answer as the wrong player AND destroy the request
-			// before its recipient ever polled. Not deleting is what lets the
+			// before its recipient ever polled. Not consuming is what lets the
 			// intended client find it on its own next poll.
 			//
 			// Silent on purpose. The other client is going to see this trigger on
 			// every poll until its owner takes it, and reporting each time would
 			// bury the actual answer under its own noise.
-			DevRequest request = DevCommands.Parse(raw);
 			if (!request.IsFor(LocalAddress)) {
 				return;
 			}
 
+			// CONSUMED BY MOVE, NOT DELETE, because a delete is not a claim:
+			// File.Delete succeeds silently on a file somebody else just deleted,
+			// so two sides whose polls overlapped on an UNTARGETED request both
+			// "successfully" consumed it and both dispatched - two captures, or
+			// two spawns, for one ask. A move to a per-process name throws for
+			// the loser, which is what makes consumption exclusive. The moved
+			// file is deleted at once; nothing ever polls its name.
+			string claimed = trigger + "." + Environment.ProcessId + ".claimed";
 			try {
-				File.Delete(trigger);
+				// A leftover from an earlier claim whose delete failed would
+				// block the move forever; the name is this process's own, so
+				// clearing it takes nothing from anybody else.
+				File.Delete(claimed);
+				File.Move(trigger, claimed);
+			}
+			catch (FileNotFoundException) {
+				// The other consumer of an untargeted request won the move (or
+				// its delete, on a copy of this file predating the claim).
+				// Losing silently is correct: the request is being served.
+				return;
 			}
 			catch (Exception e) {
 				Report("ERROR: could not clear the trigger: " + e.Message);
 				return;
 			}
 
+			try {
+				File.Delete(claimed);
+			}
+			catch {
+				// Harmless: the name is never polled, and the next claim from
+				// this process clears it first.
+			}
+
+			_replyTag = request.Id;
 			Dispatch(request, raw);
 		}
 
@@ -551,7 +642,22 @@ namespace TModLoaderMcp.DevBridge
 				return;
 			}
 
-			command.Handler(request);
+			// GUARDED, because this is the one call here whose failures the
+			// pure-parse layer cannot see: a modded NPC whose spawn hook throws,
+			// a broken modded item under QuickSpawnItem, any verb a consumer mod
+			// registered. Unguarded, the exception left this update hook and hit
+			// tModLoader's crash handling - with the trigger already consumed
+			// and no reply written, so the harness timed out against a dead or
+			// error-screened game with nothing on disk saying why. FrameShot
+			// catches around its draw work for exactly this reason.
+			try {
+				command.Handler(request);
+			}
+			catch (Exception e) {
+				Report("ERROR: \"" + command.Name + "\" threw " +
+					e.GetType().Name + ": " + e.Message + " - the request was " +
+					"consumed and nothing further was done");
+			}
 		}
 
 		/// <summary>
@@ -908,10 +1014,14 @@ namespace TModLoaderMcp.DevBridge
 					continue;
 				}
 
+				// Center for BOTH halves of the coordinate. X was Center and Y
+				// was Bottom, so this readout and `find`'s disagreed by a tile
+				// about where the same body stood - two verbs, one position,
+				// two answers.
 				lines.Add("  slot=" + i +
 					" name=" + (string.IsNullOrEmpty(player.name) ? "(unnamed)" : player.name) +
 					" tile=" + (int)(player.Center.X / 16f) + "," +
-						(int)(player.Bottom.Y / 16f) +
+						(int)(player.Center.Y / 16f) +
 					" life=" + player.statLife + "/" + player.statLifeMax);
 			}
 
@@ -1129,8 +1239,22 @@ namespace TModLoaderMcp.DevBridge
 			}
 		}
 
+		/// <summary>
+		/// How many settle ticks pass between directory listings. List() walks
+		/// every PNG under Main.SavePath recursively, and up to four hooks
+		/// drive Settle per frame - unthrottled, an accumulated Captures/
+		/// directory turned every capture wait into a multi-second main-thread
+		/// stutter. Thirty decrements is at worst half a second of added
+		/// latency on a wait whose budget is fifteen.
+		/// </summary>
+		private const int SettleListEvery = 30;
+
 		private void Settle() {
 			_waiting--;
+
+			if (_waiting > 0 && _waiting % SettleListEvery != 0) {
+				return;
+			}
 
 			string found;
 			try {
@@ -1300,9 +1424,33 @@ namespace TModLoaderMcp.DevBridge
 			return DevArtifacts.ForSide(name, Main.dedServ, AnswerTokenOrNull);
 		}
 
+		/// <summary>
+		/// The id of the request currently being served, echoed as the reply's
+		/// first line, or null when the request carried none. Static because
+		/// Report is, and safe as one piece of state because one side serves one
+		/// request at a time: it is set when a trigger is consumed and cleared
+		/// by the Report that answers it - including the reports the settle
+		/// loops write ticks later, which is why it cannot be a parameter.
+		///
+		/// WHY AN ECHO EXISTS AT ALL: the reply file is named per PLAYER, not
+		/// per request. A request that timed out on the harness side after the
+		/// trigger was consumed leaves the game still working; the reply it
+		/// eventually writes lands on the very file the harness's NEXT request
+		/// is waiting on, and without a correlator that next caller reads the
+		/// previous answer as its own - a wrong answer with nothing visibly
+		/// wrong. The harness sends an id only when this responder published
+		/// that it tags replies (see DevCommandRegistry.Publish), so an old
+		/// harness against this build sees the unprefixed reply it always did.
+		/// </summary>
+		private static string _replyTag;
+
 		protected static void Report(string line) {
+			string tag = _replyTag;
+			_replyTag = null;
+
 			try {
-				File.WriteAllText(AnswerPathFor(ResultName), line + "\n");
+				File.WriteAllText(AnswerPathFor(ResultName),
+					(tag != null ? "#" + tag + "\n" : "") + line + "\n");
 			}
 			catch {
 				// Nothing useful left to do - the report channel itself is gone.

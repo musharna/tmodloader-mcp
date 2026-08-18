@@ -183,6 +183,15 @@ namespace TModLoaderMcp.DevBridge
 			var sb = new StringBuilder();
 
 			sb.Append("# commands served by this responder, written at load\n");
+			// A CAPABILITY, NOT A COMMENT, despite the '#'. The harness reads
+			// this exact line to learn that replies from this responder echo a
+			// request id (see DevResponder.Report) and only then attaches one -
+			// so a harness driving an older vendored copy never sends what that
+			// copy would mistake for part of a target. It is spelled as a
+			// comment because that is the one line format every EXISTING parser
+			// of this file already skips: an older harness reading a newer
+			// responder sees nothing new at all.
+			sb.Append("# replies: tagged\n");
 			sb.Append("# name\targ|noarg\tsummary\n");
 
 			foreach (DevCommandEntry e in _inOrder) {

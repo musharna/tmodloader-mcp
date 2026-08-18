@@ -185,5 +185,47 @@ namespace TModLoaderMcp.DevBridge.Tests
                 new Regex(@"AnswerTokenOrNull\s*=>\s*\r?\n?\s*Main\.dedServ\s*\?\s*ServerAddress\s*:"),
                 Source());
         }
+
+        /// <summary>
+        /// The handler call is guarded, because it is the one call in dispatch
+        /// whose failures the pure-parse layer cannot see - a modded NPC whose
+        /// spawn hook throws, any verb a consumer mod registered. Unguarded,
+        /// the exception left the update hook and crashed the game AFTER the
+        /// trigger was consumed, so the harness timed out with nothing on disk
+        /// saying why. The catch must Report, or the crash is traded for the
+        /// same silence.
+        /// </summary>
+        [Fact]
+        public void DispatchGuardsTheHandlerAndReportsAThrow() {
+            Assert.Matches(
+                new Regex(@"try\s*\{\s*command\.Handler\(request\);\s*\}\s*catch\s*\(Exception\s+\w+\)\s*\{\s*Report\("),
+                Source());
+        }
+
+        /// <summary>
+        /// Addressing is checked in BOTH places a trigger can be removed - the
+        /// armed path and the pre-arm clear. The pre-arm clear used to delete
+        /// without looking, so a second client's first settled poll destroyed a
+        /// request the first client was serving right now. Two occurrences,
+        /// because one is exactly what that regression looks like.
+        /// </summary>
+        [Fact]
+        public void BothTriggerRemovalsCheckAddressingFirst() {
+            Assert.True(
+                new Regex(@"request\.IsFor\(LocalAddress\)").Matches(Source()).Count >= 2,
+                "only one IsFor(LocalAddress) check - the pre-arm clear deletes " +
+                "other clients' requests without looking again");
+        }
+
+        /// <summary>
+        /// Consumption is a MOVE, not a delete. File.Delete succeeds silently
+        /// on a file somebody else just deleted, so two sides whose polls
+        /// overlapped on an untargeted request both "successfully" consumed it
+        /// and both dispatched. The move throws for the loser.
+        /// </summary>
+        [Fact]
+        public void TheArmedConsumptionIsAMoveSoItIsExclusive() {
+            Assert.Matches(new Regex(@"File\.Move\(trigger,\s*claimed\)"), Source());
+        }
     }
 }

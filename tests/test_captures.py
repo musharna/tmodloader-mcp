@@ -341,3 +341,42 @@ def test_an_unanchored_lookalike_is_still_refused():
 
 def test_another_mods_capture_is_not_ours():
     assert not capture_pattern("Biomancy").match("othermod-shot-n43n-003f-001-full.png")
+
+
+def test_pruning_tolerates_a_file_the_other_session_deleted_first(
+    tmp_path, monkeypatch
+):
+    """Two sessions share a save directory and prune without coordinating. A
+    file vanishing between the listing and the unlink used to fail the whole
+    prune three separate ways - the sort's stat, the pre-validation's
+    existence check, and the unlink itself - each turning finished work into
+    a spurious error."""
+    doomed = _shot(tmp_path, 1, age=500)
+    _shot(tmp_path, 2, age=400)
+    _shot(tmp_path, 3, age=100)
+
+    real_unlink = Path.unlink
+
+    def other_pruner_wins(self, missing_ok=False):
+        # The other session removes the oldest file just as this prune starts
+        # acting - after the listing, before this unlink.
+        if self == doomed and doomed.exists():
+            real_unlink(doomed)
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", other_pruner_wins)
+
+    removed = captures.prune(tmp_path, "Biomancy", keep=1)
+
+    assert "biomancy-shot-n43n-003f-001-full.png" in removed
+    assert captures.available(tmp_path, "Biomancy") == [
+        "biomancy-shot-n43n-003f-003-full.png"
+    ]
+
+
+def test_a_vanished_file_does_not_weaken_the_containment_check(tmp_path):
+    """`missing_ok` relaxes ONLY absence. A name that is not a capture, or
+    one that escapes, is refused exactly as the read refuses it - a prune
+    tolerant of races must not become tolerant of traversal."""
+    with pytest.raises(captures.CaptureError, match="not a capture name"):
+        captures.contained(tmp_path, "Biomancy", "../../escape.png", missing_ok=True)

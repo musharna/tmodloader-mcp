@@ -234,3 +234,123 @@ def test_read_since_on_a_missing_log_is_LogMissing_not_LogError(tmp_path):
 
     with pytest.raises(logs.LogMissing):
         logs.read_since(tmp_path, "client.log", offset=0)
+
+
+# ---- whole lines only ----------------------------------------------------
+
+
+def test_an_unterminated_tail_is_withheld_until_its_newline_arrives(tmp_path):
+    """THE SPLIT-LINE DEFECT. `read_since` read to EOF mid-write, returned the
+    fragment and advanced past it - so a line straddling two polls was split
+    across two chunks, where nothing could ever match it whole. A `log_watch`
+    for a crash that was ON DISK timed out saying it never happened."""
+    log = _logdir(tmp_path) / "client.log"
+    log.write_text("whole line\n[ERROR] System.NullRef")
+
+    first = logs.read_since(tmp_path, "client.log", offset=0)
+    assert first.text == "whole line\n", "a fragment mid-write was returned"
+
+    # The writer finishes the line; the next poll gets it WHOLE.
+    log.write_text("whole line\n[ERROR] System.NullReferenceException\n")
+    second = logs.read_since(
+        tmp_path, "client.log", offset=first.next_offset, fingerprint=first.fingerprint
+    )
+    assert second.text == "[ERROR] System.NullReferenceException\n"
+
+
+def test_the_watcher_finds_a_needle_that_straddles_two_polls(tmp_path):
+    """The same defect at the tool that made it dangerous, driven the way a
+    poll actually lands: mid-write, then complete."""
+    log = _logdir(tmp_path) / "client.log"
+    log.write_text("[ERROR] System.NullRef")
+
+    real_sleep = logs.time.sleep
+
+    def finish_the_line(seconds):
+        log.write_text("[ERROR] System.NullReferenceException\n")
+        real_sleep(0)
+
+    import pytest as _pytest
+
+    monkey = _pytest.MonkeyPatch()
+    monkey.setattr(logs.time, "sleep", finish_the_line)
+    try:
+        got = logs.watch_for(
+            tmp_path,
+            "client.log",
+            contains="NullReferenceException",
+            timeout=5.0,
+            poll=0.01,
+        )
+    finally:
+        monkey.undo()
+
+    assert got.matched, "a line on disk was reported as never having happened"
+
+
+# ---- the fingerprint -----------------------------------------------------
+
+
+def test_a_rotation_the_size_check_cannot_see_is_still_a_restart(tmp_path):
+    """A new run that OUTGROWS the old offset before the next poll. Size-only
+    detection read the new file mid-stream with `restarted=False`, silently
+    skipping the head of the new run - which holds exactly the "did the mod
+    load" lines a watcher usually wants."""
+    log = _logdir(tmp_path) / "client.log"
+    log.write_text("old run, line one\n")
+    first = logs.read_since(tmp_path, "client.log", offset=0)
+
+    log.write_text("NEW run header\n" + ("filler line\n" * 50))
+    second = logs.read_since(
+        tmp_path, "client.log", offset=first.next_offset, fingerprint=first.fingerprint
+    )
+
+    assert second.restarted, "a rotated-and-longer log read as a continuation"
+    assert second.text.startswith("NEW run header\n"), "the new run's head was skipped"
+
+
+def test_ordinary_growth_is_not_mistaken_for_a_rotation(tmp_path):
+    """POSITIVE CONTROL, and the reason the fingerprint records how many bytes
+    it covered: the head of a young log is still growing, and re-hashing a
+    LONGER head would call every early append a rotation."""
+    log = _logdir(tmp_path) / "client.log"
+    log.write_text("tiny\n")
+    first = logs.read_since(tmp_path, "client.log", offset=0)
+
+    with log.open("a") as handle:
+        handle.write("more\n" * 2000)
+
+    second = logs.read_since(
+        tmp_path, "client.log", offset=first.next_offset, fingerprint=first.fingerprint
+    )
+
+    assert not second.restarted
+    assert second.text.startswith("more\n")
+
+
+# ---- the byte cap ----------------------------------------------------------
+
+
+def test_the_limit_cuts_at_a_line_and_the_resume_point_drops_nothing(tmp_path):
+    log = _logdir(tmp_path) / "client.log"
+    log.write_text("".join(f"line {n:04d}\n" for n in range(200)))
+
+    first = logs.read_since(tmp_path, "client.log", offset=0, limit=100)
+    assert first.truncated
+    assert first.text.endswith("\n"), "the cap split a line"
+
+    rest = logs.read_since(tmp_path, "client.log", offset=first.next_offset, limit=None)
+    assert (first.text + rest.text) == log.read_text(), "the cap dropped bytes"
+    assert not rest.truncated
+
+
+def test_one_line_longer_than_the_limit_still_makes_progress(tmp_path):
+    """The stated exception: withholding an over-long line until its newline
+    fits would mean NO call ever passes it - a livelock over one line."""
+    log = _logdir(tmp_path) / "client.log"
+    log.write_text("x" * 500 + "\nafter\n")
+
+    first = logs.read_since(tmp_path, "client.log", offset=0, limit=100)
+
+    assert first.text == "x" * 100, "an uncappable line stalled the read"
+    assert first.next_offset == 100

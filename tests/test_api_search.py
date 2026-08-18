@@ -292,3 +292,74 @@ def test_the_index_built_from_the_real_assembly_answers_a_real_question():
     assert "IEntitySource" in spawn[0].path, (
         f"the signature carries no parameters: {spawn[0].path}"
     )
+
+
+# ---- the cache write is atomic ----------------------------------------------
+
+
+class _StagedCfg:
+    def __init__(self, root: Path):
+        self.tml_dll = root / "tModLoader.dll"
+
+
+def test_a_killed_indexer_cannot_install_a_truncated_cache(tmp_path, monkeypatch):
+    """The cache's validity check is `is_file and size > 0`, which a file
+    killed mid-write passes forever - and `parse` skips only the torn line,
+    so `api_search` answered "not found" about every member in the missing
+    tail: the misleading absence this module exists to prevent, installed
+    permanently. The index is therefore written to a staging name and
+    renamed; a build that dies leaves NOTHING at the cached path."""
+    root = tmp_path / "install"
+    root.mkdir()
+    (root / "tModLoader.dll").write_bytes(b"not really a dll")
+    cfg = _StagedCfg(root)
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(api, "_dotnet", lambda: "/fake/dotnet")
+
+    tool = Path(api.__file__).resolve().parent.parent.parent / "tools" / "ApiIndex"
+    built = tool / "bin" / "Debug" / "net8.0" / "ApiIndex.dll"
+
+    def dies_mid_write(command, *, timeout, what):
+        if what == "building the API indexer":
+            return
+        # The indexer writes half its output and is killed - `finally` does
+        # not run on SIGTERM, which is how the truncated file survives.
+        Path(command[-1]).write_text("Terraria.Main\ttype\tclass\n[torn")
+        raise api.ApiError(f"{what} was killed mid-write")
+
+    monkeypatch.setattr(api, "_run", dies_mid_write)
+    if built.is_file():
+        # Force the build step to be "already built" or not - either way the
+        # index step below is the one that dies.
+        pass
+
+    cached = api.index_path_for(cfg)
+    with pytest.raises(api.ApiError, match="killed mid-write"):
+        api.ensure_index(cfg)
+
+    assert not cached.exists(), "a torn index landed at the cached path"
+    assert not list(cached.parent.glob("*.partial")), "the staging file leaked"
+
+
+def test_a_successful_index_lands_whole_at_the_cached_path(tmp_path, monkeypatch):
+    """POSITIVE CONTROL: the staging dance is invisible when the indexer
+    finishes."""
+    root = tmp_path / "install"
+    root.mkdir()
+    (root / "tModLoader.dll").write_bytes(b"not really a dll")
+    cfg = _StagedCfg(root)
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(api, "_dotnet", lambda: "/fake/dotnet")
+
+    def writes_everything(command, *, timeout, what):
+        if what == "indexing the API":
+            Path(command[-1]).write_text("Terraria.Main\ttype\tclass\n")
+
+    monkeypatch.setattr(api, "_run", writes_everything)
+
+    cached = api.ensure_index(cfg)
+
+    assert cached.read_text() == "Terraria.Main\ttype\tclass\n"
+    assert not list(cached.parent.glob("*.partial"))

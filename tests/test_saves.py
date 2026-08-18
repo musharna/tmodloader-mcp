@@ -361,3 +361,156 @@ def test_forgetting_removes_it_and_says_what_went(tmp_path):
     assert gone is not None and gone.label == "first"
     assert saves.read(cfg, "first") is None
     assert saves.forget(cfg, "first") is None
+
+
+# ---- re-taking cannot destroy both copies ----------------------------------
+
+
+def test_a_failed_swap_keeps_the_old_snapshot(tmp_path, monkeypatch):
+    """rmtree-then-replace had a hole exactly where this directory lives: a
+    transient /mnt/c lock failing the replace AFTER the old copy was deleted,
+    with the error handler then removing the staging copy too. "Take
+    `pre-test` again" ended with no `pre-test` at all - old or new."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"old-state")
+    saves.take(cfg, "pre-test", pids=_no_pids)
+
+    _populate(cfg, world_body=b"new-state")
+
+    real_replace = Path.replace
+    failures = {"left": 1}
+
+    def failing_swap(self, target):
+        # The FIRST swap into the label's own directory fails and the lock
+        # then clears - a momentary /mnt/c lock's actual shape. The put-back
+        # of the aside copy is the beneficiary of the clearing, exactly as it
+        # would be live; a lock that never clears leaves the old snapshot in
+        # the aside directory, which is recoverable by hand and out of scope.
+        if Path(target).name == "pre-test" and failures["left"] > 0:
+            failures["left"] -= 1
+            raise OSError("resource busy")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", failing_swap)
+    with pytest.raises(saves.SaveError, match="pre-test"):
+        saves.take(cfg, "pre-test", pids=_no_pids)
+    monkeypatch.undo()
+
+    held = saves.read(cfg, "pre-test")
+    assert held is not None, "the failed re-take destroyed the old snapshot too"
+    snapshot_world = saves.snapshot_root(cfg) / "pre-test" / "Worlds" / f"{WORLD}.wld"
+    assert snapshot_world.read_bytes() == b"old-state", (
+        "the surviving snapshot is not the one that existed before the failure"
+    )
+
+
+def test_retaking_a_label_replaces_it_cleanly(tmp_path):
+    """POSITIVE CONTROL: the aside dance is invisible when nothing fails."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"first")
+    saves.take(cfg, "again", pids=_no_pids)
+
+    _populate(cfg, world_body=b"second")
+    saves.take(cfg, "again", pids=_no_pids)
+
+    snapshot_world = saves.snapshot_root(cfg) / "again" / "Worlds" / f"{WORLD}.wld"
+    assert snapshot_world.read_bytes() == b"second"
+    assert not (saves.snapshot_root(cfg) / ".again.replaced").exists()
+    assert not (saves.snapshot_root(cfg) / ".again.partial").exists()
+
+
+# ---- the undo swallow is narrow now -----------------------------------------
+
+
+def test_a_failed_undo_refuses_the_restore_instead_of_proceeding_without_one(
+    tmp_path, monkeypatch
+):
+    """The `except SaveError` around the automatic undo caught disk-full and
+    an unwritable snapshot root along with "nothing to snapshot" - so the one
+    situation where a caller most wants a refusal overwrote the live save
+    with no backup, while `undo: None` claimed there was nothing to back up."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg)
+    saves.take(cfg, "known-good", pids=_no_pids)
+
+    real_take = saves.take
+
+    def disk_full(cfg_, label, **kwargs):
+        if label == saves.BEFORE_RESTORE:
+            raise saves.SaveError("could not take the snapshot: disk full")
+        return real_take(cfg_, label, **kwargs)
+
+    monkeypatch.setattr(saves, "take", disk_full)
+
+    with pytest.raises(saves.SaveError, match="disk full"):
+        saves.restore(cfg, "known-good", pids=_no_pids)
+
+
+def test_an_empty_install_still_restores_with_undo_none(tmp_path):
+    """POSITIVE CONTROL: the case the swallow exists for still works - a
+    first restore against an empty save has nothing to undo TO, and that is
+    not a reason to refuse."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg)
+    saves.take(cfg, "seed", pids=_no_pids)
+
+    for path in (cfg.save_dir / "Worlds").iterdir():
+        path.unlink()
+    for path in (cfg.save_dir / "Players").iterdir():
+        path.unlink()
+
+    put = saves.restore(cfg, "seed", pids=_no_pids)
+
+    assert put.undo is None
+    assert (cfg.save_dir / "Worlds" / f"{WORLD}.wld").is_file()
+
+
+# ---- restore removes what the snapshot does not hold ------------------------
+
+
+def test_restore_removes_files_created_after_the_snapshot(tmp_path):
+    """Copy-only restore left a `.twld` written after the snapshot beside the
+    restored `.wld` - the mismatched-pair state this module's own staging
+    comment calls worse than no snapshot."""
+    cfg = _cfg(tmp_path)
+    (cfg.save_dir / "Worlds" / f"{WORLD}.wld").write_bytes(b"world-only")
+    saves.take(cfg, "before-twld", pids=_no_pids)
+
+    (cfg.save_dir / "Worlds" / f"{WORLD}.twld").write_bytes(b"newer-tmod-half")
+
+    put = saves.restore(cfg, "before-twld", pids=_no_pids)
+
+    assert f"Worlds/{WORLD}.twld" in put.removed
+    assert not (cfg.save_dir / "Worlds" / f"{WORLD}.twld").exists(), (
+        "the restored world kept a tModLoader half from a different state"
+    )
+    # And the removal is as reversible as the overwrite: the undo holds it.
+    undone = saves.restore(cfg, put.undo, pids=_no_pids)
+    assert (cfg.save_dir / "Worlds" / f"{WORLD}.twld").read_bytes() == (
+        b"newer-tmod-half"
+    ), f"the undo {undone.label!r} did not bring the removed file back"
+
+
+# ---- the manifest is not trusted with paths ---------------------------------
+
+
+def test_a_manifest_naming_a_path_outside_the_save_is_not_a_snapshot(tmp_path):
+    """`restore` joins manifest names to save_dir and COPIES there, so a
+    tampered `../../x` would write outside the save directory. The same
+    policy as an unreadable manifest: reported as absent, so a restore
+    refuses rather than acting on it."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg)
+    saves.take(cfg, "tampered", pids=_no_pids)
+
+    manifest = saves.snapshot_root(cfg) / "tampered" / saves.MANIFEST
+    held = json.loads(manifest.read_text())
+    for bad in ("../../escape.wld", "/etc/escape", "C:\\escape", "Worlds\\..\\..\\x"):
+        held["files"] = [bad]
+        manifest.write_text(json.dumps(held))
+        assert saves.read(cfg, "tampered") is None, f"{bad!r} was trusted"
+
+    # POSITIVE CONTROL: the untampered shape still reads.
+    held["files"] = [f"Worlds/{WORLD}.wld"]
+    manifest.write_text(json.dumps(held))
+    assert saves.read(cfg, "tampered") is not None

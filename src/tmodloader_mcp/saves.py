@@ -32,12 +32,6 @@ the process is a copy of something mid-flight. Copying files while nothing has
 them open is the only version of this that is honest, which is why every entry
 point here refuses while a tModLoader process exists.
 
-HARNESS-SIDE ON PURPOSE. The mod cannot do this. A running game holds the world
-in memory and writes it out on its own schedule, so a save copied from inside
-the process is a copy of something mid-flight. Copying files while nothing has
-them open is the only version of this that is honest, which is why every entry
-point here refuses while a tModLoader process exists.
-
 WHAT IS COPIED: the configured world's `.wld` and `.twld`, and every `.plr` and
 `.tplr`. Not `.bak` files - those are the game's own safety net and restoring a
 stale one alongside a fresh save is worse than leaving it. Not the whole Worlds
@@ -47,6 +41,7 @@ snapshot nobody can afford to take is a snapshot nobody takes.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
@@ -77,6 +72,20 @@ class SaveError(RuntimeError):
     """A snapshot could not be taken or put back, and why."""
 
 
+class NothingToSnapshot(SaveError):
+    """The save directory holds no world or player files to copy.
+
+    A SUBCLASS because one caller must tell it apart: `restore` swallows this
+    when taking its automatic undo - an empty install has nothing to undo TO,
+    and refusing the restore over that would be wrong - and used to swallow
+    its parent instead, which also covered disk-full and an unwritable
+    snapshot root. The restore then overwrote the live save with no backup
+    while `undo: None` claimed there had been nothing to back up: the one
+    situation where a caller most wants a refusal, answered with a silent
+    loss of the safety copy.
+    """
+
+
 @dataclass(frozen=True)
 class Snapshot:
     """One saved copy, and what is in it."""
@@ -103,6 +112,11 @@ class Restored:
     #: The label of the automatic snapshot taken before overwriting, so the
     #: restore can itself be undone. None only when there was nothing to save.
     undo: str | None
+    #: Files in the snapshot's SCOPE that existed on disk and not in the
+    #: snapshot, deleted so the restored state is the recorded state - see
+    #: `restore` for the mismatched-pair failure this closes. They are in the
+    #: undo snapshot, so removal is as reversible as the overwrite beside it.
+    removed: tuple[str, ...] = ()
 
 
 def snapshot_root(cfg: Config) -> Path:
@@ -239,7 +253,7 @@ def take(
             size += target.stat().st_size
 
         if not copied:
-            raise SaveError(
+            raise NothingToSnapshot(
                 f"nothing to snapshot: no world or player files were found "
                 f"under {cfg.save_dir}. Expected "
                 f"Worlds/{_world_stem(cfg)}.wld."
@@ -254,8 +268,30 @@ def take(
             + "\n"
         )
 
-        shutil.rmtree(into, ignore_errors=True)
-        staging.replace(into)
+        # THE OLD SNAPSHOT IS MOVED ASIDE, NOT DELETED, until the new one is
+        # in place. rmtree-then-replace had a hole exactly where this
+        # directory lives: `replace` can fail on a transient /mnt/c lock (the
+        # failure mode config.py documents as real here), and the error
+        # handler below then also removed the staging copy - so re-taking a
+        # snapshot destroyed BOTH the old one and the new one, and "take
+        # `pre-test` again" ended with no `pre-test` at all. A rename is one
+        # directory entry either way; the aside copy is restored on failure
+        # and only deleted once the swap has actually happened.
+        aside = snapshot_root(cfg) / f".{label}.replaced"
+        shutil.rmtree(aside, ignore_errors=True)
+        had_previous = into.is_dir()
+        if had_previous:
+            into.replace(aside)
+
+        try:
+            staging.replace(into)
+        except OSError:
+            if had_previous:
+                with contextlib.suppress(OSError):
+                    aside.replace(into)
+            raise
+
+        shutil.rmtree(aside, ignore_errors=True)
     except SaveError:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -266,6 +302,19 @@ def take(
     return Snapshot(label=label, taken=taken, files=tuple(copied), size=size)
 
 
+def _name_is_contained(name: str) -> bool:
+    """Whether a manifest file name stays inside the directories it is joined
+    to. `take` only ever writes `Worlds/x` and `Players/x`, so anything that
+    could climb - a leading separator, a drive letter, a `..` segment, a
+    backslash that Windows would read as one - is a manifest somebody edited,
+    not one this module wrote."""
+    if not name or name.startswith(("/", "\\")) or "\\" in name:
+        return False
+    if re.match(r"^[A-Za-z]:", name):
+        return False
+    return ".." not in name.split("/")
+
+
 def read(cfg: Config, label: str) -> Snapshot | None:
     """One snapshot as recorded, or None if there is no such label."""
     manifest = snapshot_root(cfg) / label / MANIFEST
@@ -273,11 +322,11 @@ def read(cfg: Config, label: str) -> Snapshot | None:
         return None
 
     try:
-        held = json.loads(manifest.read_text())
-        return Snapshot(
+        held = json.loads(manifest.read_text(encoding="utf-8"))
+        found = Snapshot(
             label=held["label"],
             taken=float(held["taken"]),
-            files=tuple(held["files"]),
+            files=tuple(str(name) for name in held["files"]),
             size=int(held["size"]),
         )
     except (OSError, ValueError, KeyError, TypeError):
@@ -285,6 +334,16 @@ def read(cfg: Config, label: str) -> Snapshot | None:
         # trusted. Reported as absent rather than as an empty one, so a
         # restore refuses instead of putting back nothing.
         return None
+
+    # A name that escapes its directory is the same untrustworthiness in a
+    # sharper shape: `restore` joins these to save_dir and COPIES there, so a
+    # tampered `../../x` would write outside the save. `captures` refuses this
+    # class structurally, and a reader with a weaker rule than the writer
+    # beside it is how that guarantee erodes.
+    if not all(_name_is_contained(name) for name in found.files):
+        return None
+
+    return found
 
 
 def listing(cfg: Config) -> tuple[Snapshot, ...]:
@@ -328,10 +387,16 @@ def restore(
     if label != BEFORE_RESTORE:
         try:
             undo = take(cfg, BEFORE_RESTORE, pids=pids, reserved_ok=True).label
-        except SaveError:
+        except NothingToSnapshot:
             # Nothing on disk to save (a first run against an empty install) is
             # not a reason to refuse the restore - there is simply nothing to
             # undo to, and the caller is told so by `undo` staying None.
+            #
+            # ONLY that case. This caught every SaveError, which also covers
+            # disk-full and an unwritable snapshot root - and swallowing those
+            # overwrote the live save with no backup while `undo: None`
+            # claimed there had been nothing to back up. A failed safety copy
+            # refuses the restore; a genuinely absent one waves it through.
             undo = None
 
     from_dir = snapshot_root(cfg) / label
@@ -363,7 +428,34 @@ def restore(
             "of them are on disk. The snapshot directory has been emptied."
         )
 
-    return Restored(label=label, files=tuple(put), size=size, undo=undo)
+    # FILES THE SNAPSHOT DOES NOT HOLD ARE REMOVED - within its scope, which
+    # is exactly the set `take` would copy today. Copy-only restore left
+    # anything created SINCE the snapshot in place, so restoring a world
+    # snapshotted before tModLoader wrote its `.twld` put the old `.wld` back
+    # beside the newer `.twld` - precisely the mismatched-pair state the
+    # staging comment above calls worse than no snapshot. Removal happens
+    # AFTER the copies and only after `put` is known non-empty, and everything
+    # deleted here is in the undo snapshot taken above, so it undoes with the
+    # rest.
+    removed: list[str] = []
+    recorded = set(held.files)
+    for source, name in _sources(cfg):
+        if name in recorded or not source.is_file():
+            continue
+        try:
+            source.unlink()
+        except OSError as failed:
+            raise SaveError(
+                f"the restore of {label!r} put its files back but could not "
+                f"remove {name}, which the snapshot does not hold ({failed}). "
+                f"The save now mixes two states"
+                + (f"; what was there before is in {undo!r}." if undo else ".")
+            ) from failed
+        removed.append(name)
+
+    return Restored(
+        label=label, files=tuple(put), size=size, undo=undo, removed=tuple(removed)
+    )
 
 
 def forget(cfg: Config, label: str) -> Snapshot | None:

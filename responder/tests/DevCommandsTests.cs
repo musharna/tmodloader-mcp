@@ -280,5 +280,81 @@ namespace TModLoaderMcp.DevBridge.Tests
 			Assert.Null(r.Verb);
 			Assert.Null(r.Target);
 		}
+
+		// ---- the request id --------------------------------------------------
+
+		/// <summary>
+		/// The id comes off the very end, after the target, and everything else
+		/// parses exactly as it does without one. It exists because the reply
+		/// file is named per player rather than per request, so a late reply to
+		/// a timed-out request needs telling apart from the answer to the next
+		/// one - see DevResponder.Report.
+		/// </summary>
+		[Theory]
+		[InlineData("diag#r-abc123", "diag", null, null)]
+		[InlineData("diag@n43n#r-abc123", "diag", "n43n", null)]
+		[InlineData("shot:topleft@n43n#r-0123456789ab", "shot", "n43n", "topleft")]
+		[InlineData("shot:topleft#r-abcd", "shot", null, "topleft")]
+		public void ARequestIdComesOffTheEndAndChangesNothingElse(
+				string raw, string verb, string target, string argument) {
+			DevRequest r = DevCommands.Parse(raw);
+
+			Assert.Equal(verb, r.Verb);
+			Assert.Equal(target, r.Target);
+			Assert.Equal(argument, r.Argument);
+			Assert.StartsWith("r-", r.Id);
+		}
+
+		[Fact]
+		public void APayloadWithoutAnIdCarriesNull() {
+			Assert.Null(DevCommands.Parse("diag@n43n").Id);
+		}
+
+		/// <summary>
+		/// A '#' tail that is not an id is PAYLOAD, and stripping it would
+		/// silently change what `say` says. The marker earns its keep by being
+		/// unlikely as prose: `r-` then 4-32 characters of lowercase hex, with
+		/// one character wrong meaning the whole tail stays where it was typed.
+		/// </summary>
+		[Theory]
+		[InlineData("say:issue #beef", "issue #beef")]         // no r- marker
+		[InlineData("say:fix #r-BEEF", "fix #r-BEEF")]         // uppercase is not hex here
+		[InlineData("say:see #r-abc", "see #r-abc")]           // 3 hex is too short
+		[InlineData("say:see #r-abcg", "see #r-abcg")]         // g is not hex
+		[InlineData("say:ref #r-0123456789abcdef0123456789abcdef0", // 33 is too long
+			"ref #r-0123456789abcdef0123456789abcdef0")]
+		public void ATailThatIsNotAnIdStaysInThePayload(string raw, string argument) {
+			DevRequest r = DevCommands.Parse(raw);
+
+			Assert.Equal("say", r.Verb);
+			Assert.Equal(argument, r.Argument);
+			Assert.Null(r.Id);
+		}
+
+		/// <summary>
+		/// A bare tagged trigger is still the historical bare trigger - a
+		/// capture - answered under the id it carried.
+		/// </summary>
+		[Fact]
+		public void ABareTaggedTriggerIsACaptureWithAnId() {
+			DevRequest r = DevCommands.Parse("#r-abcd12");
+
+			Assert.Equal(DevCommands.DefaultVerb, r.Verb);
+			Assert.Null(r.Target);
+			Assert.Equal("r-abcd12", r.Id);
+		}
+
+		/// <summary>
+		/// The id survives a malformed payload, so the ERROR naming the problem
+		/// reaches the caller who asked instead of reading as a stale reply to
+		/// them and as an answer to whoever asks next.
+		/// </summary>
+		[Fact]
+		public void TheIdSurvivesAMalformedPayload() {
+			DevRequest r = DevCommands.Parse("diag@#r-abcd12");
+
+			Assert.True(r.IsMalformed);
+			Assert.Equal("r-abcd12", r.Id);
+		}
 	}
 }

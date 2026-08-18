@@ -108,8 +108,11 @@ def mods(save_dir: Path) -> list[Mod]:
     manifest = folder / "enabled.json"
     if manifest.is_file():
         try:
-            parsed = json.loads(manifest.read_text())
-        except json.JSONDecodeError as exc:
+            parsed = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            # OSError covers a file deleted or locked between the check and
+            # the read; either way the answer is the same as unparseable JSON:
+            # a mod list exists that this cannot read, which needs a human.
             raise InventoryError(
                 f"{manifest} exists and is not valid JSON: {exc}"
             ) from exc

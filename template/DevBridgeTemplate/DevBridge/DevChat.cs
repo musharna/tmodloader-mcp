@@ -6,6 +6,7 @@ using Terraria;
 using Terraria.GameContent.UI.Chat;
 using Terraria.ID;
 using Terraria.Localization;
+using Terraria.ModLoader;
 
 namespace TModLoaderMcp.DevBridge
 {
@@ -35,6 +36,19 @@ namespace TModLoaderMcp.DevBridge
 	///     protected override void RegisterCommands(DevCommandRegistry r) =>
 	///         DevChat.RegisterInto(r, Report);
 	/// </summary>
+	/// <summary>
+	/// The unwind for DevChat's recorder, running whether or not anybody opted
+	/// in. A ModSystem rather than a call from DevResponder.Unload, because
+	/// DevResponder deliberately never names an opt-in class in code (pinned by
+	/// DevMutationsTests) - and this grants nothing: it only puts back what
+	/// Listen wrapped, and a mod that never registered chat makes it a no-op.
+	/// The same shape as FrameShot's Unload, for the same trap one field over.
+	/// </summary>
+	public class DevChatUnwind : ModSystem
+	{
+		public override void Unload() => DevChat.Unload();
+	}
+
 	public static class DevChat
 	{
 		/// <summary>How many lines are kept. A session prints a lot and this is
@@ -72,13 +86,41 @@ namespace TModLoaderMcp.DevBridge
 		}
 
 		/// <summary>
+		/// Stop recording and forget what was heard. Called by
+		/// DevResponder.Unload - a no-op for a mod that never opted in.
+		///
+		/// THE UNWRAP IS THE LOAD-BEARING HALF. Main.chatMonitor is engine
+		/// state that outlives a mod reload, so a recorder left installed pins
+		/// the old load's assembly (tModLoader reports "unload failed" and
+		/// forces a restart) - and the new load's `is Recorder` guard in Listen
+		/// cannot recognise the OLD assembly's Recorder type, so it wraps
+		/// again: the exact chain that guard's comment says it prevents,
+		/// growing by one layer per reload. FrameShot.Unload documents and
+		/// solves the same trap for Main.OnPostDraw; this is that unwind for
+		/// the chat monitor. The buffer is cleared for the plainer reason:
+		/// `chat` answers "since the mod loaded", and a static list survives a
+		/// reload carrying the previous load's lines.
+		/// </summary>
+		public static void Unload() {
+			if (Main.chatMonitor is Recorder recorder) {
+				Main.chatMonitor = recorder.Inner;
+			}
+
+			lock (_lock) {
+				_heard.Clear();
+			}
+		}
+
+		/// <summary>
 		/// Start recording, once.
 		///
 		/// GUARDED AGAINST DOUBLE WRAPPING. A mod reload re-runs registration
 		/// with the previous recorder still installed, and wrapping a wrapper
 		/// every time would build a chain that grows for as long as somebody
 		/// keeps reloading - each layer forwarding to the last, each recording
-		/// the same line again.
+		/// the same line again. Unload is what makes that guard sufficient:
+		/// without the unwind there, the previous recorder is the previous
+		/// ASSEMBLY's type, which `is Recorder` cannot see.
 		/// </summary>
 		private static void Listen() {
 			if (Main.dedServ) {
@@ -195,6 +237,9 @@ namespace TModLoaderMcp.DevBridge
 			public Recorder(IChatMonitor inner) {
 				_inner = inner;
 			}
+
+			/// <summary>What Unload puts back where this recorder sat.</summary>
+			public IChatMonitor Inner => _inner;
 
 			public void NewText(string newText, byte R, byte G, byte B) {
 				Remember(newText);
