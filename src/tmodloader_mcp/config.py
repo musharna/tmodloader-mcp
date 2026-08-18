@@ -447,9 +447,48 @@ def check(cfg: Config) -> list[str]:
             "path rather than a name."
         )
 
+    problems.extend(_windows_tool_problems(cfg))
     problems.extend(_windows_source_problems(cfg))
 
     return problems
+
+
+def _windows_tool_problems(cfg: Config) -> list[str]:
+    """Whether Windows' own process tools are reachable.
+
+    THIS IS THE PLATFORM CHECK, and it exists because the platform assumption
+    was invisible. Every path here defaults under `/mnt/c`, and sessions are
+    listed and killed through `tasklist.exe` and `taskkill.exe` — so this drives
+    a WINDOWS tModLoader from WSL2 and cannot drive a native Linux or macOS one.
+    Nothing said so. `check` passed, and the failure arrived much later as an
+    OSError naming a path in System32, from a tool the reader never mentioned.
+
+    ONE problem however many are missing, the way `_unexpanded_problem` does it:
+    the remedy is a single fact about the machine, and repeating it three times
+    buries it.
+    """
+    missing = [
+        f"{name} ({path})"
+        for name, path in (
+            ("TMODLOADER_TASKLIST", cfg.tasklist),
+            ("TMODLOADER_TASKKILL", cfg.taskkill),
+            ("TMODLOADER_POWERSHELL", cfg.powershell),
+        )
+        if not path.is_file()
+    ]
+
+    if not missing:
+        return []
+
+    return [
+        "cannot reach Windows' own process tools: "
+        + "; ".join(missing)
+        + ". This harness drives a WINDOWS tModLoader from WSL2 - it lists and "
+        "kills game processes through tasklist.exe and taskkill.exe, and builds "
+        "through a Windows path. A native Linux or macOS tModLoader cannot be "
+        "driven by it as it stands. If this IS WSL and the tools are simply "
+        "elsewhere, set the three variables named above."
+    ]
 
 
 def _unexpanded_problem(cfg: Config) -> list[str]:

@@ -9,7 +9,25 @@ predates any tag, so the "breaking" notes below describe changes nobody could
 have been depending on — they are recorded because the reasoning is worth
 keeping, not because they broke a released API.
 
-## [Unreleased]
+## [0.5.0] - 2026-08-17
+
+The release where the world stops being read-only. `tiles` could count a world
+nothing could change and `spawn` could make NPCs nothing could remove; `settile`,
+`cleartile` and `despawn` close that, and `find` and `players` answer the state
+a count cannot carry. `command` gives the escape hatch other harnesses spell as
+`reflect_invoke` a form that stays published, typed and refusable — a mod's own
+registered commands, which it already decided existed.
+
+Two things here are worth more than the verbs. `api_search` reads the INSTALLED
+assembly's own metadata, so a call is checked against the version on this disk
+rather than against anybody's recollection of the API — it found that
+`CommandLoader.HandleCommand` is not public, which is why `command` needed no
+reflection. And `save_snapshot` / `save_restore` were built on a premise that
+turned out to be false: measuring it showed a session ended by `stop()` writes
+neither the world nor the character file, because `stop` force-kills. The
+feature stayed, its justification changed, and the live check that caught the
+error now reports the fact instead of asserting the guess.
+
 
 ### Added
 
