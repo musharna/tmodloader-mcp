@@ -72,6 +72,9 @@ EXPECTED_TOOLS = {
     "log_since",
     "log_watch",
     "api_search",
+    "save_snapshot",
+    "save_restore",
+    "save_snapshots",
     "restart",
     "stop",
 }

@@ -23,7 +23,8 @@ loads it with no registration on your part.
 
 **4. Override `RegisterCommands`** if you want verbs of your own, or want any of
 the three opt-in classes below. Optional; the base class already answers
-`capture`, `diag`, `shot`, `tiles` and `entities`, all of which only READ.
+`capture`, `diag`, `shot`, `tiles`, `entities`, `find` and `players`, all of
+which only READ.
 
 ```csharp
 using TModLoaderMcp.DevBridge;
@@ -50,6 +51,13 @@ you name, and `entities` counts NPCs, dropped items or projectiles — either
 everywhere or inside a rectangle. None of them can change a save, so every
 consumer gets them.
 
+`find` is the same three kinds asked a different question: `find:npc` or
+`find:npc,<id>` returns one line per entity with its slot, position, name and
+state — health for an NPC, stack size for a dropped item, owner for a
+projectile. A count says the boss is there; only this says it is at a third of
+its health. `players` is separate from both because players have no type, so
+counting them by one would report "1 distinct type" for any number of people.
+
 `entities` takes a kind and no default: `entities:npc`, or
 `entities:npc,100,200,80,80` to look in one rectangle. Its rectangle is a
 filter rather than a budget — the entity arrays are a fixed few hundred slots
@@ -70,7 +78,7 @@ protected override void RegisterCommands(DevCommandRegistry r) {
 
 | Class              | Verbs                                      | What it lets through          |
 | ------------------ | ------------------------------------------ | ----------------------------- |
-| `DevMutations`     | `time` `weather` `spawn` `give` `teleport` | Changing the world you are in |
+| `DevMutations`     | `time` `weather` `spawn` `give` `teleport` `settile` `cleartile` `despawn` | Changing the world you are in |
 | `DevCommandBridge` | `command` `commandlist`                    | Any registered `ModCommand`   |
 | `DevChat`          | `chat` `say`                               | Reading and writing chat      |
 
@@ -101,8 +109,8 @@ have before, which is the property that makes vendoring an upgrade safe.
 whatever you register.
 
 Every verb across all three refuses the side that cannot do it and names the
-side that can. `time`, `weather` and `spawn` are refused on a multiplayer
-**client** — the server owns the clock, the weather and the NPC array, and a
+side that can. `time`, `weather`, `spawn`, `settile`, `cleartile` and `despawn` are refused on
+a multiplayer **client** — the server owns the clock, the weather and the NPC array, and a
 client that changed them would be corrected by the next world packet, so the
 change would appear to work and then undo itself. `give`, `teleport` and `chat`
 are refused on a **dedicated server**, which runs the world without standing in

@@ -76,6 +76,8 @@ namespace TModLoaderMcp.DevBridge.Tests
         [InlineData("shot")]
         [InlineData("tiles")]
         [InlineData("entities")]
+        [InlineData("find")]
+        [InlineData("players")]
         public void EveryGenericVerbIsRegisteredBeforeTheModsOwn(string verb) {
             string src = Source();
 

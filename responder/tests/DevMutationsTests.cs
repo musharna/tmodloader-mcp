@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using Xunit;
 
@@ -333,10 +334,10 @@ namespace TModLoaderMcp.DevBridge.Tests
         /// into a verb and an argument and could never be delivered under the
         /// name it registered. That rule is the one place a bad verb name is
         /// catchable, and this is the only test on this side that can run it
-        /// against these five.
+        /// against every one of them.
         /// </summary>
         [Fact]
-        public void AllFiveVerbsAreNamesTheTriggerCanActuallyCarry() {
+        public void EveryVerbIsANameTheTriggerCanActuallyCarry() {
             var registry = new DevCommandRegistry();
 
             foreach (string verb in AllVerbs) {
@@ -529,6 +530,171 @@ namespace TModLoaderMcp.DevBridge.Tests
                 "the tile query stopped capping, so the asymmetry above is vacuous");
         }
 
+        // ---- filling and clearing tiles --------------------------------------
+
+        [Fact]
+        public void ATileFillIsARectangleAndAType() {
+            Assert.True(DevMutationArgs.TryResolveTileFill("10,20,4,5,53", out int x,
+                out int y, out int w, out int h, out int type, out string problem),
+                problem);
+
+            Assert.Equal(10, x);
+            Assert.Equal(20, y);
+            Assert.Equal(4, w);
+            Assert.Equal(5, h);
+            Assert.Equal(53, type);
+        }
+
+        /// <summary>
+        /// THE ONE PLACE THE ID RULES DIVERGE. `spawn` and `give` refuse 0
+        /// because it is how Terraria spells "nothing" in their id spaces. In
+        /// the TILE space 0 is Dirt, so refusing it would refuse the commonest
+        /// block in the game.
+        ///
+        /// Both halves are asserted together: without the second, a parser that
+        /// accepted 0 everywhere would pass the first.
+        /// </summary>
+        [Fact]
+        public void ZeroIsDirtHereEvenThoughItIsNothingForSpawnAndGive() {
+            Assert.True(DevMutationArgs.TryResolveTileFill("10,20,1,1,0", out _, out _,
+                out _, out _, out int type, out string problem), problem);
+            Assert.Equal(0, type);
+
+            Assert.False(DevMutationArgs.TryResolveIdAndCount("0", "NPC id", out _,
+                out _, out _),
+                "0 became acceptable as an NPC id, so the contrast above is vacuous");
+        }
+
+        [Theory]
+        [InlineData("10,20,4,5")]
+        [InlineData("10,20,4,5,6,7")]
+        [InlineData("10,20,4,5,x")]
+        [InlineData("10,20,4,5,-1")]
+        [InlineData("10,20,0,5,53")]
+        [InlineData("")]
+        public void WhatIsNotARectangleAndATypeIsRefused(string written) {
+            Assert.False(DevMutationArgs.TryResolveTileFill(written, out _, out _,
+                out _, out _, out _, out string problem),
+                "\"" + written + "\" was accepted");
+
+            Assert.False(string.IsNullOrWhiteSpace(problem));
+        }
+
+        /// <summary>
+        /// Placing PAYS per tile, so it is capped exactly as scanning is - and
+        /// unlike the entity query, whose rectangle only filters.
+        /// </summary>
+        [Fact]
+        public void AFillPastTheLimitIsRefusedAndTheLimitIsNamed() {
+            int side = 1;
+            while (side * side <= DevMutationArgs.MaxArea) {
+                side++;
+            }
+
+            Assert.False(DevMutationArgs.TryResolveTileFill(
+                "0,0," + side + "," + side + ",53", out _, out _, out _, out _, out _,
+                out string problem));
+
+            Assert.Contains(DevMutationArgs.MaxArea.ToString(), problem);
+
+            // POSITIVE CONTROL: the limit itself is allowed.
+            Assert.True(DevMutationArgs.TryResolveTileFill(
+                "0,0," + DevMutationArgs.MaxArea + ",1,53", out _, out _, out _, out _,
+                out _, out _));
+        }
+
+        // ---- despawning ------------------------------------------------------
+
+        [Theory]
+        [InlineData("all")]
+        [InlineData("ALL")]
+        [InlineData("  all  ")]
+        public void AllIsEveryNpcRatherThanATypeCalledAll(string written) {
+            Assert.True(DevMutationArgs.TryResolveDespawn(written, out bool everything,
+                out _, out string problem), problem);
+
+            Assert.True(everything);
+        }
+
+        [Fact]
+        public void ADespawnCanNameOneType() {
+            Assert.True(DevMutationArgs.TryResolveDespawn("42", out bool everything,
+                out int type, out string problem), problem);
+
+            Assert.False(everything);
+            Assert.Equal(42, type);
+        }
+
+        [Theory]
+        [InlineData("0")]
+        [InlineData("-1")]
+        [InlineData("everything")]
+        [InlineData("")]
+        public void WhatIsNeitherAllNorAnIdIsRefused(string written) {
+            Assert.False(DevMutationArgs.TryResolveDespawn(written, out _, out _,
+                out string problem), "\"" + written + "\" was accepted");
+
+            Assert.False(string.IsNullOrWhiteSpace(problem));
+        }
+
+        // ---- the detail query ------------------------------------------------
+
+        [Theory]
+        [InlineData("npc", DevMutationArgs.EntityNpc)]
+        [InlineData("ITEM", DevMutationArgs.EntityItem)]
+        [InlineData("  projectile ", DevMutationArgs.EntityProjectile)]
+        public void AFindCanBeAKindOnItsOwn(string written, string expected) {
+            Assert.True(DevMutationArgs.TryResolveFind(written, out string kind,
+                out bool anyType, out _, out string problem), problem);
+
+            Assert.Equal(expected, kind);
+            Assert.True(anyType, "a kind with no id did not mean every type");
+        }
+
+        [Fact]
+        public void AFindCanNameOneType() {
+            Assert.True(DevMutationArgs.TryResolveFind("npc,4", out string kind,
+                out bool anyType, out int type, out string problem), problem);
+
+            Assert.Equal(DevMutationArgs.EntityNpc, kind);
+            Assert.False(anyType);
+            Assert.Equal(4, type);
+        }
+
+        [Theory]
+        [InlineData("mob")]
+        [InlineData("npc,4,5")]
+        [InlineData("npc,x")]
+        [InlineData("npc,0")]
+        [InlineData("npc,-1")]
+        [InlineData("")]
+        public void WhatIsNotAKindAndAnIdIsRefused(string written) {
+            Assert.False(DevMutationArgs.TryResolveFind(written, out _, out _, out _,
+                out string problem), "\"" + written + "\" was accepted");
+
+            Assert.False(string.IsNullOrWhiteSpace(problem));
+        }
+
+        /// <summary>
+        /// The counting query and the detail query resolve a kind through ONE
+        /// function, so they cannot come to disagree about what `item` means.
+        /// </summary>
+        [Theory]
+        [InlineData("npc")]
+        [InlineData("item")]
+        [InlineData("projectile")]
+        [InlineData("mob")]
+        [InlineData("")]
+        public void BothQueriesAgreeAboutWhatIsAKind(string written) {
+            bool counting = DevMutationArgs.TryResolveEntityQuery(written,
+                out string countedKind, out _, out _, out _, out _, out _, out _);
+            bool detail = DevMutationArgs.TryResolveFind(written, out string foundKind,
+                out _, out _, out _);
+
+            Assert.Equal(counting, detail);
+            Assert.Equal(countedKind, foundKind);
+        }
+
         // ---- the opt-in, read rather than run -------------------------------
 
         private static readonly string[] AllVerbs = {
@@ -537,6 +703,9 @@ namespace TModLoaderMcp.DevBridge.Tests
             DevMutationArgs.Spawn,
             DevMutationArgs.Give,
             DevMutationArgs.Teleport,
+            DevMutationArgs.SetTile,
+            DevMutationArgs.ClearTile,
+            DevMutationArgs.Despawn,
         };
 
         private static string RepoRoot() {
@@ -565,7 +734,7 @@ namespace TModLoaderMcp.DevBridge.Tests
         /// <summary>
         /// THE SAFETY PROPERTY OF THIS WHOLE FILE.
         ///
-        /// Everything else in responder/ reads. These five change the world a
+        /// Everything else in responder/ reads. These change the world a
         /// developer is sitting in, so a mod that updates its vendored copy must
         /// not silently gain the power to spawn enemies into somebody's save.
         /// The only thing standing between that and this is DevResponder never
@@ -637,14 +806,34 @@ namespace TModLoaderMcp.DevBridge.Tests
         public void TheApplierRegistersEveryVerbTheRulesFileNames() {
             string code = Source("DevMutations.cs");
 
-            foreach (string constant in new[] {
-                "DevMutationArgs.Time", "DevMutationArgs.Weather",
-                "DevMutationArgs.Spawn", "DevMutationArgs.Give",
-                "DevMutationArgs.Teleport",
-            }) {
-                Assert.Matches(new Regex(@"r\.Register\(\s*" + Regex.Escape(constant)),
+            // DERIVED, not listed again. This test used to spell out five
+            // constants by hand, so three verbs added to AllVerbs later were
+            // never checked here at all - found by mutation, which deleted a
+            // registration and watched every test stay green. Reflection maps
+            // each verb VALUE back to the constant NAME the applier registers
+            // it under, which is the step a hand-written list keeps getting
+            // wrong.
+            foreach (string verb in AllVerbs) {
+                string constant = ConstantNameFor(verb);
+
+                Assert.Matches(
+                    new Regex(@"r\.Register\(\s*DevMutationArgs\." + constant + @"\s*,"),
                     code);
             }
+        }
+
+        /// <summary>The name of the DevMutationArgs constant holding this verb.</summary>
+        private static string ConstantNameFor(string verb) {
+            foreach (FieldInfo field in typeof(DevMutationArgs).GetFields(
+                    BindingFlags.Public | BindingFlags.Static)) {
+                if (field.IsLiteral && (field.GetRawConstantValue() as string) == verb) {
+                    return field.Name;
+                }
+            }
+
+            throw new Xunit.Sdk.XunitException(
+                "no DevMutationArgs constant holds the verb \"" + verb + "\", so " +
+                "the applier cannot be registering it by name");
         }
 
         [Fact]

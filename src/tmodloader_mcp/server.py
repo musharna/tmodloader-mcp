@@ -38,6 +38,7 @@ from . import diag as diag_mod
 from . import heartbeat as heartbeat_mod
 from . import inventory as inventory_mod
 from . import logs as logs_mod
+from . import saves as saves_mod
 from . import session as session_mod
 from .triggers import TriggerError
 
@@ -111,6 +112,29 @@ class ApiSearchOut(TypedDict):
     #: reading as an API that does not have the thing you asked about.
     indexed: int
     truncated: bool
+
+
+class SnapshotOut(TypedDict):
+    label: str
+    #: Epoch seconds. Absolute rather than an age, so two snapshots can be
+    #: ordered against each other and against a log line.
+    taken: float
+    files: list[str]
+    size: int
+
+
+class SnapshotListOut(TypedDict):
+    snapshots: list[SnapshotOut]
+    #: Where they live, so somebody can delete them by hand without guessing.
+    root: str
+
+
+class RestoreOut(TypedDict):
+    label: str
+    files: list[str]
+    size: int
+    #: The snapshot holding what was overwritten, so the restore can be undone.
+    undo: str | None
 
 
 class LogWatchOut(TypedDict):
@@ -935,6 +959,90 @@ def inventory() -> InventoryOut:
             ModOut(name=m.name, enabled=m.enabled, built_here=m.built_here)
             for m in inventory_mod.mods(cfg.save_dir)
         ],
+    )
+
+
+@mcp.tool(
+    title="Copy the save aside",
+    annotations=_MUTATES,
+    structured_output=True,
+)
+def save_snapshot(label: str) -> SnapshotOut:
+    """Copy this world and its characters aside, so a run can be undone.
+
+    WHAT THIS IS FOR. The mutating verbs write to a real install and none of
+    that FAILS — it accumulates. Enemy NPCs do not survive a reload, so `spawn`
+    looks harmless, but `give` writes the character file, `time` and `weather`
+    live in the world, and `settile` changes it for good. The damage is
+    invisible when it is done and shows up later as a measurement nobody
+    doubts.
+
+    Take one before a run that mutates, and `save_restore` after it.
+
+    REFUSES WHILE THE GAME IS RUNNING, naming the pids. A running tModLoader
+    owns these files and writes them out on its own schedule, so a copy taken
+    now is mid-write. Stop the session first.
+
+    Copies the configured world's `.wld` and `.twld` and every `.plr`/`.tplr` —
+    not the whole Worlds directory, which measured 41MB against 3MB for one
+    world, and not `.bak` files, which are the game's own safety net.
+    """
+    cfg = _cfg()
+    held = saves_mod.take(cfg, label)
+    return SnapshotOut(
+        label=held.label,
+        taken=held.taken,
+        files=list(held.files),
+        size=held.size,
+    )
+
+
+@mcp.tool(
+    title="Put a saved copy back",
+    annotations=_DESTRUCTIVE,
+    structured_output=True,
+)
+def save_restore(label: str) -> RestoreOut:
+    """Overwrite the world and characters with a snapshot.
+
+    This DESTROYS what is on disk now, so it saves that first: the state being
+    overwritten is copied to `auto-before-restore` and returned as `undo`,
+    which `save_restore` accepts like any other label. A restore aimed at the
+    wrong snapshot is therefore recoverable rather than final.
+
+    Refuses while the game is running, and refuses a label that does not exist
+    by listing the ones that do.
+    """
+    cfg = _cfg()
+    put = saves_mod.restore(cfg, label)
+    return RestoreOut(
+        label=put.label,
+        files=list(put.files),
+        size=put.size,
+        undo=put.undo,
+    )
+
+
+@mcp.tool(
+    title="List the saved copies",
+    annotations=_READ_ONLY,
+    structured_output=True,
+)
+def save_snapshots() -> SnapshotListOut:
+    """Every snapshot on this machine, newest first, with its age in seconds.
+
+    A snapshot whose manifest cannot be read is omitted rather than listed as
+    empty, because `save_restore` refuses it for the same reason: putting back
+    nothing and reporting success is the worst available outcome.
+    """
+    cfg = _cfg()
+    held = saves_mod.listing(cfg)
+    return SnapshotListOut(
+        snapshots=[
+            SnapshotOut(label=s.label, taken=s.taken, files=list(s.files), size=s.size)
+            for s in held
+        ],
+        root=str(saves_mod.snapshot_root(cfg)),
     )
 
 
