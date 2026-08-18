@@ -313,5 +313,27 @@ namespace TModLoaderMcp.DevBridge.Tests
 				r.Publish().Split('\n').Where(l => l.Length > 0),
 				l => !l.StartsWith("#"));
 		}
+
+		/// <summary>
+		/// The capability line, spelled as a comment because a comment is the
+		/// one format every existing parser of this file already skips. The
+		/// harness reads this exact string to learn that replies echo a request
+		/// id, and only then attaches one - so its exact spelling is a contract,
+		/// pinned here against a tidy-up that rewords a "comment".
+		/// </summary>
+		[Fact]
+		public void ThePublishedListAdvertisesTaggedReplies() {
+			var r = new DevCommandRegistry();
+			r.Register("diag", false, "a summary", _ => { });
+
+			string published = r.Publish();
+
+			Assert.Contains("# replies: tagged\n", published);
+
+			// In the header, before any command line - a harness that stops
+			// reading at the first command still sees it.
+			Assert.True(published.IndexOf("# replies: tagged") < published.IndexOf("diag"),
+				"the capability line sits below the first command");
+		}
 	}
 }

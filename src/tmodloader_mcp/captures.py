@@ -84,7 +84,9 @@ def available(save_dir: Path, mod_name: str) -> list[str]:
     )
 
 
-def contained(save_dir: Path, mod_name: str, name: str) -> Path:
+def contained(
+    save_dir: Path, mod_name: str, name: str, *, missing_ok: bool = False
+) -> Path:
     """The path this name resolves to, or `CaptureError` saying why not.
 
     THE ONE CONTAINMENT CHECK, because there is now more than one caller and a
@@ -97,6 +99,13 @@ def contained(save_dir: Path, mod_name: str, name: str) -> Path:
     not inside the save directory", and "that capture is not there" are
     different mistakes, and collapsing them makes a typo look like a security
     refusal.
+
+    `missing_ok` relaxes ONLY the third - the name and containment rules hold
+    regardless. It exists for `prune`, whose target set is a listing another
+    session may be shrinking at the same time: a file that vanished between
+    the listing and this check is a delete that is already done, and refusing
+    the whole prune over it turned concurrent housekeeping into a spurious
+    "there is no capture" error.
     """
     if not capture_pattern(mod_name).match(name):
         raise CaptureError(
@@ -118,7 +127,7 @@ def contained(save_dir: Path, mod_name: str, name: str) -> Path:
             "are served from the save directory only."
         )
 
-    if not target.is_file():
+    if not target.is_file() and not missing_ok:
         raise CaptureError(f"there is no capture called {name!r} in {root}")
 
     return target
@@ -157,9 +166,22 @@ def prune(save_dir: Path, mod_name: str, *, keep: int) -> list[str]:
     if not save_dir.is_dir():
         return []
 
+    # TOLERANT OF THE OTHER SESSION THROUGHOUT, because two sessions sharing a
+    # save directory is the supported arrangement and pruning is not
+    # coordinated between them. A file can vanish between the listing, the
+    # sort's stat, the validation and the unlink - at each point "already
+    # gone" means the work is done, not that this prune failed. A vanished
+    # file's mtime sorts as oldest, which only ever makes it MORE likely to be
+    # aimed at, where the unlink finds nothing to do.
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
     pattern = capture_pattern(mod_name)
     found = [entry for entry in save_dir.iterdir() if pattern.match(entry.name)]
-    found.sort(key=lambda p: (p.stat().st_mtime, p.name))
+    found.sort(key=lambda p: (_mtime(p), p.name))
 
     doomed = found if keep == 0 else found[:-keep]
 
@@ -170,9 +192,13 @@ def prune(save_dir: Path, mod_name: str, *, keep: int) -> list[str]:
     #
     # `iterdir` yields symlinks, and one named like a capture passes the pattern
     # while resolving somewhere else entirely. `contained` is what notices.
-    targets = [contained(save_dir, mod_name, path.name) for path in doomed]
+    # `missing_ok` covers only absence - see its docstring - so the validation
+    # is exactly as strict about names and escapes as the read beside it.
+    targets = [
+        contained(save_dir, mod_name, path.name, missing_ok=True) for path in doomed
+    ]
 
     for target in targets:
-        target.unlink()
+        target.unlink(missing_ok=True)
 
     return sorted(path.name for path in doomed)

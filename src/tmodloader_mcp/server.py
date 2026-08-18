@@ -1,8 +1,17 @@
 """MCP server over a running tModLoader instance.
 
-Tools are synchronous. A game session is process-global state — there is one
-game, one save directory, and one trigger file — so serialising calls on the
-event loop is what stops two requests consuming each other's reply.
+Tools are synchronous AND SERIALISED BY AN EXPLICIT LOCK, and the second half
+is not implied by the first. This header used to say that synchronous tools
+serialise on the event loop, and under the installed SDK that is false: mcp
+2.x dispatches each incoming request concurrently (`start_soon` per message)
+and runs a SYNC tool function in a WORKER THREAD (`anyio.to_thread.run_sync`),
+so two tool calls from one batching client - which is the normal client - ran
+in genuine parallel. A game session is process-global state - one game, one
+save directory, one trigger file - and two parallel calls consumed each
+other's replies, double-launched into one save, and cleared `_session` under
+each other. `_ONE_AT_A_TIME` is what the sentence used to wrongly claim the
+event loop provided; holding it across a five-minute `launch` is the intended
+semantics, not a liability.
 """
 
 # NO `from __future__ import annotations` HERE, DELIBERATELY.
@@ -21,6 +30,8 @@ event loop is what stops two requests consuming each other's reply.
 # does, and costs nothing: requires-python is >=3.12, where `str | None` and
 # `list[int]` are native syntax.
 
+import threading
+from functools import wraps
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -56,6 +67,12 @@ rather than starting something else. Singleplayer needs a human to load a world;
 every other tool then drives it normally.
 """
 
+#: The most bytes one `log_since` call returns. Half a megabyte is thousands
+#: of lines - far past what one answer can use - while a long session's log
+#: reaches tens of MB, which nobody meant to receive as a tool result. The
+#: cut is at a line boundary with a resume point, so the cap drops nothing.
+_LOG_SINCE_LIMIT = 512 * 1024
+
 _READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 _MUTATES = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
@@ -65,6 +82,29 @@ mcp = MCPServer("tmodloader-mcp", instructions=INSTRUCTIONS)
 #: The one live session, or None. Module-global because the thing it models is:
 #: one game, one save directory, one trigger file.
 _session: session_mod.Session | None = None
+
+#: The serialisation the module docstring explains. One lock for every tool,
+#: including the read-only ones: `captures` racing `prune_captures` is the
+#: same torn answer as `trigger` racing `trigger`, only cheaper.
+_ONE_AT_A_TIME = threading.Lock()
+
+
+def _serialized(tool):
+    """One tool call at a time, however the SDK schedules them.
+
+    Applied UNDER `@mcp.tool`, so what the SDK registers is the locked
+    wrapper; `wraps` carries the signature, annotations and docstring across,
+    which is what the schema generator reads. A second call arriving while
+    one blocks - a `status` during a five-minute `launch` - waits its turn,
+    which is exactly the behaviour every docstring here was written assuming.
+    """
+
+    @wraps(tool)
+    def locked(*args, **kwargs):
+        with _ONE_AT_A_TIME:
+            return tool(*args, **kwargs)
+
+    return locked
 
 
 def _cfg() -> config_mod.Config:
@@ -98,6 +138,13 @@ class LogSinceOut(TypedDict):
     lines: list[str]
     next_offset: int
     restarted: bool
+    #: Hand this back on the next call. It is how a rotation is seen even when
+    #: the new run has already outgrown the old offset - the case the
+    #: shrinking-file check cannot catch.
+    fingerprint: str
+    #: True when the byte cap stopped this read short of the log's end. Nothing
+    #: was dropped: call again from `next_offset` for the rest.
+    truncated: bool
 
 
 class ApiMemberOut(TypedDict):
@@ -135,6 +182,11 @@ class RestoreOut(TypedDict):
     size: int
     #: The snapshot holding what was overwritten, so the restore can be undone.
     undo: str | None
+    #: Save files the snapshot did not hold, deleted so the restored state is
+    #: the recorded state - a `.twld` written after the snapshot would
+    #: otherwise pair with the restored `.wld` as a mismatched world. They are
+    #: in `undo`, so this is as reversible as the overwrite.
+    removed: list[str]
 
 
 class LogWatchOut(TypedDict):
@@ -145,6 +197,8 @@ class LogWatchOut(TypedDict):
     restarted: bool
     elapsed: float
     polls: int
+    #: The log's identity at the last poll - see `LogSinceOut.fingerprint`.
+    fingerprint: str
 
 
 class RestartOut(TypedDict):
@@ -309,6 +363,7 @@ class CommandsOut(TypedDict):
     annotations=_MUTATES,
     structured_output=True,
 )
+@_serialized
 def build_mod(timeout: float = 600.0) -> BuildOut:
     """Compile the configured mod source into a .tmod.
 
@@ -341,6 +396,7 @@ def build_mod(timeout: float = 600.0) -> BuildOut:
     annotations=_MUTATES,
     structured_output=True,
 )
+@_serialized
 def launch(
     mode: str = "server_client",
     port: int = 7810,
@@ -405,6 +461,7 @@ class JoinOut(TypedDict):
     annotations=_MUTATES,
     structured_output=True,
 )
+@_serialized
 def join(player: str, timeout: float = 300.0) -> JoinOut:
     """Bring another character into the session that is already running.
 
@@ -448,6 +505,7 @@ def join(player: str, timeout: float = 300.0) -> JoinOut:
     annotations=_MUTATES,
     structured_output=True,
 )
+@_serialized
 def trigger(
     command: str,
     target: str | None = None,
@@ -513,6 +571,7 @@ def trigger(
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def commands(server: bool = False) -> CommandsOut:
     """What this side's mod says it serves, read from the mod itself.
 
@@ -558,6 +617,7 @@ def commands(server: bool = False) -> CommandsOut:
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def diag(
     server: bool = False, target: str | None = None, timeout: float = 60.0
 ) -> DiagOut:
@@ -613,6 +673,7 @@ class WaitOut(TypedDict):
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def wait_until(
     field: str,
     op: str,
@@ -684,6 +745,7 @@ def wait_until(
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def shot(region: str, target: str | None = None, timeout: float = 60.0) -> ShotOut:
     """Capture a region of the game's own back buffer and return the PNG path.
 
@@ -717,6 +779,7 @@ def shot(region: str, target: str | None = None, timeout: float = 60.0) -> ShotO
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def captures() -> dict[str, list[str]]:
     """Every capture in the save directory, newest last.
 
@@ -731,6 +794,7 @@ def captures() -> dict[str, list[str]]:
     title="Read a capture back as an image",
     annotations=_READ_ONLY,
 )
+@_serialized
 def read_capture(name: str) -> Image:
     """Return one capture's PNG as image content.
 
@@ -754,6 +818,7 @@ def read_capture(name: str) -> Image:
     annotations=_DESTRUCTIVE,
     structured_output=True,
 )
+@_serialized
 def prune_captures(keep: int) -> PruneOut:
     """Delete all but the newest `keep` captures, and say which went.
 
@@ -793,6 +858,7 @@ def prune_captures(keep: int) -> PruneOut:
     title="A captured frame",
     mime_type="image/png",
 )
+@_serialized
 def capture_resource(name: str) -> bytes:
     """The same capture, addressable as a resource.
 
@@ -810,6 +876,7 @@ def capture_resource(name: str) -> bytes:
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def status() -> StatusOut:
     """Whether a session is running, and what it is.
 
@@ -849,6 +916,7 @@ def status() -> StatusOut:
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def logs(
     name: str = "client.log",
     previous: bool = False,
@@ -907,6 +975,7 @@ def logs(
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def log_files() -> dict[str, Any]:
     """Which logs exist right now, and how many earlier runs are archived.
 
@@ -925,6 +994,7 @@ def log_files() -> dict[str, Any]:
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def inventory() -> InventoryOut:
     """The worlds, characters and mods on this machine.
 
@@ -967,6 +1037,7 @@ def inventory() -> InventoryOut:
     annotations=_MUTATES,
     structured_output=True,
 )
+@_serialized
 def save_snapshot(label: str) -> SnapshotOut:
     """Copy this world and its characters aside, so a run can be undone.
 
@@ -1002,6 +1073,7 @@ def save_snapshot(label: str) -> SnapshotOut:
     annotations=_DESTRUCTIVE,
     structured_output=True,
 )
+@_serialized
 def save_restore(label: str) -> RestoreOut:
     """Overwrite the world and characters with a snapshot.
 
@@ -1020,6 +1092,7 @@ def save_restore(label: str) -> RestoreOut:
         files=list(put.files),
         size=put.size,
         undo=put.undo,
+        removed=list(put.removed),
     )
 
 
@@ -1028,6 +1101,7 @@ def save_restore(label: str) -> RestoreOut:
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def save_snapshots() -> SnapshotListOut:
     """Every snapshot on this machine, newest first, with its age in seconds.
 
@@ -1051,6 +1125,7 @@ def save_snapshots() -> SnapshotListOut:
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def heartbeat() -> HeartbeatOut:
     """Why the game is not answering, for both sides at once.
 
@@ -1121,7 +1196,13 @@ def heartbeat() -> HeartbeatOut:
     annotations=_READ_ONLY,
     structured_output=True,
 )
-def log_since(name: str, offset: int = 0, contains: str | None = None) -> LogSinceOut:
+@_serialized
+def log_since(
+    name: str,
+    offset: int = 0,
+    contains: str | None = None,
+    fingerprint: str | None = None,
+) -> LogSinceOut:
     """Only what a log has gained since you last looked.
 
     Args:
@@ -1131,6 +1212,10 @@ def log_since(name: str, offset: int = 0, contains: str | None = None) -> LogSin
             because the number of lines you have read is not where the file
             continues.
         contains: Case-insensitive filter, applied to the new lines only.
+        fingerprint: The previous call's `fingerprint`, or omit on the first.
+            It is how a rotation is detected when the NEW log has already
+            outgrown your offset — without it that case reads as a quiet
+            continuation, silently skipping the head of the new run.
 
     NOT A LIVE TAIL, and it cannot be one. Tools here are synchronous and a
     game session is process-global state, so a `launch` blocking for five
@@ -1147,19 +1232,30 @@ def log_since(name: str, offset: int = 0, contains: str | None = None) -> LogSin
     caller is told why.
     """
     cfg = _cfg()
-    since = logs_mod.read_since(cfg.tml_dir, name, offset=offset)
+    since = logs_mod.read_since(
+        cfg.tml_dir,
+        name,
+        offset=offset,
+        fingerprint=fingerprint,
+        limit=_LOG_SINCE_LIMIT,
+    )
 
-    # The cap is however many lines arrived, which is no cap at all - reused
-    # rather than reimplemented so the `contains` filter behaves identically to
-    # `logs`. Truncating here would drop the middle of a burst while still
-    # advancing the offset past it: log lost, with a resume point claiming
-    # otherwise. `or 1` only covers the empty read, where either value returns
-    # nothing.
+    # Within one chunk every line is returned - the tail's cap is however many
+    # arrived, reused rather than reimplemented so the `contains` filter
+    # behaves identically to `logs`. The BYTE limit above is what bounds the
+    # answer, and it is safe where a line cap here was not: `read_since` cuts
+    # at a line boundary and hands back a `next_offset` that resumes exactly
+    # there, so nothing is dropped - `truncated` says the rest is waiting. A
+    # single uncapped call once returned a whole session's log, tens of MB,
+    # as one MCP response. `or 1` only covers the empty read, where either
+    # value returns nothing.
     new_lines = since.text.splitlines()
     return LogSinceOut(
         lines=logs_mod.tail(since.text, contains=contains, lines=len(new_lines) or 1),
         next_offset=since.next_offset,
         restarted=since.restarted,
+        fingerprint=since.fingerprint,
+        truncated=since.truncated,
     )
 
 
@@ -1168,6 +1264,7 @@ def log_since(name: str, offset: int = 0, contains: str | None = None) -> LogSin
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def api_search(query: str, kind: str | None = None, limit: int = 40) -> ApiSearchOut:
     """Find a type, field, property or method in the INSTALLED tModLoader.
 
@@ -1210,10 +1307,12 @@ def api_search(query: str, kind: str | None = None, limit: int = 40) -> ApiSearc
     annotations=_READ_ONLY,
     structured_output=True,
 )
+@_serialized
 def log_watch(
     name: str,
     contains: str,
     offset: int = 0,
+    fingerprint: str | None = None,
     timeout: float = 60.0,
     poll: float = 1.0,
 ) -> LogWatchOut:
@@ -1228,6 +1327,9 @@ def log_watch(
             usually what you want ("did the mod load" is a question about a
             line that is already there). Pass a previous call's `next_offset`
             to watch only what comes after it.
+        fingerprint: The `fingerprint` from an earlier `log_since`/`log_watch`,
+            when resuming — see `log_since` for the rotation it catches.
+            Within one call the polls carry it themselves.
         timeout: Seconds for the WHOLE call, spent across every poll.
         poll: Seconds between reads.
 
@@ -1248,7 +1350,13 @@ def log_watch(
     """
     cfg = _cfg()
     got = logs_mod.watch_for(
-        cfg.tml_dir, name, contains=contains, offset=offset, timeout=timeout, poll=poll
+        cfg.tml_dir,
+        name,
+        contains=contains,
+        offset=offset,
+        fingerprint=fingerprint,
+        timeout=timeout,
+        poll=poll,
     )
     return LogWatchOut(
         matched=got.matched,
@@ -1257,6 +1365,7 @@ def log_watch(
         restarted=got.restarted,
         elapsed=got.elapsed,
         polls=got.polls,
+        fingerprint=got.fingerprint,
     )
 
 
@@ -1265,6 +1374,7 @@ def log_watch(
     annotations=_MUTATES,
     structured_output=True,
 )
+@_serialized
 def restart(
     build: bool = True, timeout: float = 300.0, build_timeout: float = 600.0
 ) -> RestartOut:
@@ -1344,6 +1454,7 @@ def restart(
     annotations=_DESTRUCTIVE,
     structured_output=True,
 )
+@_serialized
 def stop(settle: float = session_mod.KILL_SETTLE) -> StopOut:
     """Kill only the processes this session started, and confirm they are gone.
 

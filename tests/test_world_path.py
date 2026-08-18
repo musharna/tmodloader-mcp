@@ -12,7 +12,9 @@ import pytest
 
 from tmodloader_mcp.session import world_problem
 
-WINDOWS_WORLD = r"C:\Users\a2b32\Documents\My Games\Terraria\tModLoader\Worlds\Test.wld"
+WINDOWS_WORLD = (
+    r"C:\Users\someone\Documents\My Games\Terraria\tModLoader\Worlds\Test.wld"
+)
 
 
 def test_a_windows_world_file_is_accepted():
@@ -27,7 +29,7 @@ def test_a_wsl_path_is_refused_and_says_why():
     five minutes later blaming the heartbeat.
     """
     problem = world_problem(
-        "/mnt/c/Users/user/Documents/My Games/Terraria/tModLoader/Worlds"
+        "/mnt/c/Users/someone/Documents/My Games/Terraria/tModLoader/Worlds"
     )
     assert problem is not None
     assert "windows" in problem.lower()
@@ -41,7 +43,7 @@ def test_a_directory_is_refused_even_when_it_is_a_windows_path():
     starts and never loads anything.
     """
     problem = world_problem(
-        r"C:\Users\a2b32\Documents\My Games\Terraria\tModLoader\Worlds"
+        r"C:\Users\someone\Documents\My Games\Terraria\tModLoader\Worlds"
     )
     assert problem is not None
     assert ".wld" in problem

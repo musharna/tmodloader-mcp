@@ -269,8 +269,13 @@ namespace TModLoaderMcp.DevBridge
 				return false;
 			}
 
-			if (width * height > MaxArea) {
-				problem = width + " by " + height + " is " + (width * height) +
+			// The product in 64 bits, because the cap is what makes these verbs
+			// safe and 32-bit arithmetic is how a cap lies: 65536 x 65536 is
+			// 2^32, which IS zero as an int, and every product past 2^31 goes
+			// negative - both sail under any limit. A request that wraps the
+			// multiplication is precisely the request the limit exists to stop.
+			if ((long)width * height > MaxArea) {
+				problem = width + " by " + height + " is " + ((long)width * height) +
 					" tiles, past the limit of " + MaxArea + " one query may scan";
 				return false;
 			}
@@ -322,8 +327,10 @@ namespace TModLoaderMcp.DevBridge
 				return false;
 			}
 
-			if (width * height > MaxArea) {
-				problem = width + " by " + height + " is " + (width * height) +
+			// (long), for the reason TryResolveArea states: a product that wraps
+			// 32 bits reads as small or negative and walks straight past the cap.
+			if ((long)width * height > MaxArea) {
+				problem = width + " by " + height + " is " + ((long)width * height) +
 					" tiles, past the limit of " + MaxArea + " one request may place";
 				return false;
 			}

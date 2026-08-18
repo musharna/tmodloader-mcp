@@ -60,10 +60,16 @@ from .triggers import (
 #: The COMMAND LINE is the only thing that distinguishes them, and only CIM
 #: exposes it. Both of these are lessons the shell harness had already learned
 #: and written down; this reimplemented them wrongly before reading it.
+#: One line per process: the pid, a space, then the creation time as a Windows
+#: FILETIME. The creation time is what pins a kill to the PROCESS rather than
+#: to the number: Windows recycles pids aggressively, so a session's client
+#: that died on its own could hand its pid to the developer's own hand-started
+#: game, and a `stop` that matched on the number alone would taskkill it - the
+#: one outcome this module's docstring promises against.
 _PID_QUERY = (
     "Get-CimInstance Win32_Process -Filter \"Name='dotnet.exe'\" | "
     "Where-Object { $_.CommandLine -like '*tModLoader.dll*' } | "
-    "ForEach-Object { $_.ProcessId }"
+    'ForEach-Object { "$($_.ProcessId) $($_.CreationDate.ToFileTimeUtc())" }'
 )
 
 #: The eight bytes every PNG begins with.
@@ -76,20 +82,40 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _PNG_TRAILER = b"\x00\x00\x00\x00IEND\xaeB`\x82"
 
 
-def parse_pids(text: str) -> set[int]:
-    """Pull pids out of the query's output.
+def parse_pid_stamps(text: str) -> dict[int, str]:
+    """Pull (pid, creation stamp) pairs out of the query's output.
 
-    Split out so the parsing is testable without Windows. An empty result is
-    ambiguous by nature - no games running, or a query that broke - so callers
-    that need to tell those apart must have a positive control, exactly as the
-    shell harness does.
+    Split out so the parsing is testable without Windows. A line holding only
+    a pid - the old query's format, or a process whose CreationDate could not
+    be read - carries an EMPTY stamp, which `_same_process` treats as
+    matching anything: an unknown creation time weakens the pin back to the
+    old pid-only behaviour rather than refusing to kill what this session
+    genuinely started.
     """
-    pids: set[int] = set()
+    stamps: dict[int, str] = {}
     for line in text.replace("\r", "").split("\n"):
-        stripped = line.strip()
-        if stripped.isdigit():
-            pids.add(int(stripped))
-    return pids
+        parts = line.split()
+        if parts and parts[0].isdigit():
+            stamps[int(parts[0])] = parts[1] if len(parts) > 1 else ""
+    return stamps
+
+
+def parse_pids(text: str) -> set[int]:
+    """Just the pids, for callers that only ask WHETHER something runs."""
+    return set(parse_pid_stamps(text))
+
+
+def _same_process(recorded: str | None, current: str | None) -> bool:
+    """Whether a pid seen now is the process this session recorded.
+
+    True when either stamp is unknown - an old-format record, a CreationDate
+    the query could not read - because the pin exists to stop a WRONG kill,
+    and refusing a right one on missing metadata would leave orphans holding
+    the .tmod against the next build.
+    """
+    if not recorded or not current:
+        return True
+    return recorded == current
 
 
 #: Terraria has no headless singleplayer entry point. Measured, not assumed:
@@ -202,22 +228,64 @@ class SlotBusy(RuntimeError):
     """
 
 
-def _tml_pids(cfg: Config) -> set[int]:
-    """Every tModLoader pid Windows currently reports."""
+def _pid_table(cfg: Config) -> dict[int, str] | None:
+    """Every tModLoader pid Windows currently reports, with creation stamps -
+    or None when the QUERY broke, which is a different answer from "none".
+
+    None matters because an empty set is ambiguous by nature, and treating a
+    broken query as an empty one is how `stop` once became a no-op reported
+    as success: aimed at nothing, killing nothing, releasing a session that
+    left a running game owned by nobody. `parse_pids`'s old docstring said
+    callers that need to tell those apart must have a positive control; this
+    IS that control, moved to where every caller gets it.
+    """
     try:
-        out = subprocess.run(
+        done = subprocess.run(
             [str(cfg.powershell), "-NoProfile", "-Command", _PID_QUERY],
             capture_output=True,
             text=True,
             timeout=60,
-            # An empty pid list is a legitimate answer (no game running), so a
-            # non-zero exit is parsed rather than raised.
             check=False,
-        ).stdout
+        )
     except (OSError, subprocess.SubprocessError):
-        return set()
+        return None
 
-    return parse_pids(out)
+    # An empty pid list is a legitimate answer (no game running), but only
+    # from a query that RAN. PowerShell exits non-zero when the pipeline
+    # itself failed, and parsing that as "no games" is the silent no-op above.
+    if done.returncode != 0:
+        return None
+
+    return parse_pid_stamps(done.stdout)
+
+
+def _tml_pids(cfg: Config) -> set[int]:
+    """Every tModLoader pid, or a refusal naming the broken query.
+
+    Raises rather than returning empty on failure, because every caller of
+    THIS form goes on to act on the answer - refuse a launch, kill a pid,
+    copy a save - and acting on "no games" when the truth is "no answer" is
+    worse than stopping: see `_pid_table`.
+    """
+    table = _pid_table(cfg)
+    if table is None:
+        raise SessionError(
+            "the tModLoader process query failed, so whether a game is "
+            "running is unknown. Nothing was acted on. Check that "
+            "powershell.exe is reachable from this environment and retry."
+        )
+    return set(table)
+
+
+def _tml_pids_or_empty(cfg: Config) -> set[int]:
+    """The tolerant form, for cleanup paths already handling a worse failure.
+
+    A launch that failed is being unwound when this runs; raising here would
+    REPLACE the error that explains why. The cost is bounded: at worst the
+    unwind kills nothing, which is exactly what the strict form's raise would
+    have done, minus the shadowed diagnosis.
+    """
+    return set(_pid_table(cfg) or {})
 
 
 def _next_capture_index(drop: Path) -> int:
@@ -275,7 +343,12 @@ def _claim_atomically(path: Path, text: str) -> None:
     """
     staged = path.with_name(f"{path.name}.{uuid.uuid4().hex[:12]}.staging")
     try:
-        staged.write_text(text)
+        # UTF-8 by name, not by locale: the C# side reads these bytes as
+        # UTF-8, and `write_text`'s default is whatever the environment says.
+        # On WSL those coincide; a non-UTF-8 locale plus a non-ASCII target
+        # would compose a request no client's comparison ever matches - a
+        # wedged slot with nothing visibly wrong in it.
+        staged.write_text(text, encoding="utf-8")
         try:
             os.link(staged, path)
         except FileExistsError as taken:
@@ -305,7 +378,7 @@ def _pending_payload(trigger: Path) -> str | None:
     two sides reach the same verdict on the same bytes.
     """
     try:
-        return trigger.read_text(errors="replace")
+        return trigger.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
 
@@ -355,21 +428,35 @@ def _break_stale_lock(lock: Path) -> Broken | None:
     carried over there.
 
     THE RETURN IS "DID THIS CALL REMOVE IT", not merely "was it stale". The
-    holder may release between the stat and the unlink - a race this function
-    WINS by doing nothing further - and that race's `FileNotFoundError` used
-    to be swallowed the same way a permission failure is, with the age handed
-    back regardless of which happened. That age reaches a caller as "a stale
-    capture lock was broken to take this capture", and in that interleaving
-    nothing here broke anything - the holder finished on its own. Saying so
-    anyway would be a false claim about a judgement call nobody made. So the
-    unlink's own outcome decides the answer, not just the stat that preceded
-    it.
+    holder may release between the stat and the removal - a race this function
+    WINS by doing nothing further - so the removal's own outcome decides the
+    answer, not just the stat that preceded it.
+
+    THE REMOVAL IS A RENAME, VERIFIED, AND ONLY THEN A DELETE - not a bare
+    unlink, because unlink-by-name breaks whatever holds the name NOW rather
+    than the lock this call judged. Two waiters both stat one stale lock and
+    both decide "expired"; A unlinks and immediately re-claims; B's unlink
+    then removes A's brand-new, valid lock, and both sessions capture at once
+    - the very same-second collision the lock exists to prevent, produced by
+    its own recovery path. The rename takes exactly the inode that was at the
+    name, atomically; the mtime check then answers "is this the lock I
+    judged", which a fresh claim can never pass, its mtime being now and the
+    judgement requiring old.
+
+    One residual, documented rather than closed: when the verify says "not
+    mine" the fresh lock is put back with `os.link`, which refuses an
+    occupied name - and if a third session claimed the freed name in that
+    same instant, the fresh lock cannot go back without clobbering theirs.
+    That interleaving needs a stale lock, three contenders and sub-millisecond
+    timing, and costs the bounded failure - one collision - which is the
+    price this mechanism already accepts everywhere else.
     """
     try:
-        age = time.time() - lock.stat().st_mtime
+        judged = lock.stat().st_mtime
     except OSError:
         return None
 
+    age = time.time() - judged
     deadline = _lock_deadline(lock)
     if deadline is None:
         expired = age > CAPTURE_LOCK_STALE
@@ -383,22 +470,44 @@ def _break_stale_lock(lock: Path) -> Broken | None:
         # sessions until somebody deletes a file - trading this mechanism's
         # bounded failure, a collision, for an unbounded one. The cap is
         # anchored to the mtime rather than to now, because an anchor that
-        # moves with the reader can always be outrun.
+        # moves with the reader can always be outrun. The mtime is the one
+        # already read above, NOT a second stat: the holder can release
+        # between the two, and the second stat's FileNotFoundError escaped
+        # this function as a raw exception on the exact race it documents
+        # itself winning.
         expired = time.time() > (
-            min(deadline, lock.stat().st_mtime + CAPTURE_LOCK_MAX) + CAPTURE_LOCK_GRACE
+            min(deadline, judged + CAPTURE_LOCK_MAX) + CAPTURE_LOCK_GRACE
         )
 
     if not expired:
         return None
 
+    condemned = lock.with_name(f"{lock.name}.{uuid.uuid4().hex[:12]}.breaking")
     try:
-        lock.unlink()
+        lock.rename(condemned)
     except OSError:
-        # Gone already (the race above), or some other removal failure - either
-        # way this call did not perform the break, so it does not get to claim
-        # one. `_claim_capture`'s retry is unaffected: the lock is not held
-        # either way, so retrying is correct on both branches of this except.
+        # Gone already (the holder released, or another breaker won), or some
+        # other failure - either way this call did not perform the break, so
+        # it does not get to claim one. `_claim_capture`'s retry is
+        # unaffected: retrying is correct on both branches.
         return None
+
+    try:
+        held = condemned.stat().st_mtime
+    except OSError:
+        held = None
+
+    if held is not None and held != judged:
+        # Not the lock this call judged: somebody else broke the stale one and
+        # re-claimed between the stat and the rename. Put the fresh lock back
+        # where its holder believes it is - link refuses an occupied name, so
+        # a put-back can never clobber a newer claim (the residual above).
+        with contextlib.suppress(OSError):
+            os.link(condemned, lock)
+        condemned.unlink(missing_ok=True)
+        return None
+
+    condemned.unlink(missing_ok=True)
     return Broken(age=age, by_deadline=deadline is not None)
 
 
@@ -433,7 +542,7 @@ def _lock_deadline(lock: Path) -> float | None:
     the caller falls back to `CAPTURE_LOCK_STALE`.
     """
     try:
-        lines = lock.read_text(errors="replace").splitlines()
+        lines = lock.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
 
@@ -462,7 +571,7 @@ def _write_stamp(stamp: Path, when: float) -> None:
     collision, and raising here would cost a capture that already succeeded.
     """
     with contextlib.suppress(OSError):
-        stamp.write_text(f"{when:.6f}")
+        stamp.write_text(f"{when:.6f}", encoding="utf-8")
 
 
 def _release_capture(lock: Path, stamp: Path, *, when: float) -> OSError | None:
@@ -509,9 +618,19 @@ def _stamp_wait(stamp: Path, *, now: float) -> float:
     unreadable one, one that does not parse, one whose second has passed.
     This is an optimisation for a case that has to be observed to matter, and
     it is never a reason to refuse or to stall.
+
+    A STATED ASSUMPTION rather than a guarantee: the second being missed is
+    TERRARIA's - a Windows process reading Windows wall clock - while `now`
+    is WSL's. Waiting to the next `time.time()` boundary crosses a Windows
+    second boundary only insofar as the two clocks' fractional offsets align,
+    and that alignment is unmeasured (the ~0.45s figure in
+    CAPTURE_LOCK_GRACE is DrvFs MTIME skew, a different clock again). A
+    fractional offset shrinks the wait this buys; the miss costs one
+    collision, the bounded failure this whole mechanism accepts, so the
+    guarantee is probabilistic and is priced accordingly.
     """
     try:
-        recorded = float(stamp.read_text(errors="replace").strip())
+        recorded = float(stamp.read_text(encoding="utf-8", errors="replace").strip())
     except (OSError, ValueError):
         return 0.0
 
@@ -575,12 +694,44 @@ def _release_trigger(cfg: Config, *, player: str | None, port: int | None) -> No
     no character name - so this session would leave its OWN pending server
     request behind on every launch, which is the opposite failure to the one
     the address was added to fix.
+
+    WITHDRAWN BY RENAME, RE-CHECKED, ONLY THEN DELETED. The plain shape -
+    read, decide, unlink - has a window between the decision and the unlink
+    in which the game can consume the request and ANOTHER session claim the
+    slot, so the unlink lands on a fresh request that was never this
+    session's: the lost update `_claim_atomically` exists to prevent,
+    reintroduced by the cleanup. The rename takes exactly one inode
+    atomically; re-reading the RENAMED file re-asks the ownership question of
+    the thing actually taken, and one that turns out to be somebody else's
+    goes back via `os.link`, which refuses an occupied name rather than
+    clobbering a newer claim. Same shape, same residual, and same bounded
+    cost as `_break_stale_lock`'s put-back.
     """
     addressees = {False: player, True: server_address(port)}
     for server in (False, True):
         trigger = cfg.artifact(cfg.artifacts.trigger, server=server)
-        if _is_ours_to_clear(_pending_payload(trigger), addressee=addressees[server]):
-            trigger.unlink(missing_ok=True)
+        if not _is_ours_to_clear(
+            _pending_payload(trigger), addressee=addressees[server]
+        ):
+            continue
+
+        condemned = trigger.with_name(
+            f"{trigger.name}.{uuid.uuid4().hex[:12]}.releasing"
+        )
+        try:
+            trigger.rename(condemned)
+        except OSError:
+            # Gone already - consumed by the game, or the other session's
+            # cleanup won. Either way there is nothing left to release.
+            continue
+
+        if not _is_ours_to_clear(
+            _pending_payload(condemned), addressee=addressees[server]
+        ):
+            with contextlib.suppress(OSError):
+                os.link(condemned, trigger)
+
+        condemned.unlink(missing_ok=True)
 
 
 #: The orderings, keyed as a caller writes them.
@@ -764,6 +915,11 @@ class Session:
     #: configured default for the world that was asked for.
     world: str | None = None
     started: set[int] = field(default_factory=set)
+    #: Creation stamps for `started`, as {pid: FILETIME string}, recorded at
+    #: adoption. What lets `stop` tell "the pid this session started" from
+    #: "the same number, recycled onto somebody else's game" - see _PID_QUERY.
+    #: A pid with no stamp here matches anything, which is the old behaviour.
+    stamps: dict[int, str] = field(default_factory=dict)
     #: Characters brought in by `join`, in the order they arrived. NOT
     #: including `player`, which is this session's own and came up with
     #: `launch` - the two are different things to a reader, and folding them
@@ -901,10 +1057,10 @@ class Session:
         request their own server left on its own trigger.
         """
         try:
-            pending = trigger.read_text().strip()
+            pending = trigger.read_text(encoding="utf-8", errors="replace").strip()
             age = time.time() - trigger.stat().st_mtime
             held = f"{pending!r}, {age:.0f}s old"
-        except (OSError, UnicodeDecodeError):
+        except OSError:
             pending = None
             held = "a request that vanished while it was being read"
 
@@ -964,9 +1120,9 @@ class Session:
         sitting there. That is the expected shape of a retry here, not a stall.
         """
         try:
-            pending = trigger.read_text().strip()
+            pending = trigger.read_text(encoding="utf-8", errors="replace").strip()
             held = f"{pending!r}"
-        except (OSError, UnicodeDecodeError):
+        except OSError:
             held = "its own request"
 
         return (
@@ -978,7 +1134,14 @@ class Session:
             "of its own still pending, which is expected rather than stuck."
         )
 
-    def _claim(self, trigger: Path, payload: str, *, timeout: float) -> float:
+    def _claim(
+        self,
+        trigger: Path,
+        payload: str,
+        *,
+        timeout: float,
+        withdraw_if_late: bool = False,
+    ) -> float:
         """Take the trigger slot, and return what is LEFT of `timeout`.
 
         Returning the remainder rather than swallowing it is the whole point:
@@ -990,6 +1153,19 @@ class Session:
         request rather than somebody else's. Handing that case `_busy_message`
         would tell the caller to go remove their own live request by hand, so
         it gets its own message and its own trigger is left exactly as claimed.
+
+        EXCEPT FOR A CAPTURE, which is what `withdraw_if_late` says. Leaving
+        the request claimed is right for everything else - the game may still
+        serve it, and withdrawing would be the lost update. For a capture it
+        is the unserialised-capture hole: the caller's `finally` is about to
+        release the lock and stamp NOW, and a request served later produces a
+        PNG with no lock held, in a second past the stamp. So a capture claim
+        that wins with no budget left takes its own request back off the
+        trigger - its own payload, verified before the unlink - and fails
+        saying nothing is on disk. The verify-then-unlink window (the game
+        consumes, another session claims, all inside microseconds against a
+        0.5s poll) is the residual, and its cost is the other session's
+        timeout-and-retry rather than a collision.
         """
         deadline = time.monotonic() + timeout
         while True:
@@ -1003,8 +1179,38 @@ class Session:
                 continue
             remaining = max(0.0, deadline - time.monotonic())
             if remaining < CLAIM_POLL:
-                raise TriggerError(self._claimed_out_of_time_message(trigger, timeout))
+                if not withdraw_if_late:
+                    raise TriggerError(
+                        self._claimed_out_of_time_message(trigger, timeout)
+                    )
+
+                withdrawn = self._withdraw_own_claim(trigger, payload)
+                raise TriggerError(
+                    f"the {timeout:g}s timeout ran out in the instant after the "
+                    "trigger claim won, leaving no time to wait for a reply. "
+                    + (
+                        "The request was withdrawn: NOTHING of it is on disk, "
+                        "no picture will be taken, and the capture lock is "
+                        "released on the way out. Retry with a longer timeout."
+                        if withdrawn
+                        else "The game consumed the request before it could be "
+                        "withdrawn, so a picture may still land - its second "
+                        "is stamped on the way out, and the next capture "
+                        "waits it out as usual. Retry with a longer timeout."
+                    )
+                )
             return remaining
+
+    def _withdraw_own_claim(self, trigger: Path, payload: str) -> bool:
+        """Take this session's own just-claimed request back, if it is still
+        there to take. True when the trigger held `payload` and was removed."""
+        if _pending_payload(trigger) != payload:
+            return False
+        try:
+            trigger.unlink()
+        except OSError:
+            return False
+        return True
 
     def _capture_busy_message(self, lock: Path, timeout: float) -> str:
         try:
@@ -1244,11 +1450,23 @@ class Session:
         if target is None:
             target = self.address if server else self.player
 
+        # A REQUEST ID, WHEN THE RESPONDER SAYS IT ECHOES ONE. The reply file
+        # is named per player, not per request, so without a correlator a
+        # reply arriving late - to a request that timed out after the mod
+        # consumed its trigger - lands on the very file the NEXT request
+        # waits at, and that caller reads the previous answer as its own.
+        # Gated on the published capability rather than sent always, because
+        # an older vendored responder would read the suffix as part of a
+        # target and the request would match nobody - see CommandSet.
+        published = self.commands(server=server)
+        request_id = f"r-{uuid.uuid4().hex[:12]}" if published.tagged_replies else None
+
         payload = compose(
             command,
             target=target,
             argument=argument,
-            commands=self.commands(server=server),
+            commands=published,
+            request_id=request_id,
         )
 
         trigger = self.path(self.cfg.artifacts.trigger, server=server)
@@ -1282,9 +1500,14 @@ class Session:
                 timeout, note = self._claim_capture(lock, stamp, timeout=timeout)
                 held = True
 
-            remaining = self._claim(trigger, payload, timeout=timeout)
+            remaining = self._claim(
+                trigger, payload, timeout=timeout, withdraw_if_late=capturing
+            )
             text = self._await_text(
-                result, timeout=remaining, what=f"reply to {payload!r}"
+                result,
+                timeout=remaining,
+                what=f"reply to {payload!r}",
+                tag=request_id,
             )
         finally:
             if held:
@@ -1388,8 +1611,16 @@ class Session:
 
         # Numbered first so a listing sorts into capture order, and the region
         # kept so a directory of these is readable without a log beside it.
+        #
+        # THE REGION IS SLUGGED THE WAY THE MOD SLUGS IT - separators dropped,
+        # lowercased - not written as typed. The mod accepts `top-left` and
+        # `TOP LEFT` as spellings of `topleft`, but `capture_pattern` reads the
+        # trailing field as `[a-z]+`, so a filename carrying the raw spelling
+        # was a capture `captures`/`read_capture` could never see again: taken,
+        # reported, and invisible - a silent disappearance, not an error.
+        slug = re.sub(r"[^a-z]+", "", region.lower()) or "region"
         index = _next_capture_index(drop)
-        kept = drop.with_name(f"{drop.stem}-{index:03d}-{region}{drop.suffix}")
+        kept = drop.with_name(f"{drop.stem}-{index:03d}-{slug}{drop.suffix}")
         drop.replace(kept)
         return kept
 
@@ -1557,7 +1788,18 @@ class Session:
         self._await_file(path, timeout=timeout, what=what)
 
         while time.monotonic() < deadline:
-            data = path.read_bytes()
+            try:
+                data = path.read_bytes()
+            except OSError:
+                # The writer opens this file with FileShare.None, and DrvFs
+                # enforces Windows share modes - so a read landing inside the
+                # write window is EACCES here, not a short read. That is "still
+                # being written" wearing an exception, and it is waited out the
+                # same way a truncated PNG is; escaping raw, it failed shots
+                # that completed milliseconds later.
+                time.sleep(0.2)
+                continue
+
             if data.startswith(_PNG_SIGNATURE):
                 if data.endswith(_PNG_TRAILER):
                     return
@@ -1577,7 +1819,9 @@ class Session:
             "picture that opens as a broken one."
         )
 
-    def _await_text(self, path: Path, *, timeout: float, what: str) -> str:
+    def _await_text(
+        self, path: Path, *, timeout: float, what: str, tag: str | None = None
+    ) -> str:
         """Read a file once it has STOPPED CHANGING, not once it exists.
 
         A file appears when it is created, not when it is written, so this used
@@ -1594,22 +1838,50 @@ class Session:
         answer. The mod has no command that legitimately replies with nothing,
         so emptiness here means the writer got as far as creating the file - and
         returning "" would be the same torn read wearing different clothes.
+
+        `tag` is the request id this reply must ECHO, or None for a file that
+        carries no correlation - the diag dump, and every reply from a
+        responder that does not tag. With one, a stable answer whose first
+        line is not `#<tag>` is STALE rather than wrong: the late reply to an
+        earlier timed-out request, landing on the per-player file this call
+        is watching. It is waited past, not returned - the responder
+        overwrites the whole file when it answers the request actually being
+        waited on - and a timeout that saw one says so, because "the game
+        answered somebody else" and "the game said nothing" send a reader to
+        different places.
         """
         deadline = time.monotonic() + timeout
         self._await_file(path, timeout=timeout, what=what)
 
-        previous = path.read_text(errors="replace")
+        expected = None if tag is None else f"#{tag}"
+        stale_seen = False
+
+        previous = path.read_text(encoding="utf-8", errors="replace")
         while time.monotonic() < deadline:
             time.sleep(0.2)
-            current = path.read_text(errors="replace")
+            current = path.read_text(encoding="utf-8", errors="replace")
             if current == previous and current != "":
-                return current
+                if expected is None:
+                    return current
+                head, _, rest = current.partition("\n")
+                if head == expected:
+                    # The echo is transport, not answer: stripped here so no
+                    # caller ever parses `ok` off a line the mod prepended.
+                    return rest
+                stale_seen = True
             previous = current
 
+        overheard = (
+            " A stable reply carrying a DIFFERENT request id sat there during "
+            "the wait - an earlier timed-out request's answer arriving late - "
+            "and was not returned as this one's."
+            if stale_seen
+            else ""
+        )
         raise TriggerError(
             f"the {what} at {path} was still being written after {timeout:.0f}s "
             "(its contents kept changing, or it stayed empty). Nothing there is "
-            "safe to read as an answer."
+            f"safe to read as an answer.{overheard}"
         )
 
 
@@ -1693,7 +1965,20 @@ def _heartbeat_ready(path: Path) -> bool:
     what the answer means - so the predicate is shared and the candidate sets
     are not.
     """
-    return heartbeat_is_live(path) and world_is_ready(path.read_text(errors="replace"))
+    if not heartbeat_is_live(path):
+        return False
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        # Deleted or locked between the liveness check and the read - another
+        # launch's stale-artifact clear taking the unsuffixed slot, most
+        # likely. Not-ready-yet is the honest answer; escaping raw, this
+        # aborted a five-minute launch over a transient the next poll would
+        # never have seen.
+        return False
+
+    return world_is_ready(text)
 
 
 def _clear_stale_artifacts(
@@ -1957,7 +2242,12 @@ def launch(
         # BaseException rather than Exception: a KeyboardInterrupt or a timeout
         # during a five-minute wait is exactly when this matters most, and those
         # do not derive from Exception.
-        session.started = _tml_pids(cfg) - existing
+        # Tolerant of a broken query HERE, unlike everywhere else: this is the
+        # unwind of a launch that already failed, and raising would replace
+        # the error that explains why - see _tml_pids_or_empty.
+        salvage = _pid_table(cfg) or {}
+        session.started = set(salvage) - existing
+        session.stamps = {pid: salvage[pid] for pid in session.started}
         try:
             stop(cfg, session)
         except SessionError as leak:
@@ -1971,7 +2261,28 @@ def launch(
             failure.add_note(str(leak))
         raise
 
-    session.started = _tml_pids(cfg) - existing
+    # THE ADOPTION WINDOW IS A STATED LIMIT of the pid diff: anything that
+    # started tModLoader during the wait - up to `timeout` seconds - lands in
+    # this set, including a developer opening their own game mid-launch, and
+    # `stop` will later kill it. The creation stamps recorded beside the pids
+    # pin `stop` to these processes; they cannot pin the diff to OUR spawns,
+    # because nothing but the command line distinguishes those, and matching
+    # command lines across the interop boundary is a guess this module has
+    # been burned by before. Raises rather than owning nothing when the query
+    # breaks at this one moment: a session claiming pids it never read would
+    # make `stop` a silent no-op, which is the worse lie.
+    table = _pid_table(cfg)
+    if table is None:
+        raise SessionError(
+            "the game launched and became ready, but the process query failed "
+            "before this session could record what it started - so nothing "
+            "owns those processes and `stop` cannot find them. Close the game "
+            "by hand (or fix powershell.exe and launch again); the next "
+            "launch refuses while any tModLoader is running."
+        )
+
+    session.started = set(table) - existing
+    session.stamps = {pid: table[pid] for pid in session.started}
     return session
 
 
@@ -2082,7 +2393,8 @@ def join(
         # today. Aimed at a throwaway session holding only what THIS call
         # started, so a failed join cannot take down the client that was
         # already running.
-        stranded = _tml_pids(cfg) - before
+        stranded_table = _pid_table(cfg) or {}
+        stranded = set(stranded_table) - before
         if stranded:
             try:
                 stop(
@@ -2094,6 +2406,7 @@ def join(
                         player=player,
                         world=session.world,
                         started=stranded,
+                        stamps={pid: stranded_table[pid] for pid in stranded},
                     ),
                 )
             except SessionError as leak:
@@ -2104,7 +2417,20 @@ def join(
                 failure.add_note(str(leak))
         raise
 
-    session.started |= _tml_pids(cfg) - before
+    # Strict for `launch`'s reason: a joined client this session cannot find
+    # later is a game nothing owns.
+    table = _pid_table(cfg)
+    if table is None:
+        raise SessionError(
+            "the client joined and became ready, but the process query failed "
+            "before this session could record its pid - so `stop` cannot find "
+            "it. Close that client by hand, or fix powershell.exe and retry "
+            "the join under a fresh session."
+        )
+
+    arrived = set(table) - before
+    session.started |= arrived
+    session.stamps.update({pid: table[pid] for pid in arrived})
     session.joined.append(player)
     return session
 
@@ -2289,8 +2615,35 @@ def stop(
     if session is None:
         return []
 
-    live = _tml_pids(cfg)
-    aimed = sorted(session.started & live)
+    # Strict: a broken query here must NOT read as "nothing to kill". It did -
+    # aimed at nothing, killed nothing, returned [] as success, and the caller
+    # released a session that left a running game owned by nobody. The session
+    # is untouched on this raise, so `stop` retries cleanly.
+    table = _pid_table(cfg)
+    if table is None:
+        raise SessionError(
+            "the process query failed, so whether this session's game is "
+            "still running is unknown. Nothing was killed and the session is "
+            "kept - fix powershell.exe (or check the machine's load) and call "
+            "`stop` again."
+        )
+
+    # A live pid is aimed at only when its CREATION TIME matches the one
+    # recorded at adoption. Windows recycles pids, so a session client that
+    # died on its own can hand its number to the developer's own hand-started
+    # game - and killing by number alone would take it. A recycled pid's
+    # original process is dead, which is this function's definition of done,
+    # so it simply leaves the set.
+    recycled = {
+        pid
+        for pid in session.started & set(table)
+        if not _same_process(session.stamps.get(pid), table.get(pid))
+    }
+    session.started -= recycled
+    for pid in recycled:
+        session.stamps.pop(pid, None)
+
+    aimed = sorted(session.started & set(table))
 
     for pid in aimed:
         try:
@@ -2315,14 +2668,33 @@ def stop(
     # The poll never outlasts what is left of the settle, so the loop cannot
     # overshoot its own bound and cannot spin: every iteration either sleeps or
     # ends.
+    #
+    # Survivors are stamp-checked the same way `aimed` was: Windows can hand a
+    # just-killed pid to a new process inside this very window, and a number
+    # that came back as somebody else is a kill that WORKED.
+    def _still_ours() -> set[int]:
+        checked = _pid_table(cfg)
+        if checked is None:
+            raise SessionError(
+                "the process query failed while verifying the stop, so which "
+                "of the killed pids are gone is unknown. The session is kept; "
+                "call `stop` again to re-verify."
+            )
+        return {
+            pid
+            for pid in aimed
+            if pid in checked
+            and _same_process(session.stamps.get(pid), checked.get(pid))
+        }
+
     deadline = time.monotonic() + settle
-    survivors = set(aimed) & _tml_pids(cfg)
+    survivors = _still_ours()
     while survivors:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         time.sleep(min(SETTLE_POLL, remaining))
-        survivors = set(aimed) & _tml_pids(cfg)
+        survivors = _still_ours()
 
     # NOT an unconditional unlink. The trigger is shared with the other
     # session, and a teardown that deleted it took that session's in-flight

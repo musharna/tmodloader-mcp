@@ -210,17 +210,31 @@ def ensure_index(cfg: Config, *, timeout: float = 300.0) -> Path:
             what="building the API indexer",
         )
 
-    _run(
-        [dotnet, str(built), str(dll), str(cached)],
-        timeout=timeout,
-        what="indexing the API",
-    )
-
-    if not cached.is_file() or cached.stat().st_size == 0:
-        raise ApiError(
-            f"the indexer reported success and wrote nothing to {cached}, so "
-            "there is no index to search"
+    # INDEXED UNDER A STAGING NAME AND RENAMED, because the validity check
+    # above is `is_file and size > 0` - which a file killed mid-write passes
+    # forever. A SIGTERM landing during the one build this cache ever gets
+    # (and `finally` does not run on SIGTERM here, measured) left a truncated
+    # index that every later call served: `parse` skips the one torn line, so
+    # api_search answered "not found" about every member in the missing tail -
+    # the misleading absence this module exists to prevent, installed
+    # permanently by the process meant to prevent it.
+    staging = cached.with_name(f"{cached.name}.{os.getpid()}.partial")
+    try:
+        _run(
+            [dotnet, str(built), str(dll), str(staging)],
+            timeout=timeout,
+            what="indexing the API",
         )
+
+        if not staging.is_file() or staging.stat().st_size == 0:
+            raise ApiError(
+                f"the indexer reported success and wrote nothing to {staging}, "
+                "so there is no index to search"
+            )
+
+        staging.replace(cached)
+    finally:
+        staging.unlink(missing_ok=True)
 
     return cached
 

@@ -158,6 +158,13 @@ decoration: the harness refuses an argument for a command that would discard
 it, and refuses a missing one for a command that needs it, so a caller learns
 from the list instead of from a round trip.
 
+**One comment line is a capability, not prose:** `# replies: tagged`, exactly
+that spelling, says this responder echoes a request id as its reply's first
+line — see [the request id](#the-request-id). It wears comment syntax because
+a comment is the one line format every parser of this file already skips: an
+older harness reading a newer responder sees nothing new at all, and a newer
+harness never sends an id to a responder that did not publish this line.
+
 Each side publishes its own list, because server-authoritative commands are not
 the same set as client ones.
 
@@ -235,6 +242,13 @@ shot                 command alone
 shot:topleft         command with an argument
 shot@n43n            addressed to one player
 shot:topleft@n43n    both
+```
+
+Any of those forms may carry a trailing **request id** — see
+[the request id](#the-request-id):
+
+```
+shot:topleft@n43n#r-3fa2b4c1d9e0
 ```
 
 Two constraints that are not optional:
@@ -323,6 +337,45 @@ completed one.
 The harness waits until the file's contents **stop changing** rather than for a
 fixed interval, and treats an empty file as still being written.
 
+### The request id
+
+The reply file is named per **player**, not per request, and that gap has a
+failure in it: a request that times out on the harness side after the mod
+consumed its trigger leaves the game still working, and the reply it
+eventually writes lands on the very file the harness's NEXT request is
+waiting at — which read the previous answer as its own. A wrong answer with
+nothing visibly wrong, and for `shot` a wrong **picture** confidently
+labeled.
+
+The correlator is a suffix on the payload and an echo on the reply:
+
+- The harness appends `#r-<hex>` to the payload — `r-` then 4–32 lowercase
+  hex characters, always LAST, after the target. It does so **only when the
+  responder published `# replies: tagged`** in its command list; an older
+  responder would read the suffix as part of a target, and a request matching
+  nobody wedges the slot.
+- A responder that consumed a request carrying an id writes the reply's
+  first line as `#` plus the id, verbatim (`#r-3fa2b4c1d9e0`), with the
+  actual reply starting on the second line. A request without an id gets the
+  unprefixed reply it always did.
+- The harness treats a stable reply whose first line is not its own echo as
+  **stale** — a late answer to an earlier request — and waits past it; the
+  responder overwrites the whole file when it answers the request actually
+  being waited on.
+
+**The grammar is narrow on purpose.** A trailing `#beef` inside a free-text
+argument is four hex characters somebody typed, and stripping it would
+silently change what `say` says — so the marker requires the `r-`, and one
+character outside lowercase hex leaves the whole tail in the payload as
+text. Strip the id from the very END of the trimmed payload, before the `@`
+split, and only when the entire tail matches; both reference parsers
+(`DevCommands.Parse` and `triggers.parse`) carry pinned tests for exactly
+this rule, because it is a grammar two languages must agree on.
+
+The id is a correlator and nothing else: it never addresses, never argues,
+and a responder that ignores it entirely is merely an older, still-supported
+responder — degraded to the pre-id ambiguity rather than broken.
+
 ## The state dump
 
 Written to `<mod>-diag-<token>.txt` (or `<mod>-diag.txt` before a character
@@ -408,8 +461,22 @@ section is about, run for the first time on 2026-08-11. What follows is
 each in turn produced two distinct files with two distinct tokens and two
 distinct sets of bytes, and neither client consumed the other's request. That
 last part is earned rather than lucky: the responder checks addressing BEFORE
-deleting the trigger, so a client that is not the addressee leaves the file
-where its owner will find it. Keep that ordering if you write your own.
+consuming the trigger, so a client that is not the addressee leaves the file
+where its owner will find it. Keep that ordering if you write your own — and
+keep it in BOTH places a trigger can be removed. The reference responder's
+pre-arm clear (the landmine defence that deletes a trigger predating this
+side's world) used to delete without looking, so a second client's first
+settled poll could destroy a request the first client was serving right then;
+it now parses first and leaves a request addressed to somebody else alone,
+simply declining to arm on that poll.
+
+**Consumption is exclusive, and a delete is not a claim.** `File.Delete`
+succeeds silently on a file somebody else just deleted, so two sides whose
+polls overlapped on an UNTARGETED request could both "successfully" consume
+it and both dispatch — two captures, or two spawns, for one ask. The
+reference responder consumes by MOVING the trigger to a private per-process
+name, which throws for the loser; do the same, or accept the double dispatch
+on untargeted requests from harnesses that still send them.
 
 **A single client does appear twice, and the second entry is a phantom.** It
 was predicted as a tokened entry beside a plain one decaying past the

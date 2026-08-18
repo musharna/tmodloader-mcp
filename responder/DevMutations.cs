@@ -318,18 +318,40 @@ namespace TModLoaderMcp.DevBridge
 				return;
 			}
 
+			// TileLoader rather than TileID.Count, the same rule spawn and give
+			// already follow: the ceiling moves when another mod loads. This one
+			// is also load-bearing in a way theirs are not - PlaceTile indexes
+			// TileID.Sets and Main.tileFrameImportant by this value, arrays
+			// sized to TileLoader.TileCount, so an id past the end is an
+			// IndexOutOfRangeException out of the dispatch rather than a refusal.
+			if (type >= TileLoader.TileCount) {
+				report("REFUSED: " + type + " is past the highest tile id this " +
+					"install has (" + (TileLoader.TileCount - 1) + "), counting " +
+					"every loaded mod's");
+				return;
+			}
+
 			int right = Math.Min(x + width, Main.maxTilesX);
 			int bottom = Math.Min(y + height, Main.maxTilesY);
 			int placed = 0;
+			int already = 0;
 			int looked = 0;
 
 			for (int i = Math.Max(0, x); i < right; i++) {
 				for (int j = Math.Max(0, y); j < bottom; j++) {
 					looked++;
+					bool was = Main.tile[i, j].HasTile &&
+						Main.tile[i, j].TileType == type;
 					WorldGen.PlaceTile(i, j, type, mute: true, forced: true, plr: -1,
 						style: 0);
 
-					if (Main.tile[i, j].HasTile && Main.tile[i, j].TileType == type) {
+					if (was) {
+						// A tile that was this type before the fill is not a
+						// placement, and counting it as one reported a fill over
+						// its own previous run as work done twice.
+						already++;
+					}
+					else if (Main.tile[i, j].HasTile && Main.tile[i, j].TileType == type) {
 						placed++;
 					}
 				}
@@ -341,7 +363,8 @@ namespace TModLoaderMcp.DevBridge
 			// return, because a tile type that cannot go where it was asked -
 			// anything needing a wall or a floor - fails per tile and would
 			// otherwise be reported as a fill that worked.
-			report("OK: placed " + placed + " tile(s) of type " + type + " over " +
+			report("OK: placed " + placed + " tile(s) of type " + type +
+				(already > 0 ? " (" + already + " already were)" : "") + " over " +
 				looked + " looked at, of the " + (width * height) + " asked for");
 		}
 
@@ -456,17 +479,46 @@ namespace TModLoaderMcp.DevBridge
 		}
 
 		/// <summary>
+		/// How wide and tall one sync packet's square may be. Packet 20 carries
+		/// its dimensions in single bytes, so anything past 255 is truncated or
+		/// garbled on the wire; 100 keeps a comfortable margin under that and
+		/// under whatever a client is willing to re-read at once.
+		/// </summary>
+		private const int SyncSquare = 100;
+
+		/// <summary>
 		/// Tell the clients which tiles changed.
 		///
 		/// A separate call from Sync because it carries a rectangle: WorldData
 		/// says nothing about tiles, and without this the clients keep drawing
 		/// and colliding with the ground that used to be there until something
 		/// else makes them re-read the section.
+		///
+		/// CLAMPED AND CHUNKED, neither of which the fill loops needed for
+		/// themselves. Clamped, because the fill clamps its WRITES to the world
+		/// and used to sync the rectangle as REQUESTED - so an edge fill made
+		/// the server serialise out-of-world tiles through 1.4's unchecked
+		/// Tilemap indexer, the exact out-of-bounds read the capture-bounds
+		/// check exists to prevent. Chunked, because a legal fill can be 16384
+		/// tiles in one row and the packet cannot carry a side past a byte.
 		/// </summary>
 		private static void SyncTiles(int x, int y, int width, int height) {
-			if (Main.netMode == NetmodeID.Server) {
-				NetMessage.SendTileSquare(-1, x, y, width, height,
-					TileChangeType.None);
+			if (Main.netMode != NetmodeID.Server) {
+				return;
+			}
+
+			int left = Math.Max(0, x);
+			int top = Math.Max(0, y);
+			int right = Math.Min(x + width, Main.maxTilesX);
+			int bottom = Math.Min(y + height, Main.maxTilesY);
+
+			for (int i = left; i < right; i += SyncSquare) {
+				for (int j = top; j < bottom; j += SyncSquare) {
+					NetMessage.SendTileSquare(-1, i, j,
+						Math.Min(SyncSquare, right - i),
+						Math.Min(SyncSquare, bottom - j),
+						TileChangeType.None);
+				}
 			}
 		}
 	}

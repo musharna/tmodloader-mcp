@@ -20,13 +20,18 @@ namespace TModLoaderMcp.DevBridge
 	public readonly struct DevRequest
 	{
 		public DevRequest(string verb, string target)
-			: this(verb, target, null) {
+			: this(verb, target, null, null) {
 		}
 
-		public DevRequest(string verb, string target, string argument) {
+		public DevRequest(string verb, string target, string argument)
+			: this(verb, target, argument, null) {
+		}
+
+		public DevRequest(string verb, string target, string argument, string id) {
 			Verb = verb;
 			Target = target;
 			Argument = argument;
+			Id = id;
 		}
 
 		/// <summary>
@@ -48,6 +53,15 @@ namespace TModLoaderMcp.DevBridge
 
 		/// <summary>Player this is addressed to, or null for "whoever finds it".</summary>
 		public readonly string Target;
+
+		/// <summary>
+		/// The request id a harness attached, or null. Echoed as the reply's
+		/// first line so a late reply to a timed-out request cannot be read as
+		/// the answer to the next one - see DevResponder.Report. Never given a
+		/// meaning beyond the echo: it does not address, does not argue, and a
+		/// payload without one is served exactly as it always was.
+		/// </summary>
+		public readonly string Id;
 
 		/// <summary>
 		/// The payload could not be read at all - as distinct from a well-formed
@@ -132,8 +146,25 @@ namespace TModLoaderMcp.DevBridge
 			// the meaning.
 			string text = raw.Trim();
 
+			// The request id comes off FIRST, from the very end, because it is
+			// appended last - after the target - by a harness that composes
+			// `verb:arg@target#r-<hex>`. The shape is deliberately unlikely as
+			// prose: a bare `#beef` inside a free-text argument is four hex
+			// characters somebody typed, and stripping it would silently change
+			// what `say` says - so the marker requires the `r-` and the tail is
+			// only taken when EVERY character after it is lowercase hex. A tail
+			// that is not an id is left exactly where it was written.
+			string id = null;
+			int hash = text.LastIndexOf('#');
+			if (hash >= 0 && IsRequestId(text, hash + 1)) {
+				id = text.Substring(hash + 1);
+				text = text.Substring(0, hash).TrimEnd();
+			}
+
 			if (text.Length == 0) {
-				return new DevRequest(DefaultVerb, null);
+				// A bare tagged trigger is still the historical bare trigger -
+				// a capture - now with an id to answer under.
+				return new DevRequest(DefaultVerb, null, null, id);
 			}
 
 			string target = null;
@@ -146,7 +177,7 @@ namespace TModLoaderMcp.DevBridge
 				// it to whichever client polled first, which is the exact failure
 				// the target exists to prevent - so it is an error instead.
 				if (target.Length == 0 || text.Length == 0) {
-					return Malformed();
+					return Malformed(id);
 				}
 			}
 
@@ -161,15 +192,44 @@ namespace TModLoaderMcp.DevBridge
 				text = text.Substring(0, colon).Trim();
 
 				if (argument.Length == 0 || text.Length == 0) {
-					return Malformed();
+					return Malformed(id);
 				}
 			}
 
-			return new DevRequest(text.ToLowerInvariant(), target, argument);
+			return new DevRequest(text.ToLowerInvariant(), target, argument, id);
 		}
 
-		private static DevRequest Malformed() {
-			return new DevRequest(null, null);
+		/// <summary>
+		/// Whether text from `from` onward is a request id: `r-` then 4 to 32
+		/// lowercase hex characters. Narrow on purpose - see the caller.
+		/// </summary>
+		private static bool IsRequestId(string text, int from) {
+			int hexAt = from + 2;
+			int hexLength = text.Length - hexAt;
+
+			if (hexAt > text.Length || text[from] != 'r' || text[from + 1] != '-') {
+				return false;
+			}
+
+			if (hexLength < 4 || hexLength > 32) {
+				return false;
+			}
+
+			for (int i = hexAt; i < text.Length; i++) {
+				char c = text[i];
+				if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+					return false;
+				}
+			}
+
+			return true;
+		}
+
+		private static DevRequest Malformed(string id = null) {
+			// The id survives a malformed payload so the ERROR naming the
+			// problem still reaches the caller who asked, rather than reading
+			// as a stale reply to them and as an answer to whoever asks next.
+			return new DevRequest(null, null, null, id);
 		}
 	}
 }

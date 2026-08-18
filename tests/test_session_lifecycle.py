@@ -126,7 +126,15 @@ class FakeWindows:
         return R()
 
     def install(self, monkeypatch) -> None:
-        monkeypatch.setattr(session_mod, "_tml_pids", lambda cfg: set(self.live))
+        # `_pid_table` is the one primitive every pid question routes through
+        # now - `_tml_pids` and the stamp checks all derive from it, so a fake
+        # patched one level up would leave the derived paths asking the real
+        # machine. Empty stamps, deliberately: an unknown creation time
+        # matches anything (see `_same_process`), which is the exact pre-stamp
+        # behaviour these lifecycle tests pin.
+        monkeypatch.setattr(
+            session_mod, "_pid_table", lambda cfg: {pid: "" for pid in self.live}
+        )
         monkeypatch.setattr(session_mod.subprocess, "run", self.run)
         # `time.sleep` is deliberately NOT patched here any more. It used to be,
         # to keep the settle poll from costing the suite anything, and it did
@@ -1108,8 +1116,8 @@ def test_a_slow_exit_is_not_mistaken_for_a_refused_kill(monkeypatch):
     which is what a normal shutdown looks like from outside.
     """
     _, session = _stopping(monkeypatch, started={4808}, live={4808}, unkillable={4808})
-    tables = iter([{4808}, {4808}])
-    monkeypatch.setattr(session_mod, "_tml_pids", lambda cfg: next(tables, set()))
+    tables = iter([{4808: ""}, {4808: ""}])
+    monkeypatch.setattr(session_mod, "_pid_table", lambda cfg: next(tables, {}))
 
     killed = session_mod.stop(session.cfg, session, settle=TEST_SETTLE)
 
@@ -1394,3 +1402,82 @@ def test_a_join_refuses_a_session_with_no_server(monkeypatch, tmp_path):
 
     with pytest.raises(session_mod.SessionError, match="no server for a client"):
         session_mod.join(cfg, session, "tst2", timeout=30.0)
+
+
+# ---- the positive control the process query now carries ---------------------
+
+
+def test_a_broken_process_query_fails_the_stop_instead_of_faking_success(
+    monkeypatch,
+):
+    """THE SILENT NO-OP. `_tml_pids` returned an empty set when the QUERY
+    broke, and an empty set is also the answer for "no games" - so `stop`
+    aimed at nothing, killed nothing, returned [] as success, and the server
+    released a session that left a running game owned by nobody. The next
+    `launch` then refused over a process nobody remembered starting."""
+    _, session = _stopping(monkeypatch, started={4808}, live={4808})
+    monkeypatch.setattr(session_mod, "_pid_table", lambda cfg: None)
+
+    with pytest.raises(session_mod.SessionError, match="query failed"):
+        session_mod.stop(session.cfg, session, settle=TEST_SETTLE)
+
+    assert session.started == {4808}, (
+        "the session let go of a pid it never verified - the orphan, back again"
+    )
+
+
+def test_a_recycled_pid_is_left_alone_and_leaves_the_session(monkeypatch):
+    """Windows reuses pids aggressively. A session client that died on its own
+    can hand its number to the developer's own hand-started game, and a kill
+    matched on the number alone took it - the one outcome the module docstring
+    promises against. The creation stamp is what tells the two apart."""
+    windows, session = _stopping(monkeypatch, started={4808}, live={4808})
+    session.stamps = {4808: "1000"}
+    monkeypatch.setattr(
+        session_mod, "_pid_table", lambda cfg: {4808: "2000"} if windows.live else {}
+    )
+
+    killed = session_mod.stop(session.cfg, session, settle=TEST_SETTLE)
+
+    assert windows.aimed == [], "taskkill was aimed at somebody else's process"
+    assert killed == [], "nothing of this session's was alive to kill"
+    assert session.started == set(), (
+        "a pid whose process is DEAD stayed owned - `stop` would retry it forever"
+    )
+
+
+def test_a_matching_stamp_still_kills_normally(monkeypatch):
+    """POSITIVE CONTROL for the two above: with the stamp agreeing, the kill
+    is exactly what it always was."""
+    windows, session = _stopping(monkeypatch, started={4808}, live={4808})
+    session.stamps = {4808: "1000"}
+    monkeypatch.setattr(
+        session_mod,
+        "_pid_table",
+        lambda cfg: {pid: "1000" for pid in windows.live},
+    )
+
+    killed = session_mod.stop(session.cfg, session, settle=TEST_SETTLE)
+
+    assert killed == [4808]
+    assert session.started == set()
+
+
+def test_a_region_spelled_with_separators_still_yields_a_findable_capture(
+    tmp_path, monkeypatch
+):
+    """The mod accepts `top-left` as a spelling of `topleft`, but the capture
+    pattern reads the filename's trailing field as `[a-z]+` - so a file named
+    with the RAW spelling was a capture `captures`/`read_capture` could never
+    see again: taken, reported, and invisible. The filename now carries the
+    slug the mod resolved."""
+    from tmodloader_mcp import captures as captures_mod
+
+    sess = _session_that_captures(tmp_path, monkeypatch, [_png(b"CORNER")])
+
+    kept = sess.shot("top-left")
+
+    assert kept.name.endswith("-topleft.png"), kept.name
+    assert kept.name in captures_mod.available(tmp_path, "Biomancy"), (
+        "the capture exists and the listing cannot see it"
+    )

@@ -22,8 +22,8 @@ CLIENT = """\
 hooks-seen: PostUpdateEverything,PostUpdateInput,UpdateUI
 gameMenu: False
 dedServ: False
-savepath: C:\\Users\\a2b32\\Documents\\My Games\\Terraria\\tModLoader
-trigger-path: C:\\Users\\a2b32\\Documents\\My Games\\Terraria\\tModLoader\\biomancy-capture.trigger
+savepath: C:\\Users\\someone\\Documents\\My Games\\Terraria\\tModLoader
+trigger-path: C:\\Users\\someone\\Documents\\My Games\\Terraria\\tModLoader\\biomancy-capture.trigger
 trigger-exists: False
 world-ready: True
 capture-ready: True
@@ -39,7 +39,7 @@ SERVER = """\
 hooks-seen: PostUpdateEverything,PostUpdateWorld
 gameMenu: False
 dedServ: True
-savepath: C:\\Users\\a2b32\\Documents\\My Games\\Terraria\\tModLoader
+savepath: C:\\Users\\someone\\Documents\\My Games\\Terraria\\tModLoader
 trigger-exists: False
 world-ready: True
 capture-ready: False
@@ -200,3 +200,27 @@ def test_the_servers_file_is_not_mistaken_for_a_clients(tmp_path):
 def test_another_mods_heartbeat_is_not_ours(tmp_path):
     (tmp_path / "othermod-hooks-n43n-003f.txt").write_text("side: client\n")
     assert heartbeat.client_files(tmp_path, "biomancy") == []
+
+
+def test_a_file_deleted_between_the_stat_and_the_read_is_present_but_unreadable(
+    tmp_path, monkeypatch
+):
+    """Another launch's stale-artifact clear can take the unsuffixed slot in
+    exactly this window. The stat's guard already named the right answer for
+    a file that stops cooperating mid-read; the read used to escape as a raw
+    FileNotFoundError out of a five-minute launch instead of giving it."""
+    path = tmp_path / "biomancy-hooks.txt"
+    path.write_text("dedServ: False\nworld-ready: True\n")
+
+    real_read = Path.read_text
+
+    def vanishes(self, *args, **kwargs):
+        if self == path:
+            raise FileNotFoundError(path)
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", vanishes)
+
+    hb = heartbeat.read(path)
+
+    assert hb.present and not hb.live and hb.fields == {}

@@ -235,3 +235,53 @@ def test_status_does_not_start_or_touch_anything(session):
     server_mod.status()
 
     assert session.calls == []
+
+
+# ---- serialisation ----------------------------------------------------------
+
+
+def test_every_tool_and_resource_is_wrapped_by_the_lock():
+    """THE PREMISE THE WHOLE SURFACE RESTS ON, now enforced rather than
+    assumed. The module header used to claim synchronous tools serialise on
+    the event loop; under mcp 2.x they run in worker threads under a
+    concurrent dispatcher, so two calls from one batching client ran in real
+    parallel and consumed each other's replies. The `_serialized` decorator
+    is the fix, and this scan is what stops the NEXT tool being added without
+    it - which would be invisible to every other test here.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(server_mod))
+    unlocked = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+
+        names = []
+        for decorator in node.decorator_list:
+            target = decorator.func if isinstance(decorator, ast.Call) else decorator
+            names.append(ast.unparse(target))
+
+        wrapped = any(name in ("mcp.tool", "mcp.resource") for name in names)
+        if wrapped and "_serialized" not in names:
+            unlocked.append(node.name)
+
+    assert not unlocked, (
+        f"{unlocked} reach process-global state without `@_serialized` - two "
+        "concurrent calls there are the torn-reply bug back again"
+    )
+
+
+def test_the_lock_wrapper_preserves_what_the_schema_generator_reads():
+    """`wraps` carries signature, annotations and docstring across - pinned
+    because the SDK builds each tool's schema from exactly these, and a bare
+    wrapper would silently flatten every tool to (*args, **kwargs)."""
+    import inspect
+
+    tool = server_mod.log_since
+
+    assert tool.__doc__ and "log has gained" in tool.__doc__
+    assert "offset" in inspect.signature(tool).parameters
+    assert inspect.signature(tool).return_annotation is not inspect.Signature.empty

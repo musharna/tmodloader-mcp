@@ -146,9 +146,18 @@ namespace TModLoaderMcp.DevBridge
 					string path = Path.Combine(Main.SavePath,
 						DevArtifacts.ForSide(_pendingName, Main.dedServ));
 
-					using (var stream = File.Create(path)) {
+					// Written aside and moved into place, so the polled name only
+					// ever refers to a finished PNG - the same rule the harness
+					// applies to the trigger. The report-after-close ordering
+					// already protected the ordinary path; this closes the crash
+					// path, where a game dying mid-write left a torn PNG sitting
+					// on the drop box for the next session to wait out.
+					string partial = path + ".partial";
+					using (var stream = File.Create(partial)) {
 						texture.SaveAsPng(stream, w, h);
 					}
+
+					File.Move(partial, path, overwrite: true);
 
 					LastPath = path;
 					LastError = null;
