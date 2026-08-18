@@ -139,6 +139,30 @@ def test_an_exported_but_empty_variable_falls_back_to_the_default():
     assert "TMODLOADER_SAVE_DIR" in cfg.unset
 
 
+def windows_tools(tmp_path) -> dict[str, str]:
+    """Stand-ins for Windows' own process tools, and the env naming them.
+
+    `check` now verifies these exist, because the platform assumption used to
+    be invisible: every default lives under `/mnt/c`, and a native Linux or
+    macOS install failed much later with an OSError naming a path in System32.
+
+    Every positive control here needs them, and they cannot be the real ones -
+    CI runs on ubuntu, where `/mnt/c/Windows` does not exist, so a test relying
+    on the defaults would pass on the author's machine and fail on the runner.
+    """
+    tools = tmp_path / "winbin"
+    tools.mkdir(exist_ok=True)
+    made = {}
+    for variable, name in (
+        ("TMODLOADER_TASKKILL", "taskkill.exe"),
+        ("TMODLOADER_TASKLIST", "tasklist.exe"),
+        ("TMODLOADER_POWERSHELL", "powershell.exe"),
+    ):
+        path = tools / name
+        path.write_bytes(b"")
+        made[variable] = str(path)
+    return made
+
 def test_a_usable_config_reports_nothing(tmp_path):
     """Positive control for `check` itself.
 
@@ -156,6 +180,7 @@ def test_a_usable_config_reports_nothing(tmp_path):
             "TMODLOADER_SAVE_DIR": str(tmp_path),
             "TMODLOADER_MOD_SOURCE": str(source),
             "TMODLOADER_MOD_SOURCE_WIN": r"C:\Mods\MyMod",
+            **windows_tools(tmp_path),
         }
     )
 
@@ -210,6 +235,7 @@ def test_a_configured_install_still_passes(tmp_path):
             "TMODLOADER_SAVE_DIR": str(tmp_path),
             "TMODLOADER_MOD_SOURCE": str(source),
             "TMODLOADER_MOD_SOURCE_WIN": r"C:\Mymod",
+            **windows_tools(tmp_path),
         }
     )
 
@@ -315,6 +341,7 @@ def test_a_real_path_that_merely_contains_a_dollar_is_left_alone(tmp_path):
             "TMODLOADER_MOD_SOURCE": str(source),
             "TMODLOADER_MOD_SOURCE_WIN": r"C:\Cash$Mod",
             "TMODLOADER_MOD_NAME": "CashMod",
+            **windows_tools(tmp_path),
         }
     )
 
@@ -565,3 +592,85 @@ def test_the_unclaimable_message_names_a_remedy(tmp_path, monkeypatch):
     problem = config._claim_support(str(tmp_path))
 
     assert "TMODLOADER_SAVE_DIR" in problem, f"names no remedy: {problem}"
+
+
+# --- the platform, which used to be assumed silently ------------------------
+
+
+def _install(tmp_path) -> dict[str, str]:
+    """A configuration that is fine except for whatever a test then breaks."""
+    tml = tmp_path / "tml"
+    tml.mkdir(exist_ok=True)
+    (tml / "tModLoader.dll").write_bytes(b"")
+    source = tmp_path / "Mymod"
+    source.mkdir(exist_ok=True)
+    (source / "build.txt").write_text("displayName = Mymod\n")
+    return {
+        "TMODLOADER_DIR": str(tml),
+        "TMODLOADER_SAVE_DIR": str(tmp_path),
+        "TMODLOADER_MOD_SOURCE": str(source),
+        "TMODLOADER_MOD_SOURCE_WIN": r"C:\Mymod",
+    }
+
+
+def test_a_machine_without_windows_process_tools_is_told_why(tmp_path):
+    """The platform assumption, made visible at `check` time.
+
+    Every default path lives under `/mnt/c`, and sessions are listed and killed
+    through `tasklist.exe` and `taskkill.exe`. Nothing said so. `check` passed
+    on a native Linux install and the failure arrived much later as an OSError
+    naming a path in System32 - from a tool the reader had never mentioned and
+    could not connect to anything they had set.
+    """
+    env = _install(tmp_path)
+    env.update(
+        {
+            "TMODLOADER_TASKKILL": str(tmp_path / "nowhere" / "taskkill.exe"),
+            "TMODLOADER_TASKLIST": str(tmp_path / "nowhere" / "tasklist.exe"),
+            "TMODLOADER_POWERSHELL": str(tmp_path / "nowhere" / "powershell.exe"),
+        }
+    )
+
+    problems = config.check(config.load(env))
+
+    platform = [p for p in problems if "WSL2" in p]
+    assert len(platform) == 1, (
+        f"expected exactly one problem about the platform, got {problems}"
+    )
+
+    # It has to name the platform rather than only the missing file. "no such
+    # file: taskkill.exe" sends somebody looking for a download.
+    assert "WINDOWS tModLoader" in platform[0]
+    assert "Linux" in platform[0] and "macOS" in platform[0]
+
+    # And all three, so a reader fixing one at a time does not restart twice.
+    for variable in (
+        "TMODLOADER_TASKKILL",
+        "TMODLOADER_TASKLIST",
+        "TMODLOADER_POWERSHELL",
+    ):
+        assert variable in platform[0], f"{variable} is not named"
+
+
+def test_one_missing_tool_is_still_one_problem(tmp_path):
+    """One problem however many are missing: the remedy is a single fact about
+    the machine, and repeating it three times buries it."""
+    env = _install(tmp_path)
+    env.update(windows_tools(tmp_path))
+    env["TMODLOADER_POWERSHELL"] = str(tmp_path / "gone" / "powershell.exe")
+
+    problems = [p for p in config.check(config.load(env)) if "WSL2" in p]
+
+    assert len(problems) == 1
+    assert "TMODLOADER_POWERSHELL" in problems[0]
+    # The two that ARE there are not named as missing.
+    assert "TMODLOADER_TASKKILL" not in problems[0]
+
+
+def test_the_platform_check_is_silent_when_the_tools_are_there(tmp_path):
+    """POSITIVE CONTROL. Without it a check that complained unconditionally
+    would pass both tests above."""
+    env = _install(tmp_path)
+    env.update(windows_tools(tmp_path))
+
+    assert config.check(config.load(env)) == []

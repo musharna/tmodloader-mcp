@@ -139,12 +139,24 @@ def fake_install(tmp_path):
     mod.mkdir()
     (mod / "build.txt").write_text("displayName = Fake\n")
 
+    # STAND-INS FOR WINDOWS' OWN PROCESS TOOLS. `check` verifies these exist,
+    # because the platform assumption used to be invisible. They cannot be the
+    # real ones: CI runs on ubuntu, where `/mnt/c/Windows` does not exist, so
+    # relying on the defaults would pass here and fail on the runner.
+    winbin = tmp_path / "winbin"
+    winbin.mkdir()
+    for name in ("taskkill.exe", "tasklist.exe", "powershell.exe"):
+        (winbin / name).write_bytes(b"")
+
     return {
         "TMODLOADER_DIR": str(tml),
         "TMODLOADER_SAVE_DIR": str(save),
         "TMODLOADER_MOD_SOURCE": str(mod),
         "TMODLOADER_MOD_SOURCE_WIN": r"C:\Fake\ModSources\modsrc",
         "TMODLOADER_MOD_NAME": "Fakemod",
+        "TMODLOADER_TASKKILL": str(winbin / "taskkill.exe"),
+        "TMODLOADER_TASKLIST": str(winbin / "tasklist.exe"),
+        "TMODLOADER_POWERSHELL": str(winbin / "powershell.exe"),
     }
 
 

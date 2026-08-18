@@ -20,6 +20,15 @@ tModLoader has not had one. This is that.
 > no address to be told apart by. Every one of those was found by RUNNING it,
 > which is the thing about this project most worth knowing: the suite passes
 > against several of them. See [Phase 2](#phase-2--what-would-make-this-yours).
+>
+> **0.5.0 makes the world writable and readable in detail** — `settile`,
+> `cleartile` and `despawn` beside the queries that could only look; `find` and
+> `players` for the state a count cannot carry; `api_search` over the installed
+> assembly's own metadata; `command` for running a mod's own debug commands
+> without an eval hatch; and `save_snapshot` / `save_restore` so a run that
+> changes a world can be undone. That last one is worth reading the CHANGELOG
+> for: the premise it was built on turned out to be false, and measuring it is
+> the part that mattered.
 
 ## Why an MCP server rather than a shell script
 
@@ -46,6 +55,9 @@ What earns the surface here is that a running game is not stateless:
 | `log_since`       | Only what a log gained, and whether it rotated under you         |
 | `log_watch`       | Blocking until a line appears, instead of a guessed sleep        |
 | `api_search`      | What the INSTALLED tModLoader actually exposes, with signatures  |
+| `save_snapshot`   | Copying the world and characters aside before a run mutates them |
+| `save_restore`    | Putting them back, saving what it overwrote so it can be undone  |
+| `save_snapshots`  | Which copies exist, newest first                                 |
 | `restart`         | stop -> build -> launch in the one order that works              |
 
 Two **prompts** ship with it. `diagnose_silence` walks the four reasons the mod
@@ -121,12 +133,43 @@ which failures it has to be able to express — is written down in
 [`responder/`](responder/). You can read the contract or vendor the folder; the
 folder is the same document with a compiler checking it.
 
+**What the mod side answers.** These are verbs, driven through `trigger`, not
+separate MCP tools. The base class serves only the ones that READ, so every
+consumer gets them and vendoring an upgrade can never hand your mod a power it
+did not have before:
+
+|                       | Verbs                                                                                                                                                                                                                                                                      |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Base — reads only** | `capture` `shot` photograph the frame; `diag` reports what your mod chose to report; `tiles` counts tile types in a rectangle; `entities` counts NPCs, items or projectiles; `find` returns one line per entity with position and health; `players` lists who is connected |
+| `DevMutations`        | `time` `weather` `spawn` `give` `teleport` `settile` `cleartile` `despawn`                                                                                                                                                                                                 |
+| `DevCommandBridge`    | `command` `commandlist` — runs any mod's own registered `ModCommand`s                                                                                                                                                                                                      |
+| `DevChat`             | `chat` `say`                                                                                                                                                                                                                                                               |
+
+The last three are opt-ins, each one line you write in `RegisterCommands`. That
+is deliberately the whole mechanism: not a setting, not a marker file, not an
+environment variable, because each of those can be switched on somewhere other
+than the source somebody will read when they ask why an NPC appeared in their
+world. [`responder/README.md`](responder/README.md) has the detail, including
+why `DevCommandBridge` is the answer to "what about an escape hatch" and why
+there is no `reflect_invoke` here.
+
 ## Requirements
 
+**WSL2 on Windows, driving a Windows tModLoader.** This is the one requirement
+worth reading before the others, because it is not a preference — sessions are
+listed and killed through Windows' own `tasklist.exe` and `taskkill.exe`, and
+`build_mod` hands tModLoader a Windows path because it builds inside a Windows
+process. A native Linux or macOS tModLoader cannot be driven by this as it
+stands. `check` says so by name rather than failing later on a missing file in
+System32; if you are on WSL and those tools live somewhere unusual, set
+`TMODLOADER_TASKLIST`, `TMODLOADER_TASKKILL` and `TMODLOADER_POWERSHELL`.
+
 - Python 3.12+
-- tModLoader installed
+- tModLoader installed (1.4.4.9 is what this is tested against)
 - A mod embedding the trigger-file responder — copy [`responder/`](responder/)
   into your mod's source tree and subclass `DevResponder`
+- A .NET SDK, for `api_search` only — the index is built by a small C# tool.
+  Everything else works without one.
 
 ## Configuration
 
