@@ -14,3 +14,6 @@ obj/
 # belongs in version control.
 tools/ApiIndex/bin/
 tools/ApiIndex/obj/
+
+# Internal planning notes (plans/specs) — never publish
+docs/superpowers/
