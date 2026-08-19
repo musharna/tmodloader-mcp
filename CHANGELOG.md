@@ -199,7 +199,15 @@ Unreleased work folded into this release from between 0.5.0 and the audit:
   verifies, since an `<img src>` never matches the markdown link pattern). The
   "hardest bugs were found by RUNNING it" paragraph moved from the status
   blockquote to Known limits, where a reader weighing adoption actually is,
-  and the three-paragraph `shot` history compressed to one.
+  and the three-paragraph `shot` history compressed to one. Then a polish
+  pass: a centred header with a tagline and section nav; a Quick start that
+  is the four real steps and not a fifth copy of the docs; the 23-row tool
+  table split into five groups a reader can scan (a session / asking the
+  game / pictures / logs / building, the API, and the saves); the verbs
+  table's six-verb cell unpacked into a table of its own; the deep-dive
+  paragraphs (`TMODLOADER_MOD_NAME`, `TMODLOADER_MOD_SOURCE_WIN`, the
+  stale-parent-environment diagnosis) folded into `<details>` blocks that
+  degrade to plain paragraphs wherever the tag is stripped.
 
 ## [0.5.0] - 2026-08-17
 
