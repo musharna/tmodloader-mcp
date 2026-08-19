@@ -1,23 +1,38 @@
-# tmodloader-mcp
+<h1 align="center">tmodloader-mcp</h1>
 
-[![CI](https://github.com/musharna/tmodloader-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/musharna/tmodloader-mcp/actions/workflows/tests.yml)
-[![PyPI](https://img.shields.io/pypi/v/tmodloader-mcp)](https://pypi.org/project/tmodloader-mcp/)
+<p align="center"><em>Drive a running tModLoader instance from an agent —
+launch it, ask it questions, photograph it, and read its state back as
+structured data.</em></p>
 
-Drive a running tModLoader instance from an agent: launch it, ask it questions,
-photograph it, and read its state back as structured data.
+<p align="center">
+  <a href="https://github.com/musharna/tmodloader-mcp/actions/workflows/tests.yml"><img src="https://github.com/musharna/tmodloader-mcp/actions/workflows/tests.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/tmodloader-mcp/"><img src="https://img.shields.io/pypi/v/tmodloader-mcp" alt="PyPI"></a>
+  <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue" alt="Python 3.12 | 3.13">
+  <img src="https://img.shields.io/badge/licence-MIT-green" alt="MIT">
+</p>
+
+<p align="center">
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#known-limits">Known limits</a>
+</p>
 
 Game engines have grown MCP servers — Unity, Unreal, Godot and Defold all have
 one, so an assistant can see a real scene instead of guessing from a prompt.
 tModLoader has not had one. This is that.
 
-<img src="https://raw.githubusercontent.com/musharna/tmodloader-mcp/master/docs/shot-topright.png"
-     alt="The top-right region of a running game: hearts, a minimap, two players on it"
-     width="640">
+<p align="center">
+  <img src="https://raw.githubusercontent.com/musharna/tmodloader-mcp/master/docs/shot-topright.png"
+       alt="The top-right region of a running game: hearts, a minimap, two players on it"
+       width="640">
+</p>
 
-*A real answer, not a mock-up: `shot:topright`, exactly as the tool returned
-it. It is read from the game's own back buffer, so a window sitting in front
-of the game cannot be in the picture — the reason for that is
-[below](#how-it-works).*
+<p align="center"><sub><em>A real answer, not a mock-up:
+<code>shot:topright</code>, exactly as the tool returned it — read from the
+game's own back buffer, so a window sitting in front of the game cannot be in
+the picture. Why that matters is the first thing the next section
+explains.</em></sub></p>
 
 > **Status: alpha** — it has only ever run on one install; see
 > [Known limits](#known-limits) before adopting it. Nothing defaults to
@@ -25,31 +40,56 @@ of the game cannot be in the picture — the reason for that is
 > ([`responder/`](https://github.com/musharna/tmodloader-mcp/tree/master/responder)),
 > and CI compiles it with nothing of any mod's on the compile line.
 
-In a hurry: [Install](#install) · [Configuration](#configuration) ·
-[Claude Code setup](#using-it-from-claude-code)
+## Quick start
+
+```sh
+uv tool install tmodloader-mcp    # or: pip install tmodloader-mcp
+
+# the two paths with no default — every plausible default names somebody's install
+export TMODLOADER_SAVE_DIR="/mnt/c/Users/<you>/Documents/My Games/Terraria/tModLoader"
+export TMODLOADER_MOD_SOURCE="$TMODLOADER_SAVE_DIR/ModSources/<YourMod>"
+```
+
+Then:
+
+1. **Vendor the responder** — copy
+   [`responder/`](https://github.com/musharna/tmodloader-mcp/tree/master/responder)
+   into your mod's source tree and subclass `DevResponder`. It is a folder of
+   C#, not a PyPI dependency, because it compiles inside **your** mod.
+2. **Point your MCP client at the server** — the block in
+   [Using it from Claude Code](#using-it-from-claude-code).
+3. **Ask the game something** — `launch`, then `diag`. Or open with the
+   `start_a_session` prompt, which lists the worlds and characters that
+   actually exist here, the two preconditions `launch` cannot check.
+
+This needs **WSL2 driving a Windows tModLoader** — [Requirements](#requirements)
+says why before anything else does.
 
 ## How it works
 
 The game is asked by **writing a file it polls**, not by sending it input:
 
 ```text
-   an agent — Claude Code, or anything else that speaks MCP
-                │
-                │  tools · prompts · capture:// resources
-                ▼
-   tmodloader-mcp — this package. Python, runs in WSL2
-                │
-                │  writes  <mod>-capture.trigger
-                │  reads   <mod>-diag-<token>.txt,
-                │          <mod>-shot-<token>.png, ...
-                ▼
-   the tModLoader save directory — plain files, no socket
-                ▲
-                │  polls every few frames, writes each
-                │  answer next to the trigger it answers
-                │
-   DevResponder — a folder of C# you vendor into YOUR mod,
-   running inside tModLoader, a real game, on Windows
+┌─────────────────────────────────────────────────────┐
+│  an agent — Claude Code, or anything speaking MCP   │
+└──────────────────────┬──────────────────────────────┘
+                       │  tools · prompts · capture:// resources
+┌──────────────────────▼──────────────────────────────┐
+│  tmodloader-mcp — this package (Python, WSL2)       │
+└──────────────────────┬──────────────────────────────┘
+                       │  writes  <mod>-capture.trigger
+                       │  reads   <mod>-diag-<token>.txt,
+                       │          <mod>-shot-<token>.png, ...
+┌──────────────────────▼──────────────────────────────┐
+│  the tModLoader save directory                      │
+│  plain files on disk — no socket, no keystrokes     │
+└──────────────────────▲──────────────────────────────┘
+                       │  polls every few frames, writes
+                       │  each answer next to its trigger
+┌──────────────────────┴──────────────────────────────┐
+│  DevResponder — C# you vendor into YOUR mod,        │
+│  inside tModLoader, a real game, on Windows         │
+└─────────────────────────────────────────────────────┘
 ```
 
 No synthetic keystrokes, no window focus, and nothing that can be fooled by
@@ -80,18 +120,29 @@ but re-vendoring buys the correlation.
 ## What the mod side answers
 
 These are verbs, driven through the `trigger` tool, not separate MCP tools.
-The base class serves only the ones that READ, so every consumer gets them and
+
+**The reads come with the base class** — every consumer serves them, and
 vendoring an upgrade can never hand your mod a power it did not have before:
 
-|                       | Verbs                                                                                                                                                                                                                                                                      |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Base — reads only** | `capture` `shot` photograph the frame; `diag` reports what your mod chose to report; `tiles` counts tile types in a rectangle; `entities` counts NPCs, items or projectiles; `find` returns one line per entity with position and health; `players` lists who is connected |
-| `DevMutations`        | `time` `weather` `spawn` `give` `teleport` `settile` `cleartile` `despawn`                                                                                                                                                                                                 |
-| `DevCommandBridge`    | `command` `commandlist` — runs any mod's own registered `ModCommand`s                                                                                                                                                                                                      |
-| `DevChat`             | `chat` `say`                                                                                                                                                                                                                                                               |
+| Verb               | What it answers                                         |
+| ------------------ | ------------------------------------------------------- |
+| `capture` / `shot` | a photograph of the frame, by named region              |
+| `diag`             | whatever your mod chose to report                       |
+| `tiles`            | tile-type counts in a rectangle                         |
+| `entities`         | NPC, item or projectile counts, filterable by rectangle |
+| `find`             | one line per entity: id, position, health               |
+| `players`          | who is connected                                        |
 
-The last three are opt-ins, each one line you write in `RegisterCommands`. That
-is deliberately the whole mechanism: not a setting, not a marker file, not an
+**The writes are opt-ins**, each one line you write in `RegisterCommands`:
+
+| Opt-in             | Verbs it adds                                                              |
+| ------------------ | -------------------------------------------------------------------------- |
+| `DevMutations`     | `time` `weather` `spawn` `give` `teleport` `settile` `cleartile` `despawn` |
+| `DevCommandBridge` | `command` `commandlist` — runs any mod's own registered `ModCommand`s      |
+| `DevChat`          | `chat` `say`                                                               |
+
+One line each is deliberately the whole mechanism: not a setting, not a marker
+file, not an
 environment variable, because each of those can be switched on somewhere other
 than the source somebody will read when they ask why an NPC appeared in their
 world. [`responder/README.md`](https://github.com/musharna/tmodloader-mcp/blob/master/responder/README.md)
@@ -104,31 +155,53 @@ Most of what this does _could_ be a CLI, and where that is true it should stay
 one — a stateless local binary does not need a protocol in front of it. What
 earns the surface here is that a running game is not stateless:
 
-| Tool              | What it buys over `bash`                                         |
-| ----------------- | ---------------------------------------------------------------- |
-| `launch` / `stop` | Session state across calls                                       |
-| `join`            | A second client into a session that is already running           |
-| `status`          | Asking whether a session exists without provoking an error       |
-| `diag`            | Structured fields AND the records under them, not text to `sed`  |
-| `wait_until`      | Waiting for a state on one budget, instead of sleeping a guess   |
-| `trigger`         | The write → poll → timeout → clean-up loop, written once         |
-| `commands`        | What the mod says it serves, read from the mod, not a copy here  |
-| `shot`            | A path per call, a whole PNG behind it, refusals as refusals     |
-| `captures`        | Which captures exist, as names — a reader that takes no paths    |
-| `read_capture`    | The picture itself, for an agent not on this machine             |
-| `build_mod`       | Encodes tModLoader's refusal to build while the game is open     |
-| `logs`            | Any log, filtered — including the run that already rotated away  |
-| `log_files`       | Which logs exist right now, and how many old runs are archived   |
-| `heartbeat`       | WHICH silence — absent, stale, still loading, or not armed       |
-| `inventory`       | The worlds, characters and mods `launch` needs and cannot check  |
-| `prune_captures`  | Removing captures without a delete loose enough to reach a world |
-| `log_since`       | Only what a log gained, and whether it rotated under you         |
-| `log_watch`       | Blocking until a line appears, instead of a guessed sleep        |
-| `api_search`      | What the INSTALLED tModLoader actually exposes, with signatures  |
-| `save_snapshot`   | Copying the world and characters aside before a run mutates them |
-| `save_restore`    | Putting them back, saving what it overwrote so it can be undone  |
-| `save_snapshots`  | Which copies exist, newest first                                 |
-| `restart`         | stop -> build -> launch in the one order that works              |
+**A session**
+
+| Tool              | What it buys over `bash`                                        |
+| ----------------- | --------------------------------------------------------------- |
+| `launch` / `stop` | Session state across calls                                      |
+| `join`            | A second client into a session that is already running          |
+| `status`          | Asking whether a session exists without provoking an error      |
+| `restart`         | stop → build → launch in the one order that works               |
+| `inventory`       | The worlds, characters and mods `launch` needs and cannot check |
+
+**Asking the game**
+
+| Tool         | What it buys over `bash`                                        |
+| ------------ | --------------------------------------------------------------- |
+| `trigger`    | The write → poll → timeout → clean-up loop, written once        |
+| `commands`   | What the mod says it serves, read from the mod, not a copy here |
+| `diag`       | Structured fields AND the records under them, not text to `sed` |
+| `wait_until` | Waiting for a state on one budget, instead of sleeping a guess  |
+| `heartbeat`  | WHICH silence — absent, stale, still loading, or not armed      |
+
+**Pictures**
+
+| Tool             | What it buys over `bash`                                          |
+| ---------------- | ----------------------------------------------------------------- |
+| `shot`           | A path per call, a whole PNG behind it, refusals as refusals      |
+| `captures`       | Which captures exist, as names — a reader that takes no paths     |
+| `read_capture`   | The picture itself, for an agent not on this machine              |
+| `prune_captures` | Removing captures without a delete loose enough to reach a world  |
+
+**Logs**
+
+| Tool        | What it buys over `bash`                                        |
+| ----------- | --------------------------------------------------------------- |
+| `logs`      | Any log, filtered — including the run that already rotated away |
+| `log_files` | Which logs exist right now, and how many old runs are archived  |
+| `log_since` | Only what a log gained, and whether it rotated under you        |
+| `log_watch` | Blocking until a line appears, instead of a guessed sleep       |
+
+**Building, the API, and the saves**
+
+| Tool             | What it buys over `bash`                                          |
+| ---------------- | ----------------------------------------------------------------- |
+| `build_mod`      | Encodes tModLoader's refusal to build while the game is open      |
+| `api_search`     | What the INSTALLED tModLoader actually exposes, with signatures   |
+| `save_snapshot`  | Copying the world and characters aside before a run mutates them  |
+| `save_restore`   | Putting them back, saving what it overwrote so it can be undone   |
+| `save_snapshots` | Which copies exist, newest first                                  |
 
 Those glue steps are where the hand-written version actually went wrong: a
 `pkill` pattern that matched its own command line, a readiness check that
@@ -240,6 +313,10 @@ has no default either; with neither set, `launch` refuses and **lists the worlds
 actually in your save directory**, with the Windows paths it wants. `inventory`
 answers the same question without launching anything.
 
+<details>
+<summary><code>TMODLOADER_MOD_NAME</code> — when the derived name is wrong,
+and what the name keeps apart</summary>
+
 `TMODLOADER_MOD_NAME` is the mod's **internal** name, which every artifact
 filename is built from: `<modname>-diag-<token>.txt`, `<modname>-shot-<token>.png`,
 lowercased, where `<token>` identifies which player's client wrote it — except
@@ -253,12 +330,20 @@ named something other than the mod. Deriving it is also what keeps two mods
 driven from one machine out of each other's trigger files — they share a save
 directory.
 
+</details>
+
+<details>
+<summary><code>TMODLOADER_MOD_SOURCE_WIN</code> — only for a mod source living
+outside <code>/mnt/&lt;drive&gt;</code></summary>
+
 `TMODLOADER_MOD_SOURCE_WIN` is the mod source as Windows sees it, which `-build`
 needs because tModLoader compiles inside a Windows process with no `/mnt/c`. It
 is **derived** from `TMODLOADER_MOD_SOURCE`, so setting that one is enough for a
 source on a drive mount. Set it yourself only if your mod source lives outside
 `/mnt/<drive>`, where there is no drive letter to translate to and the server
 will ask for it by name.
+
+</details>
 
 The two describe one directory. If you set both to different places the server
 refuses to start and says so, rather than driving one and building the other.
@@ -295,8 +380,11 @@ that never sourced your shell profile has nothing to substitute and passes
 still its own name as absent and says so by that name, rather than reporting
 four problems about the variables derived from it.
 
-**The usual cause is not a missing export — it is a client older than the
-export.** A process's environment is a copy taken when it starts, and nothing
+<details>
+<summary><strong>If the server reports a variable missing that you know you
+exported</strong> — the usual cause is a client older than the export</summary>
+
+A process's environment is a copy taken when it starts, and nothing
 outside can add to it afterwards. So a long-lived parent — a daemon, an agent
 host, a desktop session — hands every client it spawns the environment it had
 on the day it started, however long ago that was, and adding the variables to
@@ -307,6 +395,8 @@ client is the stale one; restart that.
 
 Nothing can be repaired from inside a running session: the value was gone before
 the process started.
+
+</details>
 
 A project-scoped `.mcp.json` needs approving once — Claude Code will not run a
 server a repository asked it to run without being told to. Start `claude` in
