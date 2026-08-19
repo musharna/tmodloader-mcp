@@ -28,16 +28,17 @@ one, so an assistant can see a real scene instead of guessing from a prompt.
 tModLoader has not had one. This is that.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/musharna/tmodloader-mcp/master/docs/shot-topright.png"
-       alt="The top-right region of a running game: hearts, a minimap, two players on it"
-       width="640">
+  <img src="https://raw.githubusercontent.com/musharna/tmodloader-mcp/master/docs/shot-full.png"
+       alt="A running game at noon: the player at spawn among blue slimes, forest, HUD"
+       width="720">
 </p>
 
-<p align="center"><sub><em>A real answer, not a mock-up:
-<code>shot:topright</code>, exactly as the tool returned it — read from the
-game's own back buffer, so a window sitting in front of the game cannot be in
-the picture. Why that matters is the first thing
-<a href="#how-it-works">How it works</a> explains.</em></sub></p>
+<p align="center"><sub><em>The tool staged its own screenshot —
+<code>time:noon</code>, <code>teleport:spawn</code>, <code>spawn:1,25</code>,
+<code>shot:full</code> — read from the game's back buffer, so a window in
+front of the game cannot be in the picture
+(<a href="#how-it-works">How it works</a> starts there). Trimmed of the
+unexplored dark below the terrain; otherwise exactly as returned.</em></sub></p>
 
 > **Status: alpha** — it has only ever run on one install; see
 > [Known limits](#known-limits) before adopting it. Nothing defaults to
