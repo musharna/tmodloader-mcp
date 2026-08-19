@@ -213,6 +213,10 @@ Unreleased work folded into this release from between 0.5.0 and the audit:
   the page and closing a new footer; and "The answers, verbatim" — the live
   checks' actual replies, quoted, because the refusals are the most
   characteristic writing in the project and no paraphrase would be believed.
+  Then two reader's notes acted on: the slime redrawn truer to the sprite —
+  squat and wide, translucent gel, shaded base, sheen, tall side-facing
+  eyes — and a conciseness pass over the wordiest paragraphs, which kept
+  every claim and lost about a third of the words.
 
 ## [0.5.0] - 2026-08-17
 
