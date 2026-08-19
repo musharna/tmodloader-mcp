@@ -178,6 +178,17 @@ Unreleased work folded into this release from between 0.5.0 and the audit:
   design, and a stopped session saves nothing but must not be relied on to.
 - The status blockquote no longer recites release notes. It says what the
   project is, and points at this file for what changed.
+- **The README is now the PyPI page it was about to become.** An Install
+  section (`uv tool install` / `pip install` / `uvx`, and that the responder
+  is vendored from the repository, not installed from PyPI); every relative
+  link made absolute, because PyPI renders the README verbatim and a relative
+  link there is dead — and `test_doc_links.py` taught to map those absolute
+  self-repo URLs back onto the working tree so they stay checked; CI and PyPI
+  badges. Three registered tools the table omitted (`commands`, `captures`,
+  `log_files`) are in it now; "`check` says so by name" no longer names a tool
+  that does not exist; the paragraph beginning "That row" names the row
+  (`shot`) instead of pointing thirty lines up; and the vendoring section says
+  what 0.6.0's tagged replies buy and that older vendored copies keep working.
 
 ## [0.5.0] - 2026-08-17
 
