@@ -32,6 +32,16 @@ SKIP = ("docs/superpowers", ".superpowers", "/bin/", "/obj/", ".venv")
 #: new form is the risk worth naming here.
 LINK = re.compile(r"\[([^\]]*)\]\(([^)\s]+)\)")
 
+#: Links into this repository's own GitHub tree. The README links absolutely
+#: because PyPI renders it verbatim and rewrites nothing — a relative link
+#: there is dead on the project page. An absolute link would otherwise escape
+#: this file entirely (external URLs are skipped below), so these are mapped
+#: back onto the working tree and held to the same standard as relative ones.
+SELF_REPO = re.compile(
+    r"https://github\.com/musharna/tmodloader-mcp/(?:blob|tree)/master/"
+    r"([^#]*)(?:#(.*))?$"
+)
+
 
 def _documents() -> list[Path]:
     return sorted(
@@ -62,12 +72,18 @@ def _anchors(text: str) -> set[str]:
 def _broken(doc: Path) -> list[str]:
     problems = []
     for _label, target in LINK.findall(doc.read_text()):
-        if target.startswith(("http://", "https://", "mailto:")):
+        own = SELF_REPO.match(target)
+        if own:
+            path_part, fragment = own.group(1), own.group(2) or ""
+            base = REPO
+        elif target.startswith(("http://", "https://", "mailto:")):
             continue
+        else:
+            path_part, _, fragment = target.partition("#")
+            base = doc.parent
 
-        path_part, _, fragment = target.partition("#")
         if path_part:
-            dest = (doc.parent / path_part).resolve()
+            dest = (base / path_part).resolve()
             if not dest.exists():
                 problems.append(f"{target} -> no such file")
                 continue
@@ -130,3 +146,25 @@ def test_a_missing_file_would_actually_be_caught(tmp_path):
 
     assert len(problems) == 1, problems
     assert "absent.md" in problems[0]
+
+
+def test_a_broken_absolute_link_into_this_repo_would_actually_be_caught(tmp_path):
+    """Absolute self-repo links are held to the relative-link standard.
+
+    Without this, converting a README link to its GitHub URL would move it
+    from "checked on every run" to "skipped as external" — the exact silence
+    the conversion was not supposed to buy.
+    """
+    base = "https://github.com/musharna/tmodloader-mcp"
+    doc = tmp_path / "sample.md"
+    doc.write_text(
+        f"[fine]({base}/blob/master/README.md)\n"
+        f"[gone]({base}/blob/master/no-such-file.md)\n"
+        f"[external](https://example.com/no-such-file.md)\n"
+    )
+
+    problems = _broken(doc)
+
+    assert len(problems) == 1, problems
+    assert "no-such-file" in problems[0]
+    assert "example.com" not in problems[0]

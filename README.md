@@ -1,5 +1,8 @@
 # tmodloader-mcp
 
+[![CI](https://github.com/musharna/tmodloader-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/musharna/tmodloader-mcp/actions/workflows/tests.yml)
+[![PyPI](https://img.shields.io/pypi/v/tmodloader-mcp)](https://pypi.org/project/tmodloader-mcp/)
+
 Drive a running tModLoader instance from an agent: launch it, ask it questions,
 photograph it, and read its state back as structured data.
 
@@ -9,16 +12,17 @@ tModLoader has not had one. This is that.
 
 > **Status: alpha** — see [Known limits](#known-limits) before adopting it.
 > Nothing defaults to anybody's install, the mod-side half is a folder you
-> vendor ([`responder/`](responder/)), and CI compiles it with nothing of any
-> mod's on the compile line.
+> vendor ([`responder/`](https://github.com/musharna/tmodloader-mcp/tree/master/responder)),
+> and CI compiles it with nothing of any mod's on the compile line.
 >
 > **The thing most worth knowing about this project is that its hardest bugs
 > were found by RUNNING it.** Two clients overwriting each other's answers, a
 > capture lock bounded by a guess, a dedicated server with no address to be
 > told apart by, and — most recently — a save-snapshot feature whose entire
 > premise turned out to be false when somebody finally measured it. The unit
-> suite passed against every one of those. [`CHANGELOG.md`](CHANGELOG.md) is
-> the record.
+> suite passed against every one of those.
+> [`CHANGELOG.md`](https://github.com/musharna/tmodloader-mcp/blob/master/CHANGELOG.md)
+> is the record.
 
 ## Why an MCP server rather than a shell script
 
@@ -35,10 +39,13 @@ What earns the surface here is that a running game is not stateless:
 | `diag`            | Structured fields AND the records under them, not text to `sed`  |
 | `wait_until`      | Waiting for a state on one budget, instead of sleeping a guess   |
 | `trigger`         | The write → poll → timeout → clean-up loop, written once         |
+| `commands`        | What the mod says it serves, read from the mod, not a copy here  |
 | `shot`            | A path per call, a whole PNG behind it, refusals as refusals     |
+| `captures`        | Which captures exist, as names — a reader that takes no paths    |
 | `read_capture`    | The picture itself, for an agent not on this machine             |
 | `build_mod`       | Encodes tModLoader's refusal to build while the game is open     |
 | `logs`            | Any log, filtered — including the run that already rotated away  |
+| `log_files`       | Which logs exist right now, and how many old runs are archived   |
 | `heartbeat`       | WHICH silence — absent, stale, still loading, or not armed       |
 | `inventory`       | The worlds, characters and mods `launch` needs and cannot check  |
 | `prune_captures`  | Removing captures without a delete loose enough to reach a world |
@@ -69,11 +76,11 @@ Those glue steps are where the hand-written version actually went wrong: a
 on a killed process's leftover heartbeat, and a capture that reported success
 while the thing it photographed had never drawn.
 
-That row promised a PNG check that did not exist, in any version — the file was
-waited for and renamed, never opened. The claim was written down here as absent
-rather than quietly corrected, because a README is read by people deciding what
-they no longer have to check themselves, which makes an imagined guarantee worse
-than an admitted gap.
+The `shot` row above — "a whole PNG behind it" — once promised a check that did
+not exist, in any version: the file was waited for and renamed, never opened.
+The claim was written down here as absent rather than quietly corrected,
+because a README is read by people deciding what they no longer have to check
+themselves, which makes an imagined guarantee worse than an admitted gap.
 
 **It exists now,** and it checks both ends rather than the header the old claim
 described. A file appears when it is created rather than when it is finished, so
@@ -119,9 +126,17 @@ so a request says which corner it wants.
 
 The mod side of that protocol — every filename, what each one contains, and
 which failures it has to be able to express — is written down in
-[`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md), and implemented in
-[`responder/`](responder/). You can read the contract or vendor the folder; the
-folder is the same document with a compiler checking it.
+[`docs/MOD_CONTRACT.md`](https://github.com/musharna/tmodloader-mcp/blob/master/docs/MOD_CONTRACT.md),
+and implemented in
+[`responder/`](https://github.com/musharna/tmodloader-mcp/tree/master/responder).
+You can read the contract or vendor the folder; the folder is the same document
+with a compiler checking it.
+
+Since 0.6.0 replies are **tagged**: a request may carry a short id the
+responder echoes back as its answer's first line, so a late answer can never be
+mistaken for the next request's. A vendored copy older than that keeps working
+— the harness sends the tag only to a responder that advertises taking it —
+but re-vendoring buys the correlation.
 
 **What the mod side answers.** These are verbs, driven through `trigger`, not
 separate MCP tools. The base class serves only the ones that READ, so every
@@ -139,7 +154,8 @@ The last three are opt-ins, each one line you write in `RegisterCommands`. That
 is deliberately the whole mechanism: not a setting, not a marker file, not an
 environment variable, because each of those can be switched on somewhere other
 than the source somebody will read when they ask why an NPC appeared in their
-world. [`responder/README.md`](responder/README.md) has the detail, including
+world. [`responder/README.md`](https://github.com/musharna/tmodloader-mcp/blob/master/responder/README.md)
+has the detail, including
 why `DevCommandBridge` is the answer to "what about an escape hatch" and why
 there is no `reflect_invoke` here.
 
@@ -150,16 +166,33 @@ worth reading before the others, because it is not a preference — sessions are
 listed and killed through Windows' own `tasklist.exe` and `taskkill.exe`, and
 `build_mod` hands tModLoader a Windows path because it builds inside a Windows
 process. A native Linux or macOS tModLoader cannot be driven by this as it
-stands. `check` says so by name rather than failing later on a missing file in
-System32; if you are on WSL and those tools live somewhere unusual, set
+stands. The configuration check every tool runs first says so by name rather
+than failing later on a missing file in System32; if you are on WSL and those
+tools live somewhere unusual, set
 `TMODLOADER_TASKLIST`, `TMODLOADER_TASKKILL` and `TMODLOADER_POWERSHELL`.
 
 - Python 3.12+
 - tModLoader installed (1.4.4.9 is what this is tested against)
-- A mod embedding the trigger-file responder — copy [`responder/`](responder/)
+- A mod embedding the trigger-file responder — copy
+  [`responder/`](https://github.com/musharna/tmodloader-mcp/tree/master/responder)
   into your mod's source tree and subclass `DevResponder`
 - A .NET SDK, for `api_search` only — the index is built by a small C# tool.
   Everything else works without one.
+
+## Install
+
+```sh
+uv tool install tmodloader-mcp    # or: pip install tmodloader-mcp
+```
+
+Or install nothing and let `uvx tmodloader-mcp` resolve it per run — the
+client configuration below shows both shapes.
+
+The package is the Python half only. The responder is not on PyPI and could
+not usefully be — it is C# that compiles inside **your** mod — so it comes
+from vendoring
+[`responder/`](https://github.com/musharna/tmodloader-mcp/tree/master/responder)
+out of the repository, however you obtained the package.
 
 ## Configuration
 
@@ -196,7 +229,8 @@ filename is built from: `<modname>-diag-<token>.txt`, `<modname>-shot-<token>.pn
 lowercased, where `<token>` identifies which player's client wrote it — except
 `<modname>-capture.trigger` and `<modname>-commands.txt`, which stay one name
 shared by every client (see
-[`docs/MOD_CONTRACT.md`](docs/MOD_CONTRACT.md#the-filenames) for why).
+[`docs/MOD_CONTRACT.md`](https://github.com/musharna/tmodloader-mcp/blob/master/docs/MOD_CONTRACT.md#the-filenames)
+for why).
 tModLoader takes the mod's name from the source folder, so it is derived from
 `TMODLOADER_MOD_SOURCE` and only needs setting for a checkout whose folder is
 named something other than the mod. Deriving it is also what keeps two mods
@@ -270,12 +304,23 @@ checkout:
 "args": ["run", "--directory", "/path/to/tmodloader-mcp", "tmodloader-mcp"]
 ```
 
+Or, with the package from PyPI, no checkout at all:
+
+```json
+"command": "uvx",
+"args": ["tmodloader-mcp"]
+```
+
+The repository's own `.mcp.json` stays on `uv run` deliberately — inside this
+checkout you want the code in front of you, not the release behind it.
+
 ## Known limits
 
 Everything below is a fact about this repository rather than a plan. The
 history it replaced — seven rounds of "what would make this yours", every item
-struck through — now lives in [`CHANGELOG.md`](CHANGELOG.md), which is where a
-changelog belongs.
+struck through — now lives in
+[`CHANGELOG.md`](https://github.com/musharna/tmodloader-mcp/blob/master/CHANGELOG.md),
+which is where a changelog belongs.
 
 **It has only ever run on one install.** One machine, one tModLoader
 (1.4.4.9), one world, one character. Every live check in `tests/` drives a real
@@ -287,8 +332,9 @@ something install-specific.
 **Two dedicated servers racing for one trigger is unobserved.** A server is
 addressed by its port and answers under that name, and each half of that
 mechanism was checked with one server and a hand-written trigger. Running two
-at once needs a second world; [`template/`](template/) is the cheapest route to
-one.
+at once needs a second world;
+[`template/`](https://github.com/musharna/tmodloader-mcp/tree/master/template)
+is the cheapest route to one.
 
 **There is no escape hatch, deliberately.** Other harnesses ship
 `reflect_invoke` or `execute_code`. `command` is the answer here: it runs a
