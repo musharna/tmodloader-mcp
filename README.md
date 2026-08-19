@@ -65,7 +65,7 @@ Then:
    [Using it from Claude Code](#using-it-from-claude-code).
 3. **Ask the game something** — `launch`, then `diag`. Or open with the
    `start_a_session` prompt, which lists the worlds and characters that
-   actually exist here, the two preconditions `launch` cannot check.
+   actually exist here.
 
 This needs **WSL2 driving a Windows tModLoader** — [Requirements](#requirements)
 says why before anything else does.
@@ -117,10 +117,9 @@ You can read the contract or vendor the folder; the folder is the same document
 with a compiler checking it.
 
 Since 0.6.0 replies are **tagged**: a request may carry a short id the
-responder echoes back as its answer's first line, so a late answer can never be
-mistaken for the next request's. A vendored copy older than that keeps working
-— the harness sends the tag only to a responder that advertises taking it —
-but re-vendoring buys the correlation.
+responder echoes back first, so a late answer can never be mistaken for the
+next request's. Older vendored copies keep working — the tag is only sent to
+a responder that advertises taking it.
 
 ## What the mod side answers
 
@@ -244,30 +243,26 @@ earns the surface here is that a running game is not stateless:
 | `save_restore`   | Putting them back, saving what it overwrote so it can be undone   |
 | `save_snapshots` | Which copies exist, newest first                                  |
 
-Those glue steps are where the hand-written version actually went wrong: a
+Those one-liners are where the hand-written version actually went wrong: a
 `pkill` pattern that matched its own command line, a readiness check that
 passed on a killed process's leftover heartbeat, and — for one stretch — a
-`shot` that promised "a whole PNG behind it" while no PNG check existed in any
-version: the file was waited for and renamed, never opened. The check exists
-now, and it checks the end that decides: a PNG's signature is valid on a
-truncated file, so the trailer is what is read — bytes that are not a picture
-are refused at once, and a picture still arriving is waited for. The gap was
-recorded here as absent rather than quietly corrected, because a README is
-read by people deciding what they no longer have to check themselves.
+`shot` row promising a PNG check that did not exist: the file was waited for
+and renamed, never opened. It exists now, and reads the end that decides — a
+truncated PNG has a perfectly valid signature, so the trailer is what is
+checked. The gap was recorded here rather than quietly corrected, because a
+README is read by people deciding what they no longer have to check.
 
-Two **prompts** ship with it. `diagnose_silence` walks the four reasons the mod
-might not answer — with this install's heartbeat, mod list and logs already
-read, rather than as prose you apply yourself. `start_a_session` lists the
-worlds and characters that actually exist here, which are the two preconditions
-`launch` states and cannot check. Both render the failure into the text when
-the configuration is unusable, because a diagnostic that refuses to render has
-failed at the one moment it was for.
+Two **prompts** ship with it: `diagnose_silence` walks the four reasons the
+mod might not answer, with this install's heartbeat, mod list and logs already
+read; `start_a_session` lists the worlds and characters that actually exist
+here — the two preconditions `launch` states and cannot check. Both render the
+failure into the text when the configuration is unusable, because a diagnostic
+that refuses to render has failed at the one moment it was for.
 
-Captures are also addressable as `capture://{name}` resources. Both surfaces go
-through one reader that accepts a **name, never a path**, and serves only
-capture-shaped files whose resolved parent is the save directory — a reader that
-opened whatever it was handed would be the leak this project exists to prevent,
-arriving from the other end.
+Captures are also addressable as `capture://{name}` resources. Both surfaces
+share one reader that takes a **name, never a path**, and serves only
+capture-shaped files inside the save directory — a reader that opened whatever
+it was handed would be the leak this project exists to prevent.
 
 ## What it cannot do
 
@@ -281,13 +276,12 @@ That matters more than it sounds: a bug that only appeared in singleplayer
 shipped once precisely because every harness ran server-plus-client.
 
 **There is no bare dedicated server either.** An empty server runs no update
-hooks, so the mod never polls and never answers — measured on one server
-process, changing only whether a client was attached: silent for 90s alone, and
-its heartbeat appeared within 30s of a client joining that same process,
-reporting `polls: 1`. `launch("server")` refuses for the same reason
-singleplayer does — what it promises is a game that can answer, and a server on
-its own never becomes one. Start a server outside this tool if you want one to
-join yourself.
+hooks, so the mod never polls and never answers — measured on one process,
+changing only whether a client was attached: silent for 90s alone, answering
+within 30s of a client joining. `launch("server")` refuses for the same reason
+singleplayer does — what it promises is a game that can answer, and a server
+on its own never becomes one. Start one outside this tool if you want a server
+to join yourself.
 
 ## Requirements
 
@@ -313,16 +307,14 @@ tools live somewhere unusual, set
 
 ```sh
 uv tool install tmodloader-mcp    # or: pip install tmodloader-mcp
+                                  # or none at all: uvx tmodloader-mcp
 ```
 
-Or install nothing and let `uvx tmodloader-mcp` resolve it per run — the
-client configuration below shows both shapes.
-
 The package is the Python half only. The responder is not on PyPI and could
-not usefully be — it is C# that compiles inside **your** mod — so it comes
-from vendoring
+not usefully be — it is C# that compiles inside **your** mod — so it is
+vendored from
 [`responder/`](https://github.com/musharna/tmodloader-mcp/tree/master/responder)
-out of the repository, however you obtained the package.
+in the repository, however you obtained the package.
 
 ## Configuration
 
@@ -343,11 +335,10 @@ export TMODLOADER_SAVE_DIR="/mnt/c/Users/<you>/Documents/My Games/Terraria/tModL
 export TMODLOADER_MOD_SOURCE="$TMODLOADER_SAVE_DIR/ModSources/<YourMod>"
 ```
 
-The required two have no default rather than a plausible one on purpose. A
-default pointing at the author's disk does not fail on yours — it resolves, and
-in the worst case it resolves to something that exists, so the server drives an
-install you never chose. Both unset variables are reported together, so this
-costs one restart and not two.
+The required two have no default on purpose: a default pointing at the
+author's disk does not fail on yours — it resolves, worst case to something
+that exists, and the server drives an install you never chose. Both unset
+variables are reported together, so this costs one restart, not two.
 
 `TMODLOADER_WORLD_WIN` is the world `launch` loads when you do not pass one. It
 has no default either; with neither set, `launch` refuses and **lists the worlds
@@ -409,17 +400,13 @@ finds the server:
 }
 ```
 
-The two paths are **read from your environment rather than written down**. A
-committed config with real paths in it would put back exactly what the required
-variables took out, and it would be one person's paths in everybody's checkout.
-Export them first; `claude mcp list` names any that are missing.
-
-**Export them where the client is launched, not only in an interactive shell.**
-The substitution is the _client's_, against its own environment, so a client
-that never sourced your shell profile has nothing to substitute and passes
-`${TMODLOADER_SAVE_DIR}` through as text. The server treats a value that is
-still its own name as absent and says so by that name, rather than reporting
-four problems about the variables derived from it.
+The two paths are **read from your environment rather than written down** — a
+committed config with real paths would be one person's paths in everybody's
+checkout. Export them **where the client is launched**, not only in an
+interactive shell: the substitution is the _client's_, against its own
+environment, and a value passed through as literal `${TMODLOADER_SAVE_DIR}` is
+treated as absent and reported by that name. `claude mcp list` names any that
+are missing.
 
 <details>
 <summary><strong>If the server reports a variable missing that you know you
@@ -463,9 +450,8 @@ checkout you want the code in front of you, not the release behind it.
 
 ## Known limits
 
-Everything below is a fact about this repository rather than a plan. The
-history it replaced — seven rounds of "what would make this yours", every item
-struck through — now lives in
+Everything below is a fact about this repository rather than a plan; the
+struck-through history this section replaced lives in
 [`CHANGELOG.md`](https://github.com/musharna/tmodloader-mcp/blob/master/CHANGELOG.md),
 which is where a changelog belongs.
 
