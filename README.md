@@ -10,26 +10,99 @@ Game engines have grown MCP servers — Unity, Unreal, Godot and Defold all have
 one, so an assistant can see a real scene instead of guessing from a prompt.
 tModLoader has not had one. This is that.
 
-> **Status: alpha** — see [Known limits](#known-limits) before adopting it.
-> Nothing defaults to anybody's install, the mod-side half is a folder you
-> vendor ([`responder/`](https://github.com/musharna/tmodloader-mcp/tree/master/responder)),
-> and CI compiles it with nothing of any mod's on the compile line.
->
-> **The thing most worth knowing about this project is that its hardest bugs
-> were found by RUNNING it.** Two clients overwriting each other's answers, a
-> capture lock bounded by a guess, a dedicated server with no address to be
-> told apart by, and — most recently — a save-snapshot feature whose entire
-> premise turned out to be false when somebody finally measured it. The unit
-> suite passed against every one of those.
-> [`CHANGELOG.md`](https://github.com/musharna/tmodloader-mcp/blob/master/CHANGELOG.md)
-> is the record.
+<img src="https://raw.githubusercontent.com/musharna/tmodloader-mcp/master/docs/shot-topright.png"
+     alt="The top-right region of a running game: hearts, a minimap, two players on it"
+     width="640">
 
-## Why an MCP server rather than a shell script
+*A real answer, not a mock-up: `shot:topright`, exactly as the tool returned
+it. It is read from the game's own back buffer, so a window sitting in front
+of the game cannot be in the picture — the reason for that is
+[below](#how-it-works).*
+
+> **Status: alpha** — it has only ever run on one install; see
+> [Known limits](#known-limits) before adopting it. Nothing defaults to
+> anybody's install, the mod-side half is a folder you vendor
+> ([`responder/`](https://github.com/musharna/tmodloader-mcp/tree/master/responder)),
+> and CI compiles it with nothing of any mod's on the compile line.
+
+In a hurry: [Install](#install) · [Configuration](#configuration) ·
+[Claude Code setup](#using-it-from-claude-code)
+
+## How it works
+
+The game is asked by **writing a file it polls**, not by sending it input:
+
+```text
+   an agent — Claude Code, or anything else that speaks MCP
+                │
+                │  tools · prompts · capture:// resources
+                ▼
+   tmodloader-mcp — this package. Python, runs in WSL2
+                │
+                │  writes  <mod>-capture.trigger
+                │  reads   <mod>-diag-<token>.txt,
+                │          <mod>-shot-<token>.png, ...
+                ▼
+   the tModLoader save directory — plain files, no socket
+                ▲
+                │  polls every few frames, writes each
+                │  answer next to the trigger it answers
+                │
+   DevResponder — a folder of C# you vendor into YOUR mod,
+   running inside tModLoader, a real game, on Windows
+```
+
+No synthetic keystrokes, no window focus, and nothing that can be fooled by
+another window sitting on top of the game. That last point is the reason for
+the design: OS-level screen capture was tried first and returned a picture of
+Discord — a window in front of the game — while passing every check available.
+Reading the game's own back buffer cannot contain another window by
+construction, not by luck.
+
+Captures name a **region** and have no default. The frame holds only the game,
+but that still includes a character name, a world name and any chat on screen,
+so a request says which corner it wants.
+
+The mod side of that protocol — every filename, what each one contains, and
+which failures it has to be able to express — is written down in
+[`docs/MOD_CONTRACT.md`](https://github.com/musharna/tmodloader-mcp/blob/master/docs/MOD_CONTRACT.md),
+and implemented in
+[`responder/`](https://github.com/musharna/tmodloader-mcp/tree/master/responder).
+You can read the contract or vendor the folder; the folder is the same document
+with a compiler checking it.
+
+Since 0.6.0 replies are **tagged**: a request may carry a short id the
+responder echoes back as its answer's first line, so a late answer can never be
+mistaken for the next request's. A vendored copy older than that keeps working
+— the harness sends the tag only to a responder that advertises taking it —
+but re-vendoring buys the correlation.
+
+## What the mod side answers
+
+These are verbs, driven through the `trigger` tool, not separate MCP tools.
+The base class serves only the ones that READ, so every consumer gets them and
+vendoring an upgrade can never hand your mod a power it did not have before:
+
+|                       | Verbs                                                                                                                                                                                                                                                                      |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Base — reads only** | `capture` `shot` photograph the frame; `diag` reports what your mod chose to report; `tiles` counts tile types in a rectangle; `entities` counts NPCs, items or projectiles; `find` returns one line per entity with position and health; `players` lists who is connected |
+| `DevMutations`        | `time` `weather` `spawn` `give` `teleport` `settile` `cleartile` `despawn`                                                                                                                                                                                                 |
+| `DevCommandBridge`    | `command` `commandlist` — runs any mod's own registered `ModCommand`s                                                                                                                                                                                                      |
+| `DevChat`             | `chat` `say`                                                                                                                                                                                                                                                               |
+
+The last three are opt-ins, each one line you write in `RegisterCommands`. That
+is deliberately the whole mechanism: not a setting, not a marker file, not an
+environment variable, because each of those can be switched on somewhere other
+than the source somebody will read when they ask why an NPC appeared in their
+world. [`responder/README.md`](https://github.com/musharna/tmodloader-mcp/blob/master/responder/README.md)
+has the detail, including why `DevCommandBridge` is the answer to "what about
+an escape hatch" and why there is no `reflect_invoke` here.
+
+## The tool surface
 
 Most of what this does _could_ be a CLI, and where that is true it should stay
-one — a stateless local binary does not need a protocol in front of it.
-
-What earns the surface here is that a running game is not stateless:
+one — a stateless local binary does not need a protocol in front of it. What
+earns the surface here is that a running game is not stateless:
 
 | Tool              | What it buys over `bash`                                         |
 | ----------------- | ---------------------------------------------------------------- |
@@ -57,6 +130,17 @@ What earns the surface here is that a running game is not stateless:
 | `save_snapshots`  | Which copies exist, newest first                                 |
 | `restart`         | stop -> build -> launch in the one order that works              |
 
+Those glue steps are where the hand-written version actually went wrong: a
+`pkill` pattern that matched its own command line, a readiness check that
+passed on a killed process's leftover heartbeat, and — for one stretch — a
+`shot` that promised "a whole PNG behind it" while no PNG check existed in any
+version: the file was waited for and renamed, never opened. The check exists
+now, and it checks the end that decides: a PNG's signature is valid on a
+truncated file, so the trailer is what is read — bytes that are not a picture
+are refused at once, and a picture still arriving is waited for. The gap was
+recorded here as absent rather than quietly corrected, because a README is
+read by people deciding what they no longer have to check themselves.
+
 Two **prompts** ship with it. `diagnose_silence` walks the four reasons the mod
 might not answer — with this install's heartbeat, mod list and logs already
 read, rather than as prose you apply yourself. `start_a_session` lists the
@@ -70,24 +154,6 @@ through one reader that accepts a **name, never a path**, and serves only
 capture-shaped files whose resolved parent is the save directory — a reader that
 opened whatever it was handed would be the leak this project exists to prevent,
 arriving from the other end.
-
-Those glue steps are where the hand-written version actually went wrong: a
-`pkill` pattern that matched its own command line, a readiness check that passed
-on a killed process's leftover heartbeat, and a capture that reported success
-while the thing it photographed had never drawn.
-
-The `shot` row above — "a whole PNG behind it" — once promised a check that did
-not exist, in any version: the file was waited for and renamed, never opened.
-The claim was written down here as absent rather than quietly corrected,
-because a README is read by people deciding what they no longer have to check
-themselves, which makes an imagined guarantee worse than an admitted gap.
-
-**It exists now,** and it checks both ends rather than the header the old claim
-described. A file appears when it is created rather than when it is finished, so
-a capture large enough to be worth taking can be read mid-write — and a truncated
-PNG has an entirely valid signature. So the trailer is what decides: bytes that
-are not a picture are refused at once, and a picture that is still arriving is
-waited for until the timeout. Neither is renamed into your captures.
 
 ## What it cannot do
 
@@ -108,56 +174,6 @@ reporting `polls: 1`. `launch("server")` refuses for the same reason
 singleplayer does — what it promises is a game that can answer, and a server on
 its own never becomes one. Start a server outside this tool if you want one to
 join yourself.
-
-## How it works
-
-The game is asked by **writing a file it polls**, not by sending it input. No
-synthetic keystrokes, no window focus, and nothing that can be fooled by another
-window sitting on top of the game.
-
-That last point is the reason for the design. OS-level screen capture was tried
-first and returned a picture of Discord — a window in front of the game — while
-passing every check available. Reading the game's own back buffer cannot contain
-another window by construction, not by luck.
-
-Captures name a **region** and have no default. The frame holds only the game,
-but that still includes a character name, a world name and any chat on screen,
-so a request says which corner it wants.
-
-The mod side of that protocol — every filename, what each one contains, and
-which failures it has to be able to express — is written down in
-[`docs/MOD_CONTRACT.md`](https://github.com/musharna/tmodloader-mcp/blob/master/docs/MOD_CONTRACT.md),
-and implemented in
-[`responder/`](https://github.com/musharna/tmodloader-mcp/tree/master/responder).
-You can read the contract or vendor the folder; the folder is the same document
-with a compiler checking it.
-
-Since 0.6.0 replies are **tagged**: a request may carry a short id the
-responder echoes back as its answer's first line, so a late answer can never be
-mistaken for the next request's. A vendored copy older than that keeps working
-— the harness sends the tag only to a responder that advertises taking it —
-but re-vendoring buys the correlation.
-
-**What the mod side answers.** These are verbs, driven through `trigger`, not
-separate MCP tools. The base class serves only the ones that READ, so every
-consumer gets them and vendoring an upgrade can never hand your mod a power it
-did not have before:
-
-|                       | Verbs                                                                                                                                                                                                                                                                      |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Base — reads only** | `capture` `shot` photograph the frame; `diag` reports what your mod chose to report; `tiles` counts tile types in a rectangle; `entities` counts NPCs, items or projectiles; `find` returns one line per entity with position and health; `players` lists who is connected |
-| `DevMutations`        | `time` `weather` `spawn` `give` `teleport` `settile` `cleartile` `despawn`                                                                                                                                                                                                 |
-| `DevCommandBridge`    | `command` `commandlist` — runs any mod's own registered `ModCommand`s                                                                                                                                                                                                      |
-| `DevChat`             | `chat` `say`                                                                                                                                                                                                                                                               |
-
-The last three are opt-ins, each one line you write in `RegisterCommands`. That
-is deliberately the whole mechanism: not a setting, not a marker file, not an
-environment variable, because each of those can be switched on somewhere other
-than the source somebody will read when they ask why an NPC appeared in their
-world. [`responder/README.md`](https://github.com/musharna/tmodloader-mcp/blob/master/responder/README.md)
-has the detail, including
-why `DevCommandBridge` is the answer to "what about an escape hatch" and why
-there is no `reflect_invoke` here.
 
 ## Requirements
 
@@ -321,6 +337,13 @@ history it replaced — seven rounds of "what would make this yours", every item
 struck through — now lives in
 [`CHANGELOG.md`](https://github.com/musharna/tmodloader-mcp/blob/master/CHANGELOG.md),
 which is where a changelog belongs.
+
+**The thing most worth knowing about this project is that its hardest bugs
+were found by RUNNING it.** Two clients overwriting each other's answers, a
+capture lock bounded by a guess, a dedicated server with no address to be told
+apart by, and — most recently — a save-snapshot feature whose entire premise
+turned out to be false when somebody finally measured it. The unit suite
+passed against every one of those. The changelog is the record.
 
 **It has only ever run on one install.** One machine, one tModLoader
 (1.4.4.9), one world, one character. Every live check in `tests/` drives a real
