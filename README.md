@@ -470,12 +470,12 @@ it is still evidence from a single configuration. That is what the alpha
 classifier is for, and the first thing an outside user is likely to find is
 something install-specific.
 
-**Two dedicated servers racing for one trigger is unobserved.** A server is
-addressed by its port and answers under that name, and each half of that
-mechanism was checked with one server and a hand-written trigger. Running two
-at once needs a second world;
-[`template/`](https://github.com/musharna/tmodloader-mcp/tree/master/template)
-is the cheapest route to one.
+**Two dedicated servers racing for one trigger: observed once, not proven.**
+Two servers on one save directory — different ports, different worlds, both
+polling the same trigger file — served six alternating addressed requests,
+each answered by the server it named, never by the other, always consumed
+(`tests/live_race_check.py`). One machine, one run: evidence the claim
+protocol holds under a real race, not a proof it always will.
 
 **There is no escape hatch, deliberately.** Other harnesses ship
 `reflect_invoke` or `execute_code`. `command` is the answer here: it runs a

@@ -9,6 +9,27 @@ predates any tag, so the "breaking" notes below describe changes nobody could
 have been depending on — they are recorded because the reasoning is worth
 keeping, not because they broke a released API.
 
+## [Unreleased]
+
+### Observed
+
+- **Two dedicated servers raced for one trigger, for the first time** —
+  the one scenario 0.6.0 shipped with "unobserved" against it. Two servers
+  on one save directory (ports 7810 and 7811, different worlds, both
+  polling the same `-server` trigger) served six alternating
+  `diag@port<n>` requests: every one answered by the addressed server into
+  its per-port dump, never by the other, always consumed. 6/6 on
+  2026-08-18. `tests/live_race_check.py` is the harness — the second
+  world's name comes off argv through `inventory`, and pair B is spawned
+  by hand because `launch` rightly refuses over a running game; the check
+  goes around the refusal rather than weakening it.
+- **Biomancy re-vendored to the 0.6.0 responder** (its copy predated even
+  the entities verbs — four files behind, four missing) and rebuilt with 0
+  errors; its own live check then passed end to end, including the refusal
+  listing all sixteen of its verbs. The opt-in classes compile inert in a
+  mod whose `RegisterCommands` never registers them, which was the design
+  claim, now observed in a second mod.
+
 ## [0.6.0] - 2026-08-17
 
 Everything in this release comes out of one full audit of the repository —
