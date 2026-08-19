@@ -207,7 +207,12 @@ Unreleased work folded into this release from between 0.5.0 and the audit:
   table's six-verb cell unpacked into a table of its own; the deep-dive
   paragraphs (`TMODLOADER_MOD_NAME`, `TMODLOADER_MOD_SOURCE_WIN`, the
   stale-parent-environment diagnosis) folded into `<details>` blocks that
-  degrade to plain paragraphs wherever the tag is stripped.
+  degrade to plain paragraphs wherever the tag is stripped. Last, an
+  identity: a pixel-art blue slime as the logo (`docs/logo.svg`, hand-placed
+  rects, `crispEdges` — sharp at any scale, one request, no font), opening
+  the page and closing a new footer; and "The answers, verbatim" — the live
+  checks' actual replies, quoted, because the refusals are the most
+  characteristic writing in the project and no paraphrase would be believed.
 
 ## [0.5.0] - 2026-08-17
 
