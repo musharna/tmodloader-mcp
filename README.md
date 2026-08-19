@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/musharna/tmodloader-mcp/master/docs/logo.svg"
+       alt="a pixel-art blue slime" width="96" height="72">
+</p>
+
 <h1 align="center">tmodloader-mcp</h1>
 
 <p align="center"><em>Drive a running tModLoader instance from an agent —
@@ -31,8 +36,8 @@ tModLoader has not had one. This is that.
 <p align="center"><sub><em>A real answer, not a mock-up:
 <code>shot:topright</code>, exactly as the tool returned it — read from the
 game's own back buffer, so a window sitting in front of the game cannot be in
-the picture. Why that matters is the first thing the next section
-explains.</em></sub></p>
+the picture. Why that matters is the first thing
+<a href="#how-it-works">How it works</a> explains.</em></sub></p>
 
 > **Status: alpha** — it has only ever run on one install; see
 > [Known limits](#known-limits) before adopting it. Nothing defaults to
@@ -142,12 +147,48 @@ vendoring an upgrade can never hand your mod a power it did not have before:
 | `DevChat`          | `chat` `say`                                                               |
 
 One line each is deliberately the whole mechanism: not a setting, not a marker
-file, not an
-environment variable, because each of those can be switched on somewhere other
+file, not an environment variable, because each of those can be switched on
+somewhere other
 than the source somebody will read when they ask why an NPC appeared in their
 world. [`responder/README.md`](https://github.com/musharna/tmodloader-mcp/blob/master/responder/README.md)
 has the detail, including why `DevCommandBridge` is the answer to "what about
 an escape hatch" and why there is no `reflect_invoke` here.
+
+## The answers, verbatim
+
+Every line below is real — the same server and client the live checks drive,
+quoted rather than paraphrased:
+
+```text
+spawn:1,20        OK: spawned 20 of 20 id=1 at tile 2101,252
+
+time:dusk         sent to a CLIENT:
+                  REFUSED: "time" changes something the SERVER owns, and a
+                  client that changed it would be corrected by the next world
+                  packet - the change would appear to work and then undo
+                  itself. Send this to the server: time@<server-address>.
+
+give:8,5          sent to the SERVER:
+                  REFUSED: "give" needs a local player, and a dedicated
+                  server has none - it runs the world without standing in
+                  it. Ask a client, by name.
+
+spawn:0,1         REFUSED: 0 is not a NPC id - it is how Terraria spells
+                  "nothing", so this would have succeeded and done nothing
+
+spawn:banana,5    REFUSED: "banana" is not a positive whole NPC id
+
+time:teatime      REFUSED: "teatime" is not one of dawn, noon, dusk, midnight
+
+tiles:0,0,1000,1000
+                  REFUSED: 1000 by 1000 is 1000000 tiles, past the limit of
+                  16384 one query may scan
+```
+
+The refusals are the point. Each one says what was wrong, what would have
+been right, and — when the verb belongs to the other side of the wire — where
+to send it instead, because the reader is an agent and an agent retries
+exactly as well as the refusal explains.
 
 ## The tool surface
 
@@ -462,6 +503,16 @@ the world usually leaves no trace on disk — measured, not assumed. Do not rely
 on that: a run long enough to autosave, or a graceful exit, does write. Take a
 `save_snapshot` before anything that mutates a world you care about.
 
-## Licence
+---
 
-MIT.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/musharna/tmodloader-mcp/master/docs/logo.svg"
+       alt="" width="48" height="36">
+</p>
+
+<p align="center"><sub>
+  MIT ·
+  <a href="https://github.com/musharna/tmodloader-mcp/blob/master/CHANGELOG.md">what running it taught, in order</a> ·
+  <a href="https://github.com/musharna/tmodloader-mcp/blob/master/docs/MOD_CONTRACT.md">the protocol, written down</a> ·
+  <a href="https://github.com/musharna/tmodloader-mcp/tree/master/template">a template mod to start from</a>
+</sub></p>
