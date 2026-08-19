@@ -42,6 +42,15 @@ SELF_REPO = re.compile(
     r"([^#]*)(?:#(.*))?$"
 )
 
+#: Files served raw — the README's image is an HTML `<img src>`, which the
+#: markdown LINK pattern never sees, so these are collected from the whole
+#: text. A dead hero image on the PyPI page is exactly the quiet failure this
+#: file exists for: the page renders, the picture does not, nothing reports.
+RAW_SELF = re.compile(
+    r"https://raw\.githubusercontent\.com/musharna/tmodloader-mcp/master/"
+    r"([^)\s\"'#]+)"
+)
+
 
 def _documents() -> list[Path]:
     return sorted(
@@ -71,6 +80,9 @@ def _anchors(text: str) -> set[str]:
 
 def _broken(doc: Path) -> list[str]:
     problems = []
+    for raw_path in RAW_SELF.findall(doc.read_text()):
+        if not (REPO / raw_path).exists():
+            problems.append(f"raw .../{raw_path} -> no such file")
     for _label, target in LINK.findall(doc.read_text()):
         own = SELF_REPO.match(target)
         if own:
@@ -168,3 +180,19 @@ def test_a_broken_absolute_link_into_this_repo_would_actually_be_caught(tmp_path
     assert len(problems) == 1, problems
     assert "no-such-file" in problems[0]
     assert "example.com" not in problems[0]
+
+
+def test_a_dead_raw_image_url_would_actually_be_caught(tmp_path):
+    """`<img src>` never matches the markdown LINK pattern, so a dead image
+    would pass the tests above while rendering as a broken picture on PyPI."""
+    raw = "https://raw.githubusercontent.com/musharna/tmodloader-mcp/master"
+    doc = tmp_path / "sample.md"
+    doc.write_text(
+        f'<img src="{raw}/README.md" alt="fine">\n'
+        f'<img src="{raw}/docs/absent.png" alt="gone">\n'
+    )
+
+    problems = _broken(doc)
+
+    assert len(problems) == 1, problems
+    assert "absent.png" in problems[0]

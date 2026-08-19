@@ -189,6 +189,17 @@ Unreleased work folded into this release from between 0.5.0 and the audit:
   that does not exist; the paragraph beginning "That row" names the row
   (`shot`) instead of pointing thirty lines up; and the vendoring section says
   what 0.6.0's tagged replies buy and that older vendored copies keep working.
+- **And then reorganised to be read.** "How it works" moved above the tool
+  table — the file-poll design is what makes every row below it make sense —
+  with an ASCII diagram of the four layers, chosen over anything richer
+  because a fenced text block renders identically on GitHub and PyPI. A real
+  `shot:topright` opens the page (`docs/shot-topright.png`, named in the
+  sdist's terms: excluded — the allow-list keeps it out of the tarball and the
+  PyPI page loads it from GitHub raw, which the link checker now also
+  verifies, since an `<img src>` never matches the markdown link pattern). The
+  "hardest bugs were found by RUNNING it" paragraph moved from the status
+  blockquote to Known limits, where a reader weighing adoption actually is,
+  and the three-paragraph `shot` history compressed to one.
 
 ## [0.5.0] - 2026-08-17
 
