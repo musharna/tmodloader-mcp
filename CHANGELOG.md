@@ -216,7 +216,12 @@ Unreleased work folded into this release from between 0.5.0 and the audit:
   Then two reader's notes acted on: the slime redrawn truer to the sprite —
   squat and wide, translucent gel, shaded base, sheen, tall side-facing
   eyes — and a conciseness pass over the wordiest paragraphs, which kept
-  every claim and lost about a third of the words.
+  every claim and lost about a third of the words. The hero image restaged
+  by the tool itself — `time:noon`, `teleport:spawn`, `spawn:1,25`,
+  `shot:full`, three takes, best frame kept — replacing a top-right corner
+  that was mostly minimap; trimmed of the unexplored dark below the terrain
+  and disclosed as trimmed, because the caption's claim is the pixels are
+  the game's own.
 
 ## [0.5.0] - 2026-08-17
 
