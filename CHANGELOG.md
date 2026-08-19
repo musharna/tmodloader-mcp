@@ -9,7 +9,20 @@ predates any tag, so the "breaking" notes below describe changes nobody could
 have been depending on — they are recorded because the reasoning is worth
 keeping, not because they broke a released API.
 
-## [Unreleased]
+## [0.6.1] - 2026-08-18
+
+A documentation release. No Python or C# changed: the code that 0.6.0 shipped
+is the code here. What changed is a claim the README made about it, and the
+released page is where that claim is read.
+
+### Documentation
+
+- The known limit "two dedicated servers racing for one trigger is
+  unobserved" is no longer true, so it no longer says that. It now reports
+  what was actually run — observed once, six for six, on one machine — and
+  keeps the distinction between an observation and a proof rather than
+  quietly upgrading one to the other. 0.6.0's PyPI page still carries the
+  old wording, which is the reason this release exists.
 
 ### Observed
 
@@ -262,7 +275,6 @@ turned out to be false: measuring it showed a session ended by `stop()` writes
 neither the world nor the character file, because `stop` force-kills. The
 feature stayed, its justification changed, and the live check that caught the
 error now reports the fact instead of asserting the guess.
-
 
 ### Added
 
