@@ -83,7 +83,7 @@ jobs:
 
       # global.json pins 8.0.x. Without it `dotnet` takes the highest SDK on the
       # runner, which is not the one anybody develops against.
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "8.0.x"
 
