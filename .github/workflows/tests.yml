@@ -49,7 +49,7 @@ jobs:
       # v9.0.0 and v7.6, but no v9, so `@v9` would fail to resolve at all.
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
 
