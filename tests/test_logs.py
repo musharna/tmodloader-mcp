@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 
 from tmodloader_mcp import logs
 from tmodloader_mcp import server as server_mod
@@ -70,9 +71,17 @@ def test_a_negative_tail_is_refused_rather_than_silently_inverted(logs_dir):
     first five - the opposite end, and nearly the whole log. There is no
     sensible reading of a negative tail, so it is refused with the reason
     rather than answered with something.
+
+    ToolError rather than the ValueError underneath it because that is what
+    the TOOL raises since mcp 2.1: `_surfaces_refusals` converts at the
+    boundary, and the type is the only thing the dispatcher will let the
+    reason travel in. The reason is asserted here, not just the refusal -
+    "refused with the reason" is the whole claim in the name.
     """
-    with pytest.raises(ValueError):
+    with pytest.raises(ToolError) as refusal:
         server_mod.logs(lines=-5)
+
+    assert "-5" in str(refusal.value)
 
 
 def test_the_filter_runs_over_the_whole_log_not_just_the_tail(logs_dir):
