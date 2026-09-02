@@ -285,3 +285,118 @@ def test_the_lock_wrapper_preserves_what_the_schema_generator_reads():
     assert tool.__doc__ and "log has gained" in tool.__doc__
     assert "offset" in inspect.signature(tool).parameters
     assert inspect.signature(tool).return_annotation is not inspect.Signature.empty
+
+
+# ---- refusals reaching the model --------------------------------------------
+
+
+def test_every_tool_surfaces_its_refusals():
+    """The companion to the lock scan, and it exists for the same reason.
+
+    mcp 2.1 replaced the message of any exception that is not a ToolError with
+    `Error executing tool <name>`, so three tools that had spent their whole
+    life telling the caller what to do instead said nothing. `_surfaces_refusals`
+    converts at the boundary; this scan is what stops the NEXT tool being added
+    without it, which no other test here would notice - a masked refusal is
+    still a failed call, so the tool "works".
+
+    The resource is deliberately not in scope: ToolError is the tool channel,
+    and `capture_resource` refuses through the resource one.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(server_mod))
+    unsurfaced = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+
+        names = []
+        for decorator in node.decorator_list:
+            target = decorator.func if isinstance(decorator, ast.Call) else decorator
+            names.append(ast.unparse(target))
+
+        if "mcp.tool" in names and "_surfaces_refusals" not in names:
+            unsurfaced.append(node.name)
+
+    assert not unsurfaced, (
+        f"{unsurfaced} refuse without `@_surfaces_refusals` - since mcp 2.1 the "
+        "caller gets `Error executing tool <name>` and the instruction in the "
+        "refusal never leaves the server log"
+    )
+
+
+def test_every_error_this_package_raises_is_one_the_boundary_recognises():
+    """`_REFUSALS` is `(RuntimeError, ValueError)` because that is the
+    convention every module here already follows, not because those two cover
+    today's classes by luck. Pinning the convention is what keeps the pair
+    covering an open set: a new module inventing `WidgetError(Exception)` would
+    be masked at the boundary and this is the only place that would say so.
+
+    A private class is exempt, because a leading underscore is this package's
+    own mark for "not part of the surface" - `config._ProbeWriteFailed` is
+    raised past an `lru_cache` and caught two functions later, and never gets
+    near a tool. The exemption is not taken on trust: a private exception has
+    to be caught in the module that defines it, or it is treated as one that
+    escapes and the convention applies to it after all.
+    """
+    import ast
+    import importlib
+    import inspect
+    import pkgutil
+
+    import tmodloader_mcp
+
+    stray = []
+    for mod in pkgutil.iter_modules(tmodloader_mcp.__path__):
+        module = importlib.import_module(f"tmodloader_mcp.{mod.name}")
+        caught = {
+            ast.unparse(handler.type)
+            for handler in ast.walk(ast.parse(inspect.getsource(module)))
+            if isinstance(handler, ast.ExceptHandler) and handler.type is not None
+        }
+
+        for name, obj in vars(module).items():
+            if not inspect.isclass(obj) or not issubclass(obj, BaseException):
+                continue
+            if obj.__module__ != module.__name__:
+                continue  # imported from elsewhere, counted where it is defined
+            if issubclass(obj, server_mod._REFUSALS):
+                continue
+            if name.startswith("_") and name in caught:
+                continue  # internal control flow, handled where it is raised
+            stray.append(f"{module.__name__}.{name}")
+
+    assert not stray, (
+        f"{stray} do not subclass RuntimeError or ValueError, so the tool "
+        "boundary reads them as crashes and hides their message"
+    )
+
+
+def test_a_real_bug_is_still_masked_rather_than_read_as_a_refusal():
+    """The negative half, with the positive control beside it in the same test.
+
+    Surfacing refusals must not become surfacing everything: `Error executing
+    tool X` is the right answer for a TypeError, because that message is a
+    stack trace's worth of internals the caller can do nothing with. If this
+    ever fails while the test above passes, the tuple has been widened to
+    `Exception` and the boundary no longer distinguishes the two.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    @server_mod._surfaces_refusals
+    def refuses():
+        raise RuntimeError("no session - call `launch` first")
+
+    @server_mod._surfaces_refusals
+    def crashes():
+        raise TypeError("unsupported operand type(s)")
+
+    with pytest.raises(ToolError) as refusal:
+        refuses()
+    assert "call `launch` first" in str(refusal.value)
+
+    with pytest.raises(TypeError):
+        crashes()
