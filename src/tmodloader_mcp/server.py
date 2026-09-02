@@ -38,6 +38,7 @@ from typing import Any, TypedDict
 # mcp 2.x renamed FastMCP to MCPServer and moved it out of mcp.server.fastmcp,
 # which no longer exists. Same class, same decorator, same kwargs.
 from mcp.server.mcpserver import Image, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from . import api as api_mod
@@ -105,6 +106,46 @@ def _serialized(tool):
             return tool(*args, **kwargs)
 
     return locked
+
+
+#: What counts as an anticipated refusal here, stated as the convention the
+#: package already follows rather than as a list of classes: every error type
+#: raised deliberately - ApiError, CaptureError, CommandsError, ConfigError,
+#: InventoryError, LogError, SaveError, SessionError, TriggerError, and the
+#: bare ones this module raises for "no session" - subclasses RuntimeError,
+#: and argument rejection is ValueError. A list of names would go stale the
+#: first time a module grew an error class; the base classes do not.
+#: A genuine bug is a TypeError, AttributeError, KeyError or OSError - none of
+#: those are in here, so they stay masked, which is what masking is for.
+_REFUSALS = (RuntimeError, ValueError)
+
+
+def _surfaces_refusals(tool):
+    """Re-raise an anticipated refusal as ToolError so its text reaches the model.
+
+    Since mcp 2.1 the dispatcher treats any exception that is not a ToolError
+    as a crash: it raises `UnexpectedToolError("Error executing tool <name>")`
+    and the reason it replaced stays in the server log, where the model driving
+    the tool cannot read it. Under 2.0 the text went through whatever the type
+    was, which is why every refusal in this package could be an ordinary
+    exception and nothing here had to say so.
+
+    Every docstring on this surface tells the caller what to do about a refusal
+    - "call `launch` first", "export these where the client is launched" - so a
+    masked refusal is not a cosmetic loss: it removes the instruction that made
+    the tool recoverable. The modules keep raising their own types, because
+    they are usable without MCP; the conversion happens once, here, at the
+    boundary where MCP starts.
+    """
+
+    @wraps(tool)
+    def surfaced(*args, **kwargs):
+        try:
+            return tool(*args, **kwargs)
+        except _REFUSALS as exc:
+            raise ToolError(str(exc)) from exc
+
+    return surfaced
 
 
 def _cfg() -> config_mod.Config:
@@ -364,6 +405,7 @@ class CommandsOut(TypedDict):
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def build_mod(timeout: float = 600.0) -> BuildOut:
     """Compile the configured mod source into a .tmod.
 
@@ -397,6 +439,7 @@ def build_mod(timeout: float = 600.0) -> BuildOut:
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def launch(
     mode: str = "server_client",
     port: int = 7810,
@@ -462,6 +505,7 @@ class JoinOut(TypedDict):
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def join(player: str, timeout: float = 300.0) -> JoinOut:
     """Bring another character into the session that is already running.
 
@@ -506,6 +550,7 @@ def join(player: str, timeout: float = 300.0) -> JoinOut:
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def trigger(
     command: str,
     target: str | None = None,
@@ -572,6 +617,7 @@ def trigger(
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def commands(server: bool = False) -> CommandsOut:
     """What this side's mod says it serves, read from the mod itself.
 
@@ -618,6 +664,7 @@ def commands(server: bool = False) -> CommandsOut:
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def diag(
     server: bool = False, target: str | None = None, timeout: float = 60.0
 ) -> DiagOut:
@@ -674,6 +721,7 @@ class WaitOut(TypedDict):
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def wait_until(
     field: str,
     op: str,
@@ -746,6 +794,7 @@ def wait_until(
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def shot(region: str, target: str | None = None, timeout: float = 60.0) -> ShotOut:
     """Capture a region of the game's own back buffer and return the PNG path.
 
@@ -780,6 +829,7 @@ def shot(region: str, target: str | None = None, timeout: float = 60.0) -> ShotO
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def captures() -> dict[str, list[str]]:
     """Every capture in the save directory, newest last.
 
@@ -795,6 +845,7 @@ def captures() -> dict[str, list[str]]:
     annotations=_READ_ONLY,
 )
 @_serialized
+@_surfaces_refusals
 def read_capture(name: str) -> Image:
     """Return one capture's PNG as image content.
 
@@ -819,6 +870,7 @@ def read_capture(name: str) -> Image:
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def prune_captures(keep: int) -> PruneOut:
     """Delete all but the newest `keep` captures, and say which went.
 
@@ -877,6 +929,7 @@ def capture_resource(name: str) -> bytes:
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def status() -> StatusOut:
     """Whether a session is running, and what it is.
 
@@ -917,6 +970,7 @@ def status() -> StatusOut:
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def logs(
     name: str = "client.log",
     previous: bool = False,
@@ -976,6 +1030,7 @@ def logs(
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def log_files() -> dict[str, Any]:
     """Which logs exist right now, and how many earlier runs are archived.
 
@@ -995,6 +1050,7 @@ def log_files() -> dict[str, Any]:
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def inventory() -> InventoryOut:
     """The worlds, characters and mods on this machine.
 
@@ -1038,6 +1094,7 @@ def inventory() -> InventoryOut:
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def save_snapshot(label: str) -> SnapshotOut:
     """Copy this world and its characters aside, so a run can be undone.
 
@@ -1074,6 +1131,7 @@ def save_snapshot(label: str) -> SnapshotOut:
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def save_restore(label: str) -> RestoreOut:
     """Overwrite the world and characters with a snapshot.
 
@@ -1102,6 +1160,7 @@ def save_restore(label: str) -> RestoreOut:
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def save_snapshots() -> SnapshotListOut:
     """Every snapshot on this machine, newest first, with its age in seconds.
 
@@ -1126,6 +1185,7 @@ def save_snapshots() -> SnapshotListOut:
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def heartbeat() -> HeartbeatOut:
     """Why the game is not answering, for both sides at once.
 
@@ -1197,6 +1257,7 @@ def heartbeat() -> HeartbeatOut:
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def log_since(
     name: str,
     offset: int = 0,
@@ -1265,6 +1326,7 @@ def log_since(
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def api_search(query: str, kind: str | None = None, limit: int = 40) -> ApiSearchOut:
     """Find a type, field, property or method in the INSTALLED tModLoader.
 
@@ -1308,6 +1370,7 @@ def api_search(query: str, kind: str | None = None, limit: int = 40) -> ApiSearc
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def log_watch(
     name: str,
     contains: str,
@@ -1375,6 +1438,7 @@ def log_watch(
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def restart(
     build: bool = True, timeout: float = 300.0, build_timeout: float = 600.0
 ) -> RestartOut:
@@ -1455,6 +1519,7 @@ def restart(
     structured_output=True,
 )
 @_serialized
+@_surfaces_refusals
 def stop(settle: float = session_mod.KILL_SETTLE) -> StopOut:
     """Kill only the processes this session started, and confirm they are gone.
 

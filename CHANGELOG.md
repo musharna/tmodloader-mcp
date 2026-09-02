@@ -9,6 +9,23 @@ predates any tag, so the "breaking" notes below describe changes nobody could
 have been depending on — they are recorded because the reasoning is worth
 keeping, not because they broke a released API.
 
+## [Unreleased]
+
+### Fixed
+
+- **Every refusal reaches the caller again under mcp 2.1.** The dispatcher
+  there treats any exception that is not a `ToolError` as a crash: it answers
+  `Error executing tool <name>` and leaves the reason in the server log. Every
+  refusal on this surface was an ordinary exception, because under mcp 2.0 the
+  text went through whatever the type was — so `heartbeat` stopped saying which
+  variable was unsubstituted, `read_capture` stopped naming the capture, and
+  `restart` stopped saying to call `launch`. Each of those messages is an
+  instruction, so masking one does not just lose detail, it makes the tool
+  unrecoverable. `_surfaces_refusals` converts at the boundary, once; the
+  modules keep raising their own types, since they are usable without MCP.
+  A genuine bug — a `TypeError`, an `AttributeError` — is not a `RuntimeError`
+  and stays masked, which is what masking is for.
+
 ## [0.6.1] - 2026-08-18
 
 A documentation release. No Python or C# changed: the code that 0.6.0 shipped
