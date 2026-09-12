@@ -83,3 +83,6 @@ target-version = "py312"
 # `docs/` wholesale so docs/MOD_CONTRACT.md - a protocol document whose
 # examples should stay well-formed - stays linted.
 exclude = ["docs/superpowers"]
+
+[tool.mutmut]
+source_paths = ["src"]
