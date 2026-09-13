@@ -68,7 +68,7 @@ def player_token(name: str | None) -> str | None:
     if not name or not name.strip():
         return None
     slug = _NON_ALNUM.sub("-", name.lower()).strip("-")
-    digest = hashlib.md5(name.encode("utf-8")).hexdigest()[:4]
+    digest = hashlib.md5(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:4]
     # A name of pure punctuation slugs to "". `player` rather than nothing,
     # because the bare digest does not match PLAYER_TOKEN_GRAMMAR - and a token
     # the grammar rejects is a file `captures` and heartbeat discovery cannot

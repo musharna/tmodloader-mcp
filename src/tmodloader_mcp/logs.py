@@ -180,7 +180,7 @@ def _fingerprint(handle) -> str:
     """
     handle.seek(0)
     head = handle.read(_FINGERPRINT_BYTES)
-    return f"{len(head)}:{hashlib.md5(head).hexdigest()[:12]}"
+    return f"{len(head)}:{hashlib.md5(head, usedforsecurity=False).hexdigest()[:12]}"
 
 
 def _same_log(handle, recorded: str) -> bool:
@@ -206,7 +206,7 @@ def _same_log(handle, recorded: str) -> bool:
         # The file cannot even hold the head it used to have.
         return False
 
-    return hashlib.md5(head).hexdigest()[:12] == digest
+    return hashlib.md5(head, usedforsecurity=False).hexdigest()[:12] == digest
 
 
 @dataclass(frozen=True)
