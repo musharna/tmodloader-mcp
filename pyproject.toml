@@ -86,3 +86,6 @@ exclude = ["docs/superpowers"]
 
 [tool.mutmut]
 source_paths = ["src"]
+also_copy = [".github", ".gitignore", ".mcp.json", ".pre-commit-config.yaml", "CHANGELOG.md", "CLAUDE.md", "LICENSE", "README.md", "docs", "global.json", "responder", "scripts", "template", "tools"]
+# test_mcp_protocol drives the stdio server as a subprocess, which mutmut's in-process output capture closes
+pytest_add_cli_args = ["--ignore=tests/test_mcp_protocol.py"]
