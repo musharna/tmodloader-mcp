@@ -11,6 +11,12 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-16
+
+A one-fix release. The fix below merged on 2026-08-19 and sat unreleased for four
+weeks, during which PyPI 0.6.1 on mcp >= 2.1 answered every refusal with
+`Error executing tool <name>`.
+
 ### Fixed
 
 - **Every refusal reaches the caller again under mcp 2.1.** The dispatcher
