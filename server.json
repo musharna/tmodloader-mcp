@@ -1,0 +1,24 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.musharna/tmodloader-mcp",
+  "title": "tmodloader-mcp",
+  "description": "Drive a running tModLoader (Terraria) instance from an agent: launch it, query and screenshot it, read its state back as structured data. Needs tModLoader on the host.",
+  "websiteUrl": "https://github.com/musharna/tmodloader-mcp",
+  "repository": {
+    "url": "https://github.com/musharna/tmodloader-mcp",
+    "source": "github"
+  },
+  "version": "0.6.3",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "tmodloader-mcp",
+      "version": "0.6.3",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -16,6 +16,8 @@ structured data.</em></p>
   <img src="https://img.shields.io/badge/licence-MIT-green" alt="MIT">
 </p>
 
+<!-- mcp-name: io.github.musharna/tmodloader-mcp -->
+
 <p align="center">
   <a href="#how-it-works">How it works</a> ·
   <a href="#quick-start">Quick start</a> ·
