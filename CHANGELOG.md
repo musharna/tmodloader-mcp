@@ -11,6 +11,12 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-17
+
+### Added
+
+- Listed in the MCP registry: `server.json`, the `mcp-name` marker in the README (the registry verifies PyPI ownership through it), and a tag-triggered publish workflow that waits for the PyPI release first.
+
 ## [0.6.2] - 2026-09-16
 
 A one-fix release. The fix below merged on 2026-08-19 and sat unreleased for four
