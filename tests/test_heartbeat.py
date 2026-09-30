@@ -224,3 +224,12 @@ def test_a_file_deleted_between_the_stat_and_the_read_is_present_but_unreadable(
     hb = heartbeat.read(path)
 
     assert hb.present and not hb.live and hb.fields == {}
+
+
+def test_a_filename_ending_in_a_newline_is_not_a_heartbeat(tmp_path):
+    # A newline is a legal byte in a Linux filename, and `$` matches before it (#61).
+    (tmp_path / "biomancy-hooks-n43n-003f.txt\n").write_text("side: client\n")
+    (tmp_path / "biomancy-hooks-big-bird-44a3.txt").write_text("side: client\n")
+    found = heartbeat.client_files(tmp_path, "biomancy")
+    # Positive control in the same test: the real client IS found.
+    assert [p.name for p in found] == ["biomancy-hooks-big-bird-44a3.txt"]

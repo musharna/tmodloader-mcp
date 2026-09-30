@@ -90,3 +90,11 @@ def test_a_recycled_pid_is_not_the_same_process():
 
 def test_the_query_asks_for_the_creation_time():
     assert "CreationDate" in session._PID_QUERY
+
+
+def test_a_line_whose_pid_int_cannot_read_is_skipped_not_fatal():
+    """A Windows pid is a 32-bit number, at most 10 digits. `isdigit()` also
+    passes superscripts and 4301-digit runs, which `int()` refuses (#61)."""
+    text = "1" * 4301 + " stamp\n\u00b2 stamp\n38552 133850000000000000\n"
+    # Positive control: the well-formed line on either side is still parsed.
+    assert session.parse_pid_stamps(text) == {38552: "133850000000000000"}

@@ -380,3 +380,13 @@ def test_a_vanished_file_does_not_weaken_the_containment_check(tmp_path):
     tolerant of races must not become tolerant of traversal."""
     with pytest.raises(captures.CaptureError, match="not a capture name"):
         captures.contained(tmp_path, "Biomancy", "../../escape.png", missing_ok=True)
+
+
+def test_a_trailing_newline_is_not_a_capture():
+    """`$` also matches just before a final newline, so a `^...$` pattern
+    accepts one byte past the end it claims to be anchored at (#61)."""
+    assert not capture_pattern("Biomancy").match(
+        "biomancy-shot-n43n-003f-001-full.png\n"
+    )
+    # Positive control: the same name without the newline is still a capture.
+    assert capture_pattern("Biomancy").match("biomancy-shot-n43n-003f-001-full.png")

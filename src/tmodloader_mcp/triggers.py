@@ -33,7 +33,7 @@ from .commands import CommandSet
 #: what tModLoader internal names are: the prefix lands in filenames and inside
 #: the capture-matching pattern, so a separator would build a path instead of a
 #: name and a dot would widen the pattern.
-MOD_NAME = re.compile(r"^[A-Za-z0-9]+$")
+MOD_NAME = re.compile(r"\A[A-Za-z0-9]+\Z")
 
 #: A slug plus four hex of MD5. Pinned here as a constant because
 #: `captures.capture_pattern` has to embed the SAME grammar to stay
