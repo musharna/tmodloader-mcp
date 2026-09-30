@@ -117,6 +117,30 @@ def test_a_name_that_would_not_be_a_mod_name_is_refused(bad, tmp_path):
         assert cfg.mod_name == "Src"
 
 
+def test_a_source_folder_ending_in_a_newline_is_not_a_mod_name(tmp_path):
+    """`$` also matches just before a final newline, so `^[A-Za-z0-9]+$`
+    passed `Biomancy\\n` (#61). The setting itself is stripped; the folder
+    NAME it defaults from is not, and a trailing slash keeps the newline past
+    the strip."""
+    source = tmp_path / "Biomancy\n"
+    source.mkdir()
+    cfg = config.load(
+        {"TMODLOADER_MOD_SOURCE": f"{source}/", "TMODLOADER_SAVE_DIR": str(tmp_path)}
+    )
+    # The premise, asserted: without it this test would pass on any code.
+    assert cfg.mod_name == "Biomancy\n"
+    assert any("TMODLOADER_MOD_NAME" in p for p in config.check(cfg))
+
+    # Positive control: the same folder without the newline is a mod name.
+    plain = tmp_path / "Biomancy"
+    plain.mkdir()
+    ok = config.load(
+        {"TMODLOADER_MOD_SOURCE": f"{plain}/", "TMODLOADER_SAVE_DIR": str(tmp_path)}
+    )
+    assert ok.mod_name == "Biomancy"
+    assert not any("TMODLOADER_MOD_NAME" in p for p in config.check(ok))
+
+
 # ---- captures follow the same prefix ------------------------------------
 
 

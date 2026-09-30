@@ -199,7 +199,17 @@ def test_a_restore_is_refused_while_the_game_is_running(tmp_path):
 
 @pytest.mark.parametrize(
     "label",
-    ["../escape", "a/b", "", ".hidden", "..", "with space", "x" * 65, "/abs"],
+    [
+        "../escape",
+        "a/b",
+        "",
+        ".hidden",
+        "..",
+        "with space",
+        "x" * 65,
+        "/abs",
+        "world\n",
+    ],
 )
 def test_a_label_that_could_climb_out_of_the_folder_is_refused(tmp_path, label):
     cfg = _cfg(tmp_path)

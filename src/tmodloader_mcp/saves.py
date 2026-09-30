@@ -56,7 +56,7 @@ from .config import Config
 #: so anything that could climb out of the snapshot root - a slash, a `..`, a
 #: leading dot - is refused rather than sanitised. Sanitising silently maps two
 #: labels onto one directory, and the second `take` would overwrite the first.
-_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_LABEL = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 #: Taken automatically by `restore` before it overwrites anything, so a restore
 #: is itself reversible. Reserved: a caller may not take this name, or the

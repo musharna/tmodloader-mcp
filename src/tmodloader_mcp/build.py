@@ -15,6 +15,7 @@ about the exit code, which tModLoader does not use reliably here.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -25,6 +26,11 @@ GAME_OPEN_MARKER = "TML003"
 
 #: The line that means the compiler finished, with its counts.
 SUCCESS_MARKER = "Compilation finished with"
+
+#: A count as the compiler prints it: ASCII digits, at most a C# int's 10.
+#: Not `str.isdigit()`, which is also true for `²` and for runs longer than
+#: the 4300 digits `int()` will convert - both of which `int()` refuses.
+_COUNT = re.compile(r"[0-9]{1,10}")
 
 
 @dataclass(frozen=True)
@@ -63,9 +69,9 @@ def _counts(line: str) -> tuple[int, int]:
     errors = warnings = 0
     for i, w in enumerate(words):
         if w.startswith("error") and i:
-            errors = int(words[i - 1]) if words[i - 1].isdigit() else errors
+            errors = int(words[i - 1]) if _COUNT.fullmatch(words[i - 1]) else errors
         if w.startswith("warning") and i:
-            warnings = int(words[i - 1]) if words[i - 1].isdigit() else warnings
+            warnings = int(words[i - 1]) if _COUNT.fullmatch(words[i - 1]) else warnings
     return errors, warnings
 
 

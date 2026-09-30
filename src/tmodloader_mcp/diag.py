@@ -74,7 +74,10 @@ _ABSENT = {"NONE", "N/A (never sent to clients)", "N/A (no local player)"}
 #:
 #: No redundant leading zero: a count is never written `007`, so a zero-padded
 #: value is an identifier, and `int()` would silently renumber it.
-_COUNTER = re.compile(r"^-?(?:0|[1-9][0-9]*)$")
+#:
+#: At most 20 digits: no C# integer type prints more (ulong.MaxValue), so a
+#: longer run is not a count the mod wrote - and `int()` refuses past 4300.
+_COUNTER = re.compile(r"^-?(?:0|[1-9][0-9]{0,19})$")
 
 #: A boolean, recognised by shape for the same reason a counter is.
 #:

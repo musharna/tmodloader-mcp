@@ -53,7 +53,7 @@ def client_files(save_dir: Path, mod_prefix: str) -> list[Path]:
     server as a client, which is the diagnosis this tool exists to keep apart.
     """
     pattern = re.compile(
-        rf"^{re.escape(mod_prefix)}-hooks(-{PLAYER_TOKEN_GRAMMAR})?\.txt$"
+        rf"\A{re.escape(mod_prefix)}-hooks(-{PLAYER_TOKEN_GRAMMAR})?\.txt\Z"
     )
     if not save_dir.is_dir():
         return []

@@ -277,3 +277,16 @@ def test_a_counter_is_still_a_counter_beside_booleans():
     got = diag.parse(HEARTBEAT_SAMPLE)
     assert got["polls"] == 194
     assert not isinstance(got["polls"], bool)
+
+
+def test_a_digit_run_wider_than_any_integer_type_stays_text():
+    """No C# integer prints more than 20 digits, so a longer run is not a
+    count the mod wrote. Before #61 it reached `int()`, which refuses more
+    than 4300 digits, and the whole parse raised."""
+    huge = "1" * 4301
+    assert diag.parse(f"active: {huge}\n")["active"] == huge
+    assert diag.parse("active: " + "1" * 21 + "\n")["active"] == "1" * 21
+    # Positive control: the widest real value, ulong.MaxValue, is still a number.
+    assert (
+        diag.parse("active: 18446744073709551615\n")["active"] == 18446744073709551615
+    )

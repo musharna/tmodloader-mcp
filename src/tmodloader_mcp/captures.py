@@ -39,9 +39,10 @@ def capture_pattern(mod_name: str) -> re.Pattern[str]:
     then the index and region this harness renames the drop box to.
 
     Anchored at both ends — an unanchored match would accept
-    `evil-biomancy-shot-001-full.png.exe`. Built per mod rather than fixed,
-    because two mods share one save directory and neither should be served the
-    other's captures.
+    `evil-biomancy-shot-001-full.png.exe` — and with the absolute anchors, not
+    `^`/`$`: `$` also matches just before a final newline, one byte short of
+    the end. Built per mod rather than fixed, because two mods share one save
+    directory and neither should be served the other's captures.
 
     The token's grammar is PINNED rather than left as `[a-z0-9-]+`. An open
     token is greedy across dashes and digits alike, so it would swallow the
@@ -60,8 +61,8 @@ def capture_pattern(mod_name: str) -> re.Pattern[str]:
     actually written.
     """
     return re.compile(
-        rf"^{re.escape(artifacts_for(mod_name).prefix)}"
-        rf"-shot-{PLAYER_TOKEN_GRAMMAR}-\d{{3}}-[a-z]+\.png$"
+        rf"\A{re.escape(artifacts_for(mod_name).prefix)}"
+        rf"-shot-{PLAYER_TOKEN_GRAMMAR}-\d{{3}}-[a-z]+\.png\Z"
     )
 
 

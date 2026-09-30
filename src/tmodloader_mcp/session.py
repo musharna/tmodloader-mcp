@@ -81,6 +81,11 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 #: a check that read only the head would promote half a picture.
 _PNG_TRAILER = b"\x00\x00\x00\x00IEND\xaeB`\x82"
 
+#: A Windows pid: a 32-bit number, so ASCII digits, at most 10 of them. Not
+#: `str.isdigit()`, which is also true for `²` and for runs longer than the
+#: 4300 digits `int()` will convert - both of which `int()` refuses.
+_PID = re.compile(r"[0-9]{1,10}")
+
 
 def parse_pid_stamps(text: str) -> dict[int, str]:
     """Pull (pid, creation stamp) pairs out of the query's output.
@@ -95,7 +100,7 @@ def parse_pid_stamps(text: str) -> dict[int, str]:
     stamps: dict[int, str] = {}
     for line in text.replace("\r", "").split("\n"):
         parts = line.split()
-        if parts and parts[0].isdigit():
+        if parts and _PID.fullmatch(parts[0]):
             stamps[int(parts[0])] = parts[1] if len(parts) > 1 else ""
     return stamps
 
