@@ -174,6 +174,10 @@ def test_a_count_int_cannot_read_does_not_crash_the_verdict(count):
     """`str.isdigit()` is not a promise that `int()` will succeed: it is true
     for superscript digits and for runs past the 4300-digit cap (#61)."""
     got = build.interpret(f"Compilation finished with {count} errors and 2 warnings")
+    # The count is not a number, so it takes the existing not-a-number path and
+    # stays 0. Pinned, not endorsed: a garbage count reading as a clean build is
+    # the pre-existing fallback flagged on PR #88. Changing it should break this.
+    assert got.errors == 0
     assert got.warnings == 2
     # Positive control: a real count on the same line shape is still read.
     assert (
