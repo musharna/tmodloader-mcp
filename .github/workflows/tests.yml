@@ -47,9 +47,9 @@ jobs:
       # v7 is a floating major tag that was verified to exist. setup-uv below
       # is pinned exactly because it publishes NO floating major - it has
       # v9.0.0 and v7.6, but no v9, so `@v9` would fail to resolve at all.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: astral-sh/setup-uv@v10.1.0
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
 
@@ -79,11 +79,11 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # global.json pins 8.0.x. Without it `dotnet` takes the highest SDK on the
       # runner, which is not the one anybody develops against.
-      - uses: actions/setup-dotnet@v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
           dotnet-version: "8.0.x"
 
