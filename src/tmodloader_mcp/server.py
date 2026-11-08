@@ -211,10 +211,20 @@ class SnapshotOut(TypedDict):
     size: int
 
 
+#: What the last restore left on disk. Functional form because `from` is a
+#: keyword. "mixed" means it failed partway and the save is half one state and
+#: half another; `undo` names the snapshot holding a whole one to go back to.
+RestoreStateOut = TypedDict(
+    "RestoreStateOut", {"state": str, "from": str, "undo": str | None}
+)
+
+
 class SnapshotListOut(TypedDict):
     snapshots: list[SnapshotOut]
     #: Where they live, so somebody can delete them by hand without guessing.
     root: str
+    #: None when no restore has run.
+    restore_state: RestoreStateOut | None
 
 
 class RestoreOut(TypedDict):
@@ -228,6 +238,11 @@ class RestoreOut(TypedDict):
     #: otherwise pair with the restored `.wld` as a mismatched world. They are
     #: in `undo`, so this is as reversible as the overwrite.
     removed: list[str]
+    #: Why `undo` is an existing snapshot rather than a fresh copy: "mixed"
+    #: (the last restore failed partway, so the half-restored save was not
+    #: copied over the original) or "unchanged" (the save was still exactly
+    #: the snapshot the last restore put back). None when a copy was taken.
+    undo_kept: str | None
 
 
 class LogWatchOut(TypedDict):
@@ -1140,6 +1155,12 @@ def save_restore(label: str) -> RestoreOut:
     which `save_restore` accepts like any other label. A restore aimed at the
     wrong snapshot is therefore recoverable rather than final.
 
+    The undo is NOT re-taken when that would overwrite the original with
+    nothing unique: after a restore that failed partway (retrying keeps the
+    original in `auto-before-restore`), or when the save is still exactly what
+    the last restore put back (`undo` is then that snapshot's label, and the
+    earlier undo survives). `undo_kept` says which.
+
     Refuses while the game is running, and refuses a label that does not exist
     by listing the ones that do.
     """
@@ -1151,6 +1172,7 @@ def save_restore(label: str) -> RestoreOut:
         size=put.size,
         undo=put.undo,
         removed=list(put.removed),
+        undo_kept=put.undo_kept,
     )
 
 
@@ -1167,15 +1189,20 @@ def save_snapshots() -> SnapshotListOut:
     A snapshot whose manifest cannot be read is omitted rather than listed as
     empty, because `save_restore` refuses it for the same reason: putting back
     nothing and reporting success is the worst available outcome.
+
+    `restore_state` says what the last restore left: "mixed" means it failed
+    partway and the save on disk is half-restored.
     """
     cfg = _cfg()
     held = saves_mod.listing(cfg)
+    last = saves_mod.restore_state(cfg)
     return SnapshotListOut(
         snapshots=[
             SnapshotOut(label=s.label, taken=s.taken, files=list(s.files), size=s.size)
             for s in held
         ],
         root=str(saves_mod.snapshot_root(cfg)),
+        restore_state=RestoreStateOut(**last) if last is not None else None,
     )
 
 
