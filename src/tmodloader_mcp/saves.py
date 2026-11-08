@@ -42,6 +42,7 @@ snapshot nobody can afford to take is a snapshot nobody takes.
 from __future__ import annotations
 
 import contextlib
+import filecmp
 import json
 import re
 import shutil
@@ -66,6 +67,13 @@ BEFORE_RESTORE = "auto-before-restore"
 _RESERVED = (BEFORE_RESTORE,)
 
 MANIFEST = "snapshot.json"
+
+#: What the last restore left on disk, in the snapshot root beside the
+#: snapshots (a FILE, so `listing` never mistakes it for one). Written as
+#: "mixed" before a restore touches the save and as "restored" once it has
+#: finished, so a restore that dies partway - a /mnt/c lock, a kill - is on
+#: record as having left half of one state and half of another.
+RESTORE_STATE = "restore-state.json"
 
 
 class SaveError(RuntimeError):
@@ -117,6 +125,12 @@ class Restored:
     #: `restore` for the mismatched-pair failure this closes. They are in the
     #: undo snapshot, so removal is as reversible as the overwrite beside it.
     removed: tuple[str, ...] = ()
+    #: Why `undo` was KEPT rather than taken afresh: "mixed" (the last
+    #: restore failed partway, so the save on disk was half-restored and the
+    #: existing undo holds the original) or "unchanged" (the save was byte for
+    #: byte the snapshot the last restore put back, so that snapshot is the
+    #: undo). None when a fresh undo was taken.
+    undo_kept: str | None = None
 
 
 def snapshot_root(cfg: Config) -> Path:
@@ -362,6 +376,86 @@ def listing(cfg: Config) -> tuple[Snapshot, ...]:
     return tuple(sorted(held, key=lambda s: s.taken, reverse=True))
 
 
+def restore_state(cfg: Config) -> dict | None:
+    """What the last restore left on disk, or None if none has run.
+
+    `{"state": "mixed" | "restored", "from": label, "undo": label | None}`,
+    where `undo` names the snapshot holding a whole save from before that
+    restore. An unreadable record RAISES: it is what decides whether the next
+    restore may overwrite the undo, and guessing there is the bug it fixes.
+    """
+    path = snapshot_root(cfg) / RESTORE_STATE
+    if not path.is_file():
+        return None
+    try:
+        held = json.loads(path.read_text(encoding="utf-8"))
+        state = {"state": held["state"], "from": held["from"], "undo": held["undo"]}
+    except (OSError, ValueError, KeyError, TypeError) as failed:
+        raise SaveError(
+            f"the restore record {path} cannot be read ({failed}). It says "
+            "whether the save on disk is half-restored, so nothing is restored "
+            "until it is fixed or deleted by hand."
+        ) from failed
+    if state["state"] not in ("mixed", "restored"):
+        raise SaveError(f"the restore record {path} holds an unknown state: {held!r}")
+    return state
+
+
+def _record_restore(cfg: Config, state: str, label: str, undo: str | None) -> None:
+    root = snapshot_root(cfg)
+    staging = root / f".{RESTORE_STATE}.partial"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        staging.write_text(
+            json.dumps({"state": state, "from": label, "undo": undo}, indent=2) + "\n"
+        )
+        staging.replace(root / RESTORE_STATE)
+    except OSError as failed:
+        raise SaveError(
+            f"could not record the restore of {label!r} as {state} ({failed})."
+        ) from failed
+
+
+def _live_matches(cfg: Config, held: Snapshot) -> bool:
+    """Whether the save on disk is byte for byte the snapshot `held` - the
+    same files in `restore`'s scope, with the same contents."""
+    live = {name: path for path, name in _sources(cfg) if path.is_file()}
+    if set(live) != set(held.files):
+        return False
+    from_dir = snapshot_root(cfg) / held.label
+    try:
+        return all(
+            filecmp.cmp(live[name], from_dir / name, shallow=False)
+            for name in held.files
+        )
+    except OSError:
+        return False
+
+
+def _kept_undo(cfg: Config) -> tuple[str | None, str] | None:
+    """The undo to keep instead of taking a new one, and why - or None.
+
+    THE LATCH. `auto-before-restore` is one slot, and re-taking it is only
+    right when what is on disk is the one copy of something. Two states are
+    not: a save a failed restore left half-written (its parts are in the
+    undo and in the snapshot being restored), and a save that is still
+    exactly what the last restore put back (it is in that snapshot). Taking
+    the undo from either overwrote the original - on the natural retry of a
+    failed restore, and on any second restore after a first.
+    """
+    last = restore_state(cfg)
+    if last is None:
+        return None
+    if last["state"] == "mixed":
+        if last["undo"] is None or read(cfg, last["undo"]) is not None:
+            return last["undo"], "mixed"
+        return None
+    held = read(cfg, last["from"])
+    if held is not None and _live_matches(cfg, held):
+        return held.label, "unchanged"
+    return None
+
+
 def restore(
     cfg: Config,
     label: str,
@@ -384,7 +478,10 @@ def restore(
     # have meant a different label. Taking the current state under a reserved
     # name costs one copy and makes the mistake recoverable instead of final.
     undo: str | None = None
-    if label != BEFORE_RESTORE:
+    kept = _kept_undo(cfg) if label != BEFORE_RESTORE else None
+    if kept is not None:
+        undo = kept[0]
+    elif label != BEFORE_RESTORE:
         try:
             undo = take(cfg, BEFORE_RESTORE, pids=pids, reserved_ok=True).label
         except NothingToSnapshot:
@@ -398,6 +495,13 @@ def restore(
             # claimed there had been nothing to back up. A failed safety copy
             # refuses the restore; a genuinely absent one waves it through.
             undo = None
+
+    # On record as mixed BEFORE the first byte moves, so a restore that dies
+    # here for any reason - not only one that reaches the except below - is
+    # seen by the next one. `keep` is the snapshot holding a whole save to go
+    # back to: the undo, or, when undoing, the undo being put back.
+    keep = BEFORE_RESTORE if label == BEFORE_RESTORE else undo
+    _record_restore(cfg, "mixed", label, keep)
 
     from_dir = snapshot_root(cfg) / label
     put: list[str] = []
@@ -420,6 +524,8 @@ def restore(
                 if undo
                 else "Nothing was saved beforehand."
             )
+            + f" The save is recorded as mixed in {RESTORE_STATE}; retrying "
+            "keeps that copy rather than saving the half-restored one over it."
         ) from failed
 
     if not put:
@@ -453,8 +559,14 @@ def restore(
             ) from failed
         removed.append(name)
 
+    _record_restore(cfg, "restored", label, keep)
     return Restored(
-        label=label, files=tuple(put), size=size, undo=undo, removed=tuple(removed)
+        label=label,
+        files=tuple(put),
+        size=size,
+        undo=undo,
+        removed=tuple(removed),
+        undo_kept=kept[1] if kept is not None else None,
     )
 
 

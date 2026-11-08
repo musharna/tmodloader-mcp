@@ -524,3 +524,132 @@ def test_a_manifest_naming_a_path_outside_the_save_is_not_a_snapshot(tmp_path):
     held["files"] = [f"Worlds/{WORLD}.wld"]
     manifest.write_text(json.dumps(held))
     assert saves.read(cfg, "tampered") is not None
+
+
+# ---- the undo is latched across a failed or repeated restore ----------------
+
+
+def _live_world(cfg: config_mod.Config) -> bytes:
+    return (cfg.save_dir / "Worlds" / f"{WORLD}.wld").read_bytes()
+
+
+def _undo_world(cfg: config_mod.Config) -> bytes:
+    path = saves.snapshot_root(cfg) / saves.BEFORE_RESTORE / "Worlds" / f"{WORLD}.wld"
+    return path.read_bytes()
+
+
+def _fail_partway(cfg: config_mod.Config, label: str, monkeypatch) -> saves.SaveError:
+    """Run `restore(label)` with the SECOND copy into the live save failing,
+    the shape of a /mnt/c lock. Copies into the undo snapshot go the other way
+    and succeed, as they would live."""
+    real_copy2 = saves.shutil.copy2
+    copies = {"into_save": 0}
+
+    def locked_second_copy(src, dst, *args, **kwargs):
+        if Path(dst).is_relative_to(cfg.save_dir):
+            copies["into_save"] += 1
+            if copies["into_save"] == 2:
+                raise OSError("resource busy (simulated /mnt/c lock)")
+        return real_copy2(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(saves.shutil, "copy2", locked_second_copy)
+    with pytest.raises(saves.SaveError, match="failed partway") as failed:
+        saves.restore(cfg, label, pids=_no_pids)
+    monkeypatch.undo()
+    assert copies["into_save"] == 2, "the injected failure never fired"
+    return failed.value
+
+
+def test_retrying_a_failed_restore_keeps_the_original_in_the_undo(
+    tmp_path, monkeypatch
+):
+    """A restore that failed partway told the caller the original was in
+    `auto-before-restore` - and the natural retry re-took that slot from the
+    HALF-RESTORED save, destroying the only copy of the original."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"world-snap")
+    saves.take(cfg, "snap", pids=_no_pids)
+    _populate(cfg, world_body=b"world-ORIGINAL")
+
+    failed = _fail_partway(cfg, "snap", monkeypatch)
+    assert saves.BEFORE_RESTORE in str(failed)
+    # The save really is mixed: the first file came from the snapshot, the
+    # rest are still the original's.
+    assert _live_world(cfg) == b"world-snap"
+    assert _undo_world(cfg) == b"world-ORIGINAL"
+
+    # The retry. It must not snapshot the mixed save over the original.
+    put = saves.restore(cfg, "snap", pids=_no_pids)
+
+    assert _undo_world(cfg) == b"world-ORIGINAL", (
+        "the retry overwrote the undo with the half-restored save"
+    )
+    assert put.undo == saves.BEFORE_RESTORE
+    assert _live_world(cfg) == b"world-snap"
+
+    # POSITIVE CONTROL: the kept undo really does put the original back.
+    saves.restore(cfg, saves.BEFORE_RESTORE, pids=_no_pids)
+    assert _live_world(cfg) == b"world-ORIGINAL"
+
+
+def test_a_failed_restore_is_recorded_as_mixed_until_one_succeeds(
+    tmp_path, monkeypatch
+):
+    """Nothing recorded that the live save was half one state and half
+    another. The record is what the retry's latch reads, and what a caller
+    listing snapshots is shown."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"world-snap")
+    saves.take(cfg, "snap", pids=_no_pids)
+    # POSITIVE CONTROL: no restore yet, no record.
+    assert saves.restore_state(cfg) is None
+
+    _fail_partway(cfg, "snap", monkeypatch)
+    state = saves.restore_state(cfg)
+    assert state == {"state": "mixed", "from": "snap", "undo": saves.BEFORE_RESTORE}
+
+    saves.restore(cfg, "snap", pids=_no_pids)
+    assert saves.restore_state(cfg)["state"] == "restored"
+
+
+def test_a_second_restore_does_not_overwrite_the_undo_of_the_first(tmp_path):
+    """Restore A then restore B: the second restore re-took the undo from A's
+    state, so the save from before A was gone. A's state is still in A, byte
+    for byte, so nothing on disk is unique and the existing undo is kept."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"world-A")
+    saves.take(cfg, "A", pids=_no_pids)
+    _populate(cfg, world_body=b"world-B")
+    saves.take(cfg, "B", pids=_no_pids)
+    _populate(cfg, world_body=b"world-ORIGINAL")
+
+    first = saves.restore(cfg, "A", pids=_no_pids)
+    assert first.undo == saves.BEFORE_RESTORE
+    second = saves.restore(cfg, "B", pids=_no_pids)
+
+    assert _live_world(cfg) == b"world-B"
+    assert _undo_world(cfg) == b"world-ORIGINAL", (
+        "the second restore overwrote the pre-A original in the undo"
+    )
+    # What B overwrote was A's state, and A holds it.
+    assert second.undo == "A"
+    saves.restore(cfg, second.undo, pids=_no_pids)
+    assert _live_world(cfg) == b"world-A"
+    saves.restore(cfg, saves.BEFORE_RESTORE, pids=_no_pids)
+    assert _live_world(cfg) == b"world-ORIGINAL"
+
+
+def test_a_save_changed_since_the_last_restore_gets_a_fresh_undo(tmp_path):
+    """POSITIVE CONTROL for the latch: once the restored save has been played
+    on it is unique, and the next restore must save it, as before."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"world-A")
+    saves.take(cfg, "A", pids=_no_pids)
+    _populate(cfg, world_body=b"world-ORIGINAL")
+    saves.restore(cfg, "A", pids=_no_pids)
+
+    _populate(cfg, world_body=b"world-PLAYED")
+    put = saves.restore(cfg, "A", pids=_no_pids)
+
+    assert put.undo == saves.BEFORE_RESTORE
+    assert _undo_world(cfg) == b"world-PLAYED"
