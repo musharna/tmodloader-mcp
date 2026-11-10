@@ -756,3 +756,70 @@ def test_restoring_the_undo_over_a_played_save_refuses(tmp_path):
     assert _live_world(cfg) == b"world-ORIGINAL"
     assert not (cfg.save_dir / "Players" / "newchar.plr").exists()
     assert _everywhere(cfg, b"NEW-CHARACTER")
+
+
+# ---- the world is the one named, not always the configured one --------------
+
+
+def _two_worlds(cfg: config_mod.Config) -> None:
+    worlds = cfg.save_dir / "Worlds"
+    for stem in (WORLD, "Launched"):
+        (worlds / f"{stem}.wld").write_bytes(f"{stem}-v1".encode())
+        (worlds / f"{stem}.twld").write_bytes(f"{stem}-tmod-v1".encode())
+    (cfg.save_dir / "Players" / "n43n.plr").write_bytes(b"player-v1")
+
+
+def test_a_snapshot_and_restore_act_on_the_world_named(tmp_path):
+    """`launch(world=...)` loads a world other than TMODLOADER_WORLD_WIN, and
+    the save verbs only ever copied the configured one: the snapshot held the
+    wrong world, and the restore "succeeded" with the launched world still
+    changed by the run."""
+    cfg = _cfg(tmp_path)
+    _two_worlds(cfg)
+    launched = cfg.save_dir / "Worlds" / "Launched.wld"
+
+    snap = saves.take(cfg, "pre", pids=_no_pids, world=r"C:\Worlds\Launched.wld")
+    assert "Worlds/Launched.wld" in snap.files
+    assert f"Worlds/{WORLD}.wld" not in snap.files
+    assert saves.snapshot_world(snap) == "Launched"
+
+    launched.write_bytes(b"Launched-MUTATED-BY-THE-RUN")
+    put = saves.restore(cfg, "pre", pids=_no_pids)
+
+    assert launched.read_bytes() == b"Launched-v1"
+    assert "Worlds/Launched.wld" in put.files
+    # The undo is of the same world, so the restore can be undone.
+    undo = saves.snapshot_root(cfg) / saves.BEFORE_RESTORE / "Worlds" / "Launched.wld"
+    assert undo.read_bytes() == b"Launched-MUTATED-BY-THE-RUN"
+    # POSITIVE CONTROL: the configured world was neither copied nor touched.
+    assert (cfg.save_dir / "Worlds" / f"{WORLD}.wld").read_bytes() == (
+        f"{WORLD}-v1".encode()
+    )
+
+
+def test_a_restore_leaves_a_world_its_snapshot_does_not_hold_alone(tmp_path):
+    """A snapshot of world A, restored while the configuration named world B,
+    put A back and then REMOVED B's `.wld` and `.twld` as files "created since
+    the snapshot"."""
+    cfg = _cfg(tmp_path)
+    _two_worlds(cfg)
+    saves.take(cfg, "of-launched", pids=_no_pids, world="Launched")
+
+    put = saves.restore(cfg, "of-launched", pids=_no_pids)
+
+    assert put.removed == ()
+    for suffix in (".wld", ".twld"):
+        assert (cfg.save_dir / "Worlds" / f"{WORLD}{suffix}").is_file(), (
+            f"the configured world's {suffix} was deleted by a restore of another world"
+        )
+
+    # A restore told to act on a different world than the snapshot holds
+    # refuses, and changes nothing.
+    (cfg.save_dir / "Worlds" / f"{WORLD}.wld").write_bytes(b"configured-changed")
+    with pytest.raises(saves.SaveError, match="holds the world 'Launched'"):
+        saves.restore(cfg, "of-launched", pids=_no_pids, world=rf"C:\W\{WORLD}.wld")
+    assert (cfg.save_dir / "Worlds" / f"{WORLD}.wld").read_bytes() == (
+        b"configured-changed"
+    )
+    # POSITIVE CONTROL: naming the snapshot's own world, in any casing, works.
+    saves.restore(cfg, "of-launched", pids=_no_pids, world=r"C:\W\launched.WLD")
