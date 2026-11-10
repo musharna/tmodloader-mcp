@@ -1,3 +1,4 @@
 # Lessons
 
+- 2026-11-10: the 8-process lock test counted how many processes ever held the lock during a 0.2 s hold, so a slow host serialized them and it failed 5/5 under load on correct code. Class: a concurrency assertion that is really a timing assertion. The test now measures overlap with a shared counter and holds via a barrier, no clock; the lock-removed mutant is killed. Not lintable, so no hook.
 - 2026-11-07: a single-slot safety copy (`auto-before-restore`) was re-taken on every restore, so the retry of a failed restore, or a second restore, saved a half-restored or already-saved state over the only original. Class: a backup taken unconditionally before a retryable operation. Caught now by `tests/test_saves.py` (retry after an injected second-copy OSError; restore A then B), which fail on the old code; not lintable, so no hook.
