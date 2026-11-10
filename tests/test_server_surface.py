@@ -458,6 +458,10 @@ def test_the_save_verbs_follow_the_world_launch_loaded(
     server_mod.stop()
     launched.write_bytes(b"launched-MUTATED-BY-THE-RUN")
 
+    # A label that does not exist is reported as that, not as a world mismatch.
+    with pytest.raises(ToolError, match="no snapshot called 'nope'"):
+        server_mod.save_restore("nope")
+
     # Neither verb guesses: the configured world is not the one just driven.
     with pytest.raises(ToolError, match="Launched"):
         server_mod.save_snapshot("after")

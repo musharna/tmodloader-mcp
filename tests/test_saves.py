@@ -859,3 +859,34 @@ def test_a_restore_leaves_a_world_its_snapshot_does_not_hold_alone(tmp_path):
     )
     # POSITIVE CONTROL: naming the snapshot's own world, in any casing, works.
     saves.restore(cfg, "of-launched", pids=_no_pids, world=r"C:\W\launched.WLD")
+
+
+def test_a_failed_restore_of_one_world_is_not_mistaken_for_another(
+    tmp_path, monkeypatch
+):
+    """The "mixed" record names no world, and the undo it protects holds the
+    original of the world whose restore failed. A restore of a DIFFERENT world
+    read that record as its own: it either refused over the other world's
+    failure, or kept the undo and reported another world's save as its undo."""
+    cfg = _cfg(tmp_path)
+    _two_worlds(cfg)
+    saves.take(cfg, "snapA", pids=_no_pids)  # the configured world
+    saves.take(cfg, "snapB", pids=_no_pids, world="Launched")
+    (cfg.save_dir / "Worlds" / f"{WORLD}.wld").write_bytes(b"A-ORIGINAL")
+    _fail_partway(cfg, "snapA", monkeypatch)
+    (cfg.save_dir / "Worlds" / "Launched.wld").write_bytes(b"B-PLAYED")
+
+    with pytest.raises(saves.SaveError, match="snapA") as refused:
+        saves.restore(cfg, "snapB", pids=_no_pids)
+
+    assert "TestWorld" in str(refused.value)
+    assert (cfg.save_dir / "Worlds" / "Launched.wld").read_bytes() == b"B-PLAYED"
+    assert _undo_world(cfg) == b"A-ORIGINAL"
+
+    # POSITIVE CONTROL: once the failed restore of A is finished, B restores,
+    # and its undo holds B, not A.
+    saves.restore(cfg, "snapA", pids=_no_pids)
+    put = saves.restore(cfg, "snapB", pids=_no_pids)
+    assert put.undo == saves.BEFORE_RESTORE and put.undo_kept is None
+    undo_b = saves.snapshot_root(cfg) / saves.BEFORE_RESTORE / "Worlds" / "Launched.wld"
+    assert undo_b.read_bytes() == b"B-PLAYED"

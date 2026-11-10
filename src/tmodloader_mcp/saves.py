@@ -522,6 +522,18 @@ def _refuse_unheld(label: str, unheld: list[str], why: str) -> SaveError:
     )
 
 
+def _record_world(cfg: Config, last: dict) -> str | None:
+    """The world the recorded restore was of: the world of the snapshot it
+    restored (a restore refuses any other), else of its undo. None when
+    neither is readable or holds a world."""
+    for label in (last["from"], last["undo"]):
+        held = read(cfg, label) if label is not None else None
+        found = snapshot_world(held) if held is not None else None
+        if found is not None:
+            return found
+    return None
+
+
 def _kept_undo(
     cfg: Config, label: str, world: str | None
 ) -> tuple[str | None, str] | None:
@@ -546,6 +558,21 @@ def _kept_undo(
         return None
     if last["state"] == "mixed":
         original = last["undo"] is not None and read(cfg, last["undo"]) is not None
+        stuck = _record_world(cfg, last)
+        if stuck is not None and stuck.casefold() != _world_stem(cfg, world).casefold():
+            # THE RECORD IS ABOUT ANOTHER WORLD. Its undo holds that world's
+            # save from before the failed restore: re-taking the slot for this
+            # world destroys it, and keeping it would report that world as
+            # this restore's undo.
+            if original:
+                raise SaveError(
+                    f"refusing to restore {label!r}: a restore of "
+                    f"{last['from']!r} (world {stuck!r}) failed partway, and "
+                    f"{last['undo']!r} holds that world's save from before it. "
+                    f"Finish it first - restore {last['from']!r} again, or put "
+                    f"{last['undo']!r} back - then restore {label!r}."
+                )
+            return None
         unheld = _unheld(cfg, world)
         if not unheld:
             return (last["undo"], "mixed") if original or last["undo"] is None else None

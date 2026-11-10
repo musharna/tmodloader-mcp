@@ -1218,11 +1218,14 @@ def save_restore(label: str, world: str | None = None) -> RestoreOut:
     by listing the ones that do.
     """
     cfg = _cfg()
-    held = saves_mod.read(cfg, label)
-    held_world = saves_mod.snapshot_world(held) if held is not None else None
-    put = saves_mod.restore(
-        cfg, label, world=_save_world(cfg, world, held_world or cfg.world_win)
-    )
+    # The label is checked before anything is read with it, and a label with
+    # no snapshot goes straight to `restore`, whose refusal names the ones that
+    # exist - not a world mismatch about a snapshot that is not there.
+    held = saves_mod.read(cfg, saves_mod._check_label(label, reserved_ok=True))
+    if held is not None:
+        default = saves_mod.snapshot_world(held) or cfg.world_win
+        world = _save_world(cfg, world, default)
+    put = saves_mod.restore(cfg, label, world=world)
     return RestoreOut(
         label=put.label,
         files=list(put.files),
