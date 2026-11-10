@@ -890,3 +890,33 @@ def test_a_failed_restore_of_one_world_is_not_mistaken_for_another(
     assert put.undo == saves.BEFORE_RESTORE and put.undo_kept is None
     undo_b = saves.snapshot_root(cfg) / saves.BEFORE_RESTORE / "Worlds" / "Launched.wld"
     assert undo_b.read_bytes() == b"B-PLAYED"
+
+
+def test_a_retaken_label_does_not_change_which_world_a_failed_restore_was_of(
+    tmp_path, monkeypatch
+):
+    """The failed restore's world was read from the CURRENT contents of its
+    snapshot label, and a label can be retaken. Retaking it under another
+    world made the stuck restore look like that world's, so the undo holding
+    the first world's original was kept and reported as the second's."""
+    cfg = _cfg(tmp_path)
+    _two_worlds(cfg)
+    saves.take(cfg, "snapA", pids=_no_pids)  # the configured world
+    (cfg.save_dir / "Worlds" / f"{WORLD}.wld").write_bytes(b"A-ORIGINAL")
+    _fail_partway(cfg, "snapA", monkeypatch)
+    saves.take(cfg, "snapA", pids=_no_pids, world="Launched")
+
+    with pytest.raises(saves.SaveError, match="TestWorld"):
+        saves.restore(cfg, "snapA", pids=_no_pids)
+    assert _undo_world(cfg) == b"A-ORIGINAL"
+
+    # POSITIVE CONTROL: put the stuck world's undo back (its half-restored
+    # state saved first, since no snapshot holds it any more), and the
+    # restore of the other world then goes through with an undo of its own.
+    saves.take(cfg, "half", pids=_no_pids)
+    saves.restore(cfg, saves.BEFORE_RESTORE, pids=_no_pids)
+    assert _live_world(cfg) == b"A-ORIGINAL"
+    put = saves.restore(cfg, "snapA", pids=_no_pids)
+    assert put.undo == saves.BEFORE_RESTORE and put.undo_kept is None
+    undo_b = saves.snapshot_root(cfg) / saves.BEFORE_RESTORE / "Worlds" / "Launched.wld"
+    assert undo_b.read_bytes() == b"Launched-v1"

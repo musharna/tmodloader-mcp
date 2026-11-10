@@ -452,14 +452,17 @@ def restore_state(cfg: Config) -> dict | None:
     return state
 
 
-def _record_restore(cfg: Config, state: str, label: str, undo: str | None) -> None:
+def _record_restore(
+    cfg: Config, state: str, label: str, undo: str | None, world: str
+) -> None:
     root = snapshot_root(cfg)
     staging = root / f".{RESTORE_STATE}.partial"
+    # `world` is recorded rather than looked up later from `label`: a label
+    # can be retaken under another world while this record still names it.
+    record = {"state": state, "from": label, "undo": undo, "world": world}
     try:
         root.mkdir(parents=True, exist_ok=True)
-        staging.write_text(
-            json.dumps({"state": state, "from": label, "undo": undo}, indent=2) + "\n"
-        )
+        staging.write_text(json.dumps(record, indent=2) + "\n")
         staging.replace(root / RESTORE_STATE)
     except OSError as failed:
         raise SaveError(
@@ -523,10 +526,22 @@ def _refuse_unheld(label: str, unheld: list[str], why: str) -> SaveError:
 
 
 def _record_world(cfg: Config, last: dict) -> str | None:
-    """The world the recorded restore was of: the world of the snapshot it
-    restored (a restore refuses any other), else of its undo. None when
-    neither is readable or holds a world."""
-    for label in (last["from"], last["undo"]):
+    """The world the recorded restore was of, or None if that is unknown.
+
+    Written into the record since it was found that a snapshot label can be
+    retaken under another world while a stuck restore still names it. A
+    record from before that is read through its undo first (a reserved name
+    nobody can retake by hand), then through the snapshot it restored.
+    """
+    try:
+        held = json.loads(
+            (snapshot_root(cfg) / RESTORE_STATE).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as failed:
+        raise SaveError(f"the restore record cannot be read ({failed}).") from failed
+    if isinstance(held.get("world"), str) and held["world"]:
+        return held["world"]
+    for label in (last["undo"], last["from"]):
         held = read(cfg, label) if label is not None else None
         found = snapshot_world(held) if held is not None else None
         if found is not None:
@@ -631,6 +646,7 @@ def restore(
             f"{world_stem(world)!r}. Restoring it would put back one world "
             "and leave the other as it is."
         )
+    stem = _world_stem(cfg, world)
 
     # UNDO FIRST. This is about to overwrite a real save, and the caller may
     # have meant a different label. Taking the current state under a reserved
@@ -673,7 +689,7 @@ def restore(
     # seen by the next one. `keep` is the snapshot holding a whole save to go
     # back to: the undo, or, when undoing, the undo being put back.
     keep = BEFORE_RESTORE if label == BEFORE_RESTORE else undo
-    _record_restore(cfg, "mixed", label, keep)
+    _record_restore(cfg, "mixed", label, keep, stem)
 
     from_dir = snapshot_root(cfg) / label
     put: list[str] = []
@@ -731,7 +747,7 @@ def restore(
             ) from failed
         removed.append(name)
 
-    _record_restore(cfg, "restored", label, keep)
+    _record_restore(cfg, "restored", label, keep, stem)
     return Restored(
         label=label,
         files=tuple(put),
