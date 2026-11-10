@@ -228,6 +228,42 @@ def test_the_undo_label_cannot_be_taken_by_hand(tmp_path):
         saves.take(cfg, saves.BEFORE_RESTORE, pids=_no_pids)
 
 
+@pytest.mark.parametrize(
+    "label", ["AUTO-BEFORE-RESTORE", "Auto-Before-Restore", "restore-state.json"]
+)
+def test_a_reserved_name_is_refused_in_any_casing(tmp_path, label):
+    """The reserved check compared case-sensitively, and the save directory is
+    on NTFS, where `AUTO-BEFORE-RESTORE` IS the undo's directory. A snapshot
+    named like the restore record took the record's path in the snapshot root,
+    and every later restore refused because the record could not be read."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg)
+
+    with pytest.raises(saves.SaveError, match="reserved"):
+        saves.take(cfg, label, pids=_no_pids)
+    assert not (saves.snapshot_root(cfg) / label).exists()
+
+    # POSITIVE CONTROL: an ordinary label still works, and a restore after it.
+    saves.take(cfg, "auto-before-restore-2", pids=_no_pids)
+    saves.restore(cfg, "auto-before-restore-2", pids=_no_pids)
+
+
+def test_restoring_the_undo_by_another_casing_restores_the_undo(tmp_path):
+    """On NTFS `Auto-Before-Restore` opens the undo's directory, and a restore
+    under that spelling was not recognised as one: it took a fresh undo INTO
+    the directory it was about to restore from."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"world-v1")
+    saves.take(cfg, "before", pids=_no_pids)
+    _populate(cfg, world_body=b"world-current")
+    saves.restore(cfg, "before", pids=_no_pids)
+
+    put = saves.restore(cfg, "Auto-Before-Restore", pids=_no_pids)
+
+    assert put.label == saves.BEFORE_RESTORE
+    assert _live_world(cfg) == b"world-current"
+
+
 def test_a_second_snapshot_of_one_label_replaces_the_first(tmp_path):
     cfg = _cfg(tmp_path)
     _populate(cfg, world_body=b"world-v1")

@@ -65,8 +65,6 @@ _LABEL = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 #: undo would be the thing that destroyed the state it was meant to undo.
 BEFORE_RESTORE = "auto-before-restore"
 
-_RESERVED = (BEFORE_RESTORE,)
-
 MANIFEST = "snapshot.json"
 
 #: What the last restore left on disk, in the snapshot root beside the
@@ -75,6 +73,13 @@ MANIFEST = "snapshot.json"
 #: finished, so a restore that dies partway - a /mnt/c lock, a kill - is on
 #: record as having left half of one state and half of another.
 RESTORE_STATE = "restore-state.json"
+
+#: Names a label may not take, compared CASE-INSENSITIVELY: the save directory
+#: is on NTFS, where `AUTO-BEFORE-RESTORE` opens the undo's own directory.
+#: The undo may still be named to restore or forget it; the restore record is
+#: a file in the snapshot root, so a snapshot of that name would take its path.
+_RESERVED = (BEFORE_RESTORE,)
+_NEVER = (RESTORE_STATE,)
 
 
 class SaveError(RuntimeError):
@@ -219,6 +224,7 @@ def _sources(cfg: Config, world: str | None = None) -> list[tuple[Path, str]]:
 
 
 def _check_label(label: str, *, reserved_ok: bool = False) -> str:
+    """`label` if it is usable, spelled as this module spells a reserved name."""
     if not _LABEL.match(label or ""):
         raise SaveError(
             f"{label!r} is not a usable label. Letters, digits, dot, dash and "
@@ -227,12 +233,22 @@ def _check_label(label: str, *, reserved_ok: bool = False) -> str:
             "out of the snapshot folder is refused rather than rewritten."
         )
 
-    if label in _RESERVED and not reserved_ok:
-        raise SaveError(
-            f"{label!r} is reserved: `restore` writes it automatically so that "
-            "a restore can be undone. Taking it by hand would overwrite the "
-            "one copy that undo depends on."
-        )
+    folded = label.casefold()
+    for name in _NEVER:
+        if folded == name.casefold():
+            raise SaveError(
+                f"{label!r} is reserved: the restore record is kept under that "
+                "name beside the snapshots."
+            )
+    for name in _RESERVED:
+        if folded == name.casefold():
+            if not reserved_ok:
+                raise SaveError(
+                    f"{label!r} is reserved: `restore` writes {name!r} "
+                    "automatically so that a restore can be undone. Taking it "
+                    "by hand would overwrite the one copy that undo depends on."
+                )
+            return name
 
     return label
 
@@ -277,7 +293,7 @@ def take(
     `world` names the world to copy (a Windows path or a bare name); the
     configured one when it is None.
     """
-    _check_label(label, reserved_ok=reserved_ok)
+    label = _check_label(label, reserved_ok=reserved_ok)
     _check_idle(cfg, f"take the snapshot {label!r}", pids)
 
     into = snapshot_root(cfg) / label
@@ -563,7 +579,7 @@ def restore(
     world; it is never the configured one by default, because the configured
     world can have changed since the snapshot was taken.
     """
-    _check_label(label, reserved_ok=True)
+    label = _check_label(label, reserved_ok=True)
     _check_idle(cfg, f"restore the snapshot {label!r}", pids)
 
     held = read(cfg, label)
@@ -701,7 +717,7 @@ def restore(
 
 def forget(cfg: Config, label: str) -> Snapshot | None:
     """Delete one snapshot. Returns what was deleted, or None if absent."""
-    _check_label(label, reserved_ok=True)
+    label = _check_label(label, reserved_ok=True)
     held = read(cfg, label)
     if held is None:
         return None
