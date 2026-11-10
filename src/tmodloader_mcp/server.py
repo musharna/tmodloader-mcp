@@ -1161,6 +1161,11 @@ def save_restore(label: str) -> RestoreOut:
     the last restore put back (`undo` is then that snapshot's label, and the
     earlier undo survives). `undo_kept` says which.
 
+    Both cases are checked against the files on disk. If the save holds files
+    no snapshot holds while the undo must be kept (the game was played after a
+    failed restore), or while restoring `auto-before-restore` itself, this
+    refuses and names them: take `save_snapshot` first, then restore again.
+
     Refuses while the game is running, and refuses a label that does not exist
     by listing the ones that do.
     """

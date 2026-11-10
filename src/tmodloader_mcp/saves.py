@@ -432,7 +432,46 @@ def _live_matches(cfg: Config, held: Snapshot) -> bool:
         return False
 
 
-def _kept_undo(cfg: Config) -> tuple[str | None, str] | None:
+def _unheld(cfg: Config) -> list[str]:
+    """The files in `restore`'s scope on disk now whose bytes no snapshot holds.
+
+    Compared by content against the file of the same name in every readable
+    snapshot. A restore that overwrites or removes one of these destroys the
+    only copy, so this is checked against the DISK, never inferred from the
+    restore record: the record says what the save was when it was written,
+    and the game can have been played on since.
+    """
+    held = listing(cfg)
+    root = snapshot_root(cfg)
+    unheld = []
+    for path, name in _sources(cfg):
+        if not path.is_file():
+            continue
+        copies = [root / s.label / name for s in held if name in s.files]
+        try:
+            if any(
+                copy.is_file() and filecmp.cmp(path, copy, shallow=False)
+                for copy in copies
+            ):
+                continue
+        except OSError as failed:
+            raise SaveError(
+                f"could not compare {name} with the snapshots ({failed}), so "
+                "whether a restore would destroy the only copy of it is unknown."
+            ) from failed
+        unheld.append(name)
+    return unheld
+
+
+def _refuse_unheld(label: str, unheld: list[str], why: str) -> SaveError:
+    return SaveError(
+        f"refusing to restore {label!r}: the save on disk holds "
+        f"{', '.join(unheld)} as no snapshot does, and {why} Take "
+        "`save_snapshot` of it under a new label first, then restore again."
+    )
+
+
+def _kept_undo(cfg: Config, label: str) -> tuple[str | None, str] | None:
     """The undo to keep instead of taking a new one, and why - or None.
 
     THE LATCH. `auto-before-restore` is one slot, and re-taking it is only
@@ -442,13 +481,31 @@ def _kept_undo(cfg: Config) -> tuple[str | None, str] | None:
     exactly what the last restore put back (it is in that snapshot). Taking
     the undo from either overwrote the original - on the natural retry of a
     failed restore, and on any second restore after a first.
+
+    BOTH ARE CHECKED ON DISK. "mixed" once trusted the record alone, and a
+    save played on after the failed restore was overwritten while the undo
+    kept only the older original. When the undo holds an original and the
+    disk holds something no snapshot does, there are two only-copies and one
+    slot, so the restore REFUSES rather than choosing which one to destroy.
     """
     last = restore_state(cfg)
     if last is None:
         return None
     if last["state"] == "mixed":
-        if last["undo"] is None or read(cfg, last["undo"]) is not None:
-            return last["undo"], "mixed"
+        original = last["undo"] is not None and read(cfg, last["undo"]) is not None
+        unheld = _unheld(cfg)
+        if not unheld:
+            return (last["undo"], "mixed") if original or last["undo"] is None else None
+        if original:
+            raise _refuse_unheld(
+                label,
+                unheld,
+                f"a restore of {last['from']!r} failed partway since the last "
+                f"good one, so {last['undo']!r} holds the save from before that "
+                "and cannot be taken again without losing it.",
+            )
+        # The undo slot protects nothing (there was nothing to undo to, or it
+        # is gone), so the save on disk is taken into it as usual.
         return None
     held = read(cfg, last["from"])
     if held is not None and _live_matches(cfg, held):
@@ -478,7 +535,19 @@ def restore(
     # have meant a different label. Taking the current state under a reserved
     # name costs one copy and makes the mistake recoverable instead of final.
     undo: str | None = None
-    kept = _kept_undo(cfg) if label != BEFORE_RESTORE else None
+    kept = _kept_undo(cfg, label) if label != BEFORE_RESTORE else None
+    if label == BEFORE_RESTORE:
+        # Putting the undo back takes no undo of its own - it would overwrite
+        # the slot it is reading - so it is safe only while every file on disk
+        # is already held somewhere: what the last restore put back, or the
+        # undo itself. A save played on since is not.
+        unheld = _unheld(cfg)
+        if unheld:
+            raise _refuse_unheld(
+                label,
+                unheld,
+                "putting the undo back takes no undo of its own.",
+            )
     if kept is not None:
         undo = kept[0]
     elif label != BEFORE_RESTORE:

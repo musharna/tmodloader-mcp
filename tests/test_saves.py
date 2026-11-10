@@ -653,3 +653,106 @@ def test_a_save_changed_since_the_last_restore_gets_a_fresh_undo(tmp_path):
 
     assert put.undo == saves.BEFORE_RESTORE
     assert _undo_world(cfg) == b"world-PLAYED"
+
+
+def _play(cfg: config_mod.Config) -> None:
+    """What a game session leaves behind: a changed world and a NEW character,
+    neither of which any snapshot holds."""
+    (cfg.save_dir / "Worlds" / f"{WORLD}.wld").write_bytes(b"world-PLAYED")
+    (cfg.save_dir / "Players" / "newchar.plr").write_bytes(b"NEW-CHARACTER")
+
+
+def _everywhere(cfg: config_mod.Config, needle: bytes) -> list[Path]:
+    """Every file under the save's parent - live save and snapshots alike -
+    whose bytes contain `needle`."""
+    return [
+        path
+        for path in cfg.save_dir.parent.rglob("*")
+        if path.is_file() and needle in path.read_bytes()
+    ]
+
+
+def test_play_after_a_failed_restore_is_not_overwritten_with_no_copy(
+    tmp_path, monkeypatch
+):
+    """The "mixed" record kept the old undo because the RECORD said the save
+    was half-restored - nothing looked at the save. Played on in between, it
+    held a world and a character that existed nowhere else, and the restore
+    overwrote the one and deleted the other while reporting
+    `undo_kept='mixed'`."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"world-snap")
+    saves.take(cfg, "snap", pids=_no_pids)
+    _populate(cfg, world_body=b"world-ORIGINAL")
+    _fail_partway(cfg, "snap", monkeypatch)
+    _play(cfg)
+
+    with pytest.raises(saves.SaveError, match="save_snapshot") as refused:
+        saves.restore(cfg, "snap", pids=_no_pids)
+
+    assert "newchar.plr" in str(refused.value)
+    assert _live_world(cfg) == b"world-PLAYED", "the played world was overwritten"
+    assert (cfg.save_dir / "Players" / "newchar.plr").read_bytes() == b"NEW-CHARACTER"
+    assert _undo_world(cfg) == b"world-ORIGINAL", "the original was overwritten"
+    assert saves.restore_state(cfg)["state"] == "mixed"
+
+    # POSITIVE CONTROL: once the played save is held somewhere, the restore
+    # goes through, keeps the original in the undo, and the play is recoverable.
+    saves.take(cfg, "played", pids=_no_pids)
+    put = saves.restore(cfg, "snap", pids=_no_pids)
+    assert put.undo == saves.BEFORE_RESTORE and put.undo_kept == "mixed"
+    assert _live_world(cfg) == b"world-snap"
+    assert _undo_world(cfg) == b"world-ORIGINAL"
+    assert _everywhere(cfg, b"world-PLAYED") and _everywhere(cfg, b"NEW-CHARACTER")
+    saves.restore(cfg, "played", pids=_no_pids)
+    assert _live_world(cfg) == b"world-PLAYED"
+    assert (cfg.save_dir / "Players" / "newchar.plr").read_bytes() == b"NEW-CHARACTER"
+
+
+def test_play_after_a_failed_restore_with_nothing_to_undo_gets_a_fresh_undo(
+    tmp_path, monkeypatch
+):
+    """When the failed restore had no undo (the install was empty), the undo
+    slot protects nothing, so played-on bytes are saved into it rather than
+    refused or lost."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"world-snap")
+    saves.take(cfg, "snap", pids=_no_pids)
+    for folder in ("Worlds", "Players"):
+        for path in (cfg.save_dir / folder).iterdir():
+            path.unlink()
+    _fail_partway(cfg, "snap", monkeypatch)
+    assert saves.restore_state(cfg)["undo"] is None
+    _play(cfg)
+
+    put = saves.restore(cfg, "snap", pids=_no_pids)
+
+    assert put.undo == saves.BEFORE_RESTORE and put.undo_kept is None
+    assert _undo_world(cfg) == b"world-PLAYED"
+    held = saves.snapshot_root(cfg) / saves.BEFORE_RESTORE / "Players" / "newchar.plr"
+    assert held.read_bytes() == b"NEW-CHARACTER"
+
+
+def test_restoring_the_undo_over_a_played_save_refuses(tmp_path):
+    """Putting the undo back takes no undo of its own (it cannot: it would
+    overwrite the slot it reads from). That is safe while the save is what the
+    last restore put back, and lost the play once the save had changed."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"world-A")
+    saves.take(cfg, "A", pids=_no_pids)
+    _populate(cfg, world_body=b"world-ORIGINAL")
+    saves.restore(cfg, "A", pids=_no_pids)
+    _play(cfg)
+
+    with pytest.raises(saves.SaveError, match="save_snapshot"):
+        saves.restore(cfg, saves.BEFORE_RESTORE, pids=_no_pids)
+
+    assert _live_world(cfg) == b"world-PLAYED"
+    assert (cfg.save_dir / "Players" / "newchar.plr").read_bytes() == b"NEW-CHARACTER"
+
+    # POSITIVE CONTROL: with the play saved, undoing goes through.
+    saves.take(cfg, "played", pids=_no_pids)
+    saves.restore(cfg, saves.BEFORE_RESTORE, pids=_no_pids)
+    assert _live_world(cfg) == b"world-ORIGINAL"
+    assert not (cfg.save_dir / "Players" / "newchar.plr").exists()
+    assert _everywhere(cfg, b"NEW-CHARACTER")
