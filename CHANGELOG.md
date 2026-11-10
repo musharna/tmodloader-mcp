@@ -11,6 +11,48 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Added
+
+- `save_snapshot` and `save_restore` take an optional `world`, a Windows path
+  to a `.wld` as `launch` takes it.
+- `save_snapshots` reports `restore_state`: whether the last restore finished
+  (`restored`) or failed partway (`mixed`, the save is half one state and half
+  another). `save_restore` reports `undo_kept` when it kept an existing undo
+  instead of taking a new one.
+
+### Changed
+
+- **`save_restore` acts on the world its snapshot holds**, not on
+  `TMODLOADER_WORLD_WIN`. When the last `launch` loaded a world other than
+  the one a save verb would act on, `save_snapshot` and `save_restore` refuse
+  until `world` is passed. Before, after `launch(world=...)`, they copied and
+  restored the configured world, reported success, and left the world the run
+  changed as it was. A restore of a snapshot of another world also deleted
+  the configured world's `.wld` and `.twld`.
+
+### Fixed
+
+- **A retried or repeated restore no longer overwrites the only copy of the
+  original save.** 0.6.3 re-took `auto-before-restore` on every restore, so
+  retrying a restore that failed partway (a `/mnt/c` lock) saved the
+  half-restored save over the original, and restore A then restore B lost the
+  save from before A. The undo is now kept when the save on disk is
+  half-restored or still exactly what the last restore put back (#111).
+- **A restore never overwrites save files that no snapshot holds.** If the
+  game was played after a restore failed partway, or before restoring
+  `auto-before-restore` itself, `save_restore` now refuses and names the
+  files instead of overwriting them with no copy. Take a `save_snapshot`
+  first, then restore.
+- Reserved snapshot names are matched in any casing (`AUTO-BEFORE-RESTORE` is
+  the undo's own directory on NTFS), and `restore-state.json` is refused as a
+  label: such a snapshot made every later restore refuse.
+- Validators no longer accept a trailing newline: the mod name, save labels,
+  capture names and heartbeat client files used `$`, which also matches before
+  a final newline (#88, from fuzzing in #61).
+- A very long run of digits, or a non-ASCII digit such as `²`, in a diag
+  counter, a build log count or a Windows pid no longer crashes `diag`,
+  `build_mod` or process tracking; it is treated as not a number (#88).
+
 ## [0.6.3] - 2026-09-17
 
 ### Added
