@@ -1,3 +1,4 @@
 # Lessons
 
 - 2026-11-07: a single-slot safety copy (`auto-before-restore`) was re-taken on every restore, so the retry of a failed restore, or a second restore, saved a half-restored or already-saved state over the only original. Class: a backup taken unconditionally before a retryable operation. Caught now by `tests/test_saves.py` (retry after an injected second-copy OSError; restore A then B), which fail on the old code; not lintable, so no hook.
+- 2026-11-10: the restore latch kept the old undo after a failed restore because the RECORD said the save was half-restored, without reading the save; play in between was overwritten with no copy. Class: a safety decision taken from a state record when the bytes it describes can change after it was written. Caught now by `tests/test_saves.py` (play after an injected failed restore; restoring the undo over a played save), which fail on the old code; not lintable, so no hook.
