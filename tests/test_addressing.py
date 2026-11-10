@@ -1987,8 +1987,17 @@ def test_a_session_waiting_for_the_capture_lock_holds_no_trigger(
     )
 
 
-def _grab_capture_lock(save_dir, results, index):
-    """One OS process trying to hold the capture lock, reporting what it saw."""
+def _grab_capture_lock(save_dir, results, index, inside, peak, everyone_tried):
+    """One OS process trying to hold the capture lock, reporting what it saw.
+
+    `inside` counts the processes holding the lock right now and `peak` keeps
+    its maximum, so overlap is MEASURED rather than inferred from how many
+    processes ever held it. A winner holds until every process has made its
+    attempt (`everyone_tried`, a barrier), so the test does not depend on how
+    fast the machine starts processes: under load a 0.2 s hold let a second
+    process legitimately acquire after the first released, and the old count
+    of holders called that a collision.
+    """
     from tmodloader_mcp import session as worker_session_mod
 
     lock = Path(save_dir) / "biomancy-capture.lock"
@@ -1996,12 +2005,19 @@ def _grab_capture_lock(save_dir, results, index):
         worker_session_mod._claim_atomically(lock, str(index))
     except worker_session_mod.SlotBusy:
         results.append(("blocked", index))
+        everyone_tried.wait()
         return
 
-    # Held. If exclusion is real, no other process is inside this window.
+    with inside.get_lock():
+        inside.value += 1
+        peak.value = max(peak.value, inside.value)
     results.append(("held", index))
-    time.sleep(0.2)
-    lock.unlink(missing_ok=True)
+    try:
+        everyone_tried.wait()
+    finally:
+        with inside.get_lock():
+            inside.value -= 1
+        lock.unlink(missing_ok=True)
 
 
 def test_eight_processes_contend_for_the_capture_lock_and_one_wins(tmp_path):
@@ -2009,22 +2025,29 @@ def test_eight_processes_contend_for_the_capture_lock_and_one_wins(tmp_path):
 
     The GIL can hide a race that two OS processes expose, and two OS
     processes is exactly the arrangement this feature exists for.
+
+    No clock is involved. The winner holds the lock until all eight have
+    tried, so with a working lock exactly one holds it and seven are refused
+    on any machine, however loaded; with no lock, all eight are inside at
+    once and `peak` says so.
     """
     procs = []
+    inside = multiprocessing.Value("i", 0)
+    peak = multiprocessing.Value("i", 0)
+    everyone_tried = multiprocessing.Barrier(8, timeout=60)
     with multiprocessing.Manager() as manager:
         results = manager.list()
         try:
             for i in range(8):
                 p = multiprocessing.Process(
-                    target=_grab_capture_lock, args=(str(tmp_path), results, i)
+                    target=_grab_capture_lock,
+                    args=(str(tmp_path), results, i, inside, peak, everyone_tried),
                 )
                 procs.append(p)
-            # Every one started before any is joined, or they serialise
-            # themselves and the test proves nothing.
             for p in procs:
                 p.start()
             for p in procs:
-                p.join(timeout=30)
+                p.join(timeout=90)
         finally:
             for p in procs:
                 if p.is_alive():
@@ -2035,10 +2058,15 @@ def test_eight_processes_contend_for_the_capture_lock_and_one_wins(tmp_path):
 
     held = [i for kind, i in outcomes if kind == "held"]
     assert len(outcomes) == 8, f"a process died without reporting: {outcomes}"
-    assert len(held) == 1, (
-        f"{len(held)} processes held the capture lock at once ({held}) - "
-        "which is the collision this feature exists to prevent"
+    assert peak.value == 1, (
+        f"{peak.value} processes held the capture lock at once - which is the "
+        "collision this feature exists to prevent"
     )
+    # POSITIVE CONTROL: the processes really contended. One held it and the
+    # other seven were refused while it did, so the exclusion above was
+    # exercised rather than passed by processes that never met.
+    assert len(held) == 1, f"expected one winner and seven refusals: {outcomes}"
+    assert not (tmp_path / "biomancy-capture.lock").exists()
 
 
 def _hold_lock_with_deadline(save_dir, seconds_from_now, ready, done):
