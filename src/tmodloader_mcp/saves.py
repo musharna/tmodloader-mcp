@@ -435,12 +435,22 @@ def restore_state(cfg: Config) -> dict | None:
     restore. An unreadable record RAISES: it is what decides whether the next
     restore may overwrite the undo, and guessing there is the bug it fixes.
     """
+    record = _read_record(cfg)
+    if record is None:
+        return None
+    return {key: record[key] for key in ("state", "from", "undo")}
+
+
+def _read_record(cfg: Config) -> dict | None:
+    """`restore_state` plus the `world` the record names, when it names one
+    (records written before the world was recorded do not)."""
     path = snapshot_root(cfg) / RESTORE_STATE
     if not path.is_file():
         return None
     try:
         held = json.loads(path.read_text(encoding="utf-8"))
         state = {"state": held["state"], "from": held["from"], "undo": held["undo"]}
+        world = held.get("world")
     except (OSError, ValueError, KeyError, TypeError) as failed:
         raise SaveError(
             f"the restore record {path} cannot be read ({failed}). It says "
@@ -449,6 +459,7 @@ def restore_state(cfg: Config) -> dict | None:
         ) from failed
     if state["state"] not in ("mixed", "restored"):
         raise SaveError(f"the restore record {path} holds an unknown state: {held!r}")
+    state["world"] = world if isinstance(world, str) and world else None
     return state
 
 
@@ -533,14 +544,8 @@ def _record_world(cfg: Config, last: dict) -> str | None:
     record from before that is read through its undo first (a reserved name
     nobody can retake by hand), then through the snapshot it restored.
     """
-    try:
-        held = json.loads(
-            (snapshot_root(cfg) / RESTORE_STATE).read_text(encoding="utf-8")
-        )
-    except (OSError, ValueError) as failed:
-        raise SaveError(f"the restore record cannot be read ({failed}).") from failed
-    if isinstance(held.get("world"), str) and held["world"]:
-        return held["world"]
+    if last["world"] is not None:
+        return last["world"]
     for label in (last["undo"], last["from"]):
         held = read(cfg, label) if label is not None else None
         found = snapshot_world(held) if held is not None else None
@@ -568,7 +573,7 @@ def _kept_undo(
     disk holds something no snapshot does, there are two only-copies and one
     slot, so the restore REFUSES rather than choosing which one to destroy.
     """
-    last = restore_state(cfg)
+    last = _read_record(cfg)
     if last is None:
         return None
     if last["state"] == "mixed":
