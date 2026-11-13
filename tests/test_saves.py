@@ -228,6 +228,42 @@ def test_the_undo_label_cannot_be_taken_by_hand(tmp_path):
         saves.take(cfg, saves.BEFORE_RESTORE, pids=_no_pids)
 
 
+@pytest.mark.parametrize(
+    "label", ["AUTO-BEFORE-RESTORE", "Auto-Before-Restore", "restore-state.json"]
+)
+def test_a_reserved_name_is_refused_in_any_casing(tmp_path, label):
+    """The reserved check compared case-sensitively, and the save directory is
+    on NTFS, where `AUTO-BEFORE-RESTORE` IS the undo's directory. A snapshot
+    named like the restore record took the record's path in the snapshot root,
+    and every later restore refused because the record could not be read."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg)
+
+    with pytest.raises(saves.SaveError, match="reserved"):
+        saves.take(cfg, label, pids=_no_pids)
+    assert not (saves.snapshot_root(cfg) / label).exists()
+
+    # POSITIVE CONTROL: an ordinary label still works, and a restore after it.
+    saves.take(cfg, "auto-before-restore-2", pids=_no_pids)
+    saves.restore(cfg, "auto-before-restore-2", pids=_no_pids)
+
+
+def test_restoring_the_undo_by_another_casing_restores_the_undo(tmp_path):
+    """On NTFS `Auto-Before-Restore` opens the undo's directory, and a restore
+    under that spelling was not recognised as one: it took a fresh undo INTO
+    the directory it was about to restore from."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"world-v1")
+    saves.take(cfg, "before", pids=_no_pids)
+    _populate(cfg, world_body=b"world-current")
+    saves.restore(cfg, "before", pids=_no_pids)
+
+    put = saves.restore(cfg, "Auto-Before-Restore", pids=_no_pids)
+
+    assert put.label == saves.BEFORE_RESTORE
+    assert _live_world(cfg) == b"world-current"
+
+
 def test_a_second_snapshot_of_one_label_replaces_the_first(tmp_path):
     cfg = _cfg(tmp_path)
     _populate(cfg, world_body=b"world-v1")
@@ -653,3 +689,267 @@ def test_a_save_changed_since_the_last_restore_gets_a_fresh_undo(tmp_path):
 
     assert put.undo == saves.BEFORE_RESTORE
     assert _undo_world(cfg) == b"world-PLAYED"
+
+
+def _play(cfg: config_mod.Config) -> None:
+    """What a game session leaves behind: a changed world and a NEW character,
+    neither of which any snapshot holds."""
+    (cfg.save_dir / "Worlds" / f"{WORLD}.wld").write_bytes(b"world-PLAYED")
+    (cfg.save_dir / "Players" / "newchar.plr").write_bytes(b"NEW-CHARACTER")
+
+
+def _everywhere(cfg: config_mod.Config, needle: bytes) -> list[Path]:
+    """Every file under the save's parent - live save and snapshots alike -
+    whose bytes contain `needle`."""
+    return [
+        path
+        for path in cfg.save_dir.parent.rglob("*")
+        if path.is_file() and needle in path.read_bytes()
+    ]
+
+
+def test_play_after_a_failed_restore_is_not_overwritten_with_no_copy(
+    tmp_path, monkeypatch
+):
+    """The "mixed" record kept the old undo because the RECORD said the save
+    was half-restored - nothing looked at the save. Played on in between, it
+    held a world and a character that existed nowhere else, and the restore
+    overwrote the one and deleted the other while reporting
+    `undo_kept='mixed'`."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"world-snap")
+    saves.take(cfg, "snap", pids=_no_pids)
+    _populate(cfg, world_body=b"world-ORIGINAL")
+    _fail_partway(cfg, "snap", monkeypatch)
+    _play(cfg)
+
+    with pytest.raises(saves.SaveError, match="save_snapshot") as refused:
+        saves.restore(cfg, "snap", pids=_no_pids)
+
+    assert "newchar.plr" in str(refused.value)
+    assert _live_world(cfg) == b"world-PLAYED", "the played world was overwritten"
+    assert (cfg.save_dir / "Players" / "newchar.plr").read_bytes() == b"NEW-CHARACTER"
+    assert _undo_world(cfg) == b"world-ORIGINAL", "the original was overwritten"
+    assert saves.restore_state(cfg)["state"] == "mixed"
+
+    # POSITIVE CONTROL: once the played save is held somewhere, the restore
+    # goes through, keeps the original in the undo, and the play is recoverable.
+    saves.take(cfg, "played", pids=_no_pids)
+    put = saves.restore(cfg, "snap", pids=_no_pids)
+    assert put.undo == saves.BEFORE_RESTORE and put.undo_kept == "mixed"
+    assert _live_world(cfg) == b"world-snap"
+    assert _undo_world(cfg) == b"world-ORIGINAL"
+    assert _everywhere(cfg, b"world-PLAYED") and _everywhere(cfg, b"NEW-CHARACTER")
+    saves.restore(cfg, "played", pids=_no_pids)
+    assert _live_world(cfg) == b"world-PLAYED"
+    assert (cfg.save_dir / "Players" / "newchar.plr").read_bytes() == b"NEW-CHARACTER"
+
+
+def test_play_after_a_failed_restore_with_nothing_to_undo_gets_a_fresh_undo(
+    tmp_path, monkeypatch
+):
+    """When the failed restore had no undo (the install was empty), the undo
+    slot protects nothing, so played-on bytes are saved into it rather than
+    refused or lost."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"world-snap")
+    saves.take(cfg, "snap", pids=_no_pids)
+    for folder in ("Worlds", "Players"):
+        for path in (cfg.save_dir / folder).iterdir():
+            path.unlink()
+    _fail_partway(cfg, "snap", monkeypatch)
+    assert saves.restore_state(cfg)["undo"] is None
+    _play(cfg)
+
+    put = saves.restore(cfg, "snap", pids=_no_pids)
+
+    assert put.undo == saves.BEFORE_RESTORE and put.undo_kept is None
+    assert _undo_world(cfg) == b"world-PLAYED"
+    held = saves.snapshot_root(cfg) / saves.BEFORE_RESTORE / "Players" / "newchar.plr"
+    assert held.read_bytes() == b"NEW-CHARACTER"
+
+
+def test_restoring_the_undo_over_a_played_save_refuses(tmp_path):
+    """Putting the undo back takes no undo of its own (it cannot: it would
+    overwrite the slot it reads from). That is safe while the save is what the
+    last restore put back, and lost the play once the save had changed."""
+    cfg = _cfg(tmp_path)
+    _populate(cfg, world_body=b"world-A")
+    saves.take(cfg, "A", pids=_no_pids)
+    _populate(cfg, world_body=b"world-ORIGINAL")
+    saves.restore(cfg, "A", pids=_no_pids)
+    _play(cfg)
+
+    with pytest.raises(saves.SaveError, match="save_snapshot"):
+        saves.restore(cfg, saves.BEFORE_RESTORE, pids=_no_pids)
+
+    assert _live_world(cfg) == b"world-PLAYED"
+    assert (cfg.save_dir / "Players" / "newchar.plr").read_bytes() == b"NEW-CHARACTER"
+
+    # POSITIVE CONTROL: with the play saved, undoing goes through.
+    saves.take(cfg, "played", pids=_no_pids)
+    saves.restore(cfg, saves.BEFORE_RESTORE, pids=_no_pids)
+    assert _live_world(cfg) == b"world-ORIGINAL"
+    assert not (cfg.save_dir / "Players" / "newchar.plr").exists()
+    assert _everywhere(cfg, b"NEW-CHARACTER")
+
+
+# ---- the world is the one named, not always the configured one --------------
+
+
+def _two_worlds(cfg: config_mod.Config) -> None:
+    worlds = cfg.save_dir / "Worlds"
+    for stem in (WORLD, "Launched"):
+        (worlds / f"{stem}.wld").write_bytes(f"{stem}-v1".encode())
+        (worlds / f"{stem}.twld").write_bytes(f"{stem}-tmod-v1".encode())
+    (cfg.save_dir / "Players" / "n43n.plr").write_bytes(b"player-v1")
+
+
+def test_a_snapshot_and_restore_act_on_the_world_named(tmp_path):
+    """`launch(world=...)` loads a world other than TMODLOADER_WORLD_WIN, and
+    the save verbs only ever copied the configured one: the snapshot held the
+    wrong world, and the restore "succeeded" with the launched world still
+    changed by the run."""
+    cfg = _cfg(tmp_path)
+    _two_worlds(cfg)
+    launched = cfg.save_dir / "Worlds" / "Launched.wld"
+
+    snap = saves.take(cfg, "pre", pids=_no_pids, world=r"C:\Worlds\Launched.wld")
+    assert "Worlds/Launched.wld" in snap.files
+    assert f"Worlds/{WORLD}.wld" not in snap.files
+    assert saves.snapshot_world(snap) == "Launched"
+
+    launched.write_bytes(b"Launched-MUTATED-BY-THE-RUN")
+    put = saves.restore(cfg, "pre", pids=_no_pids)
+
+    assert launched.read_bytes() == b"Launched-v1"
+    assert "Worlds/Launched.wld" in put.files
+    # The undo is of the same world, so the restore can be undone.
+    undo = saves.snapshot_root(cfg) / saves.BEFORE_RESTORE / "Worlds" / "Launched.wld"
+    assert undo.read_bytes() == b"Launched-MUTATED-BY-THE-RUN"
+    # POSITIVE CONTROL: the configured world was neither copied nor touched.
+    assert (cfg.save_dir / "Worlds" / f"{WORLD}.wld").read_bytes() == (
+        f"{WORLD}-v1".encode()
+    )
+
+
+def test_a_restore_leaves_a_world_its_snapshot_does_not_hold_alone(tmp_path):
+    """A snapshot of world A, restored while the configuration named world B,
+    put A back and then REMOVED B's `.wld` and `.twld` as files "created since
+    the snapshot"."""
+    cfg = _cfg(tmp_path)
+    _two_worlds(cfg)
+    saves.take(cfg, "of-launched", pids=_no_pids, world="Launched")
+
+    put = saves.restore(cfg, "of-launched", pids=_no_pids)
+
+    assert put.removed == ()
+    for suffix in (".wld", ".twld"):
+        assert (cfg.save_dir / "Worlds" / f"{WORLD}{suffix}").is_file(), (
+            f"the configured world's {suffix} was deleted by a restore of another world"
+        )
+
+    # A restore told to act on a different world than the snapshot holds
+    # refuses, and changes nothing.
+    (cfg.save_dir / "Worlds" / f"{WORLD}.wld").write_bytes(b"configured-changed")
+    with pytest.raises(saves.SaveError, match="holds the world 'Launched'"):
+        saves.restore(cfg, "of-launched", pids=_no_pids, world=rf"C:\W\{WORLD}.wld")
+    assert (cfg.save_dir / "Worlds" / f"{WORLD}.wld").read_bytes() == (
+        b"configured-changed"
+    )
+    # POSITIVE CONTROL: naming the snapshot's own world, in any casing, works.
+    saves.restore(cfg, "of-launched", pids=_no_pids, world=r"C:\W\launched.WLD")
+
+
+def test_a_failed_restore_of_one_world_is_not_mistaken_for_another(
+    tmp_path, monkeypatch
+):
+    """The "mixed" record names no world, and the undo it protects holds the
+    original of the world whose restore failed. A restore of a DIFFERENT world
+    read that record as its own: it either refused over the other world's
+    failure, or kept the undo and reported another world's save as its undo."""
+    cfg = _cfg(tmp_path)
+    _two_worlds(cfg)
+    saves.take(cfg, "snapA", pids=_no_pids)  # the configured world
+    saves.take(cfg, "snapB", pids=_no_pids, world="Launched")
+    (cfg.save_dir / "Worlds" / f"{WORLD}.wld").write_bytes(b"A-ORIGINAL")
+    _fail_partway(cfg, "snapA", monkeypatch)
+    (cfg.save_dir / "Worlds" / "Launched.wld").write_bytes(b"B-PLAYED")
+
+    with pytest.raises(saves.SaveError, match="snapA") as refused:
+        saves.restore(cfg, "snapB", pids=_no_pids)
+
+    assert "TestWorld" in str(refused.value)
+    assert (cfg.save_dir / "Worlds" / "Launched.wld").read_bytes() == b"B-PLAYED"
+    assert _undo_world(cfg) == b"A-ORIGINAL"
+
+    # POSITIVE CONTROL: once the failed restore of A is finished, B restores,
+    # and its undo holds B, not A.
+    saves.restore(cfg, "snapA", pids=_no_pids)
+    put = saves.restore(cfg, "snapB", pids=_no_pids)
+    assert put.undo == saves.BEFORE_RESTORE and put.undo_kept is None
+    undo_b = saves.snapshot_root(cfg) / saves.BEFORE_RESTORE / "Worlds" / "Launched.wld"
+    assert undo_b.read_bytes() == b"B-PLAYED"
+
+
+def test_a_retaken_label_does_not_change_which_world_a_failed_restore_was_of(
+    tmp_path, monkeypatch
+):
+    """The failed restore's world was read from the CURRENT contents of its
+    snapshot label, and a label can be retaken. Retaking it under another
+    world made the stuck restore look like that world's, so the undo holding
+    the first world's original was kept and reported as the second's."""
+    cfg = _cfg(tmp_path)
+    _two_worlds(cfg)
+    saves.take(cfg, "snapA", pids=_no_pids)  # the configured world
+    (cfg.save_dir / "Worlds" / f"{WORLD}.wld").write_bytes(b"A-ORIGINAL")
+    _fail_partway(cfg, "snapA", monkeypatch)
+    saves.take(cfg, "snapA", pids=_no_pids, world="Launched")
+
+    with pytest.raises(saves.SaveError, match="TestWorld"):
+        saves.restore(cfg, "snapA", pids=_no_pids)
+    assert _undo_world(cfg) == b"A-ORIGINAL"
+
+    # POSITIVE CONTROL: put the stuck world's undo back (its half-restored
+    # state saved first, since no snapshot holds it any more), and the
+    # restore of the other world then goes through with an undo of its own.
+    saves.take(cfg, "half", pids=_no_pids)
+    saves.restore(cfg, saves.BEFORE_RESTORE, pids=_no_pids)
+    assert _live_world(cfg) == b"A-ORIGINAL"
+    put = saves.restore(cfg, "snapA", pids=_no_pids)
+    assert put.undo == saves.BEFORE_RESTORE and put.undo_kept is None
+    undo_b = saves.snapshot_root(cfg) / saves.BEFORE_RESTORE / "Worlds" / "Launched.wld"
+    assert undo_b.read_bytes() == b"Launched-v1"
+
+
+def test_a_snapshot_with_no_world_is_restored_in_the_configured_worlds_scope(
+    tmp_path, monkeypatch
+):
+    """A snapshot taken before the world existed holds only characters. Its
+    restore still acts on the configured world: the undo copies that world and
+    the restore removes it as a file the snapshot does not hold. So the record
+    names the configured world, and a failed restore of it guards that world's
+    original against a restore of another world."""
+    cfg = _cfg(tmp_path)
+    (cfg.save_dir / "Players" / "n43n.plr").write_bytes(b"player-v1")
+    (cfg.save_dir / "Players" / "n43n.tplr").write_bytes(b"tplayer-v1")
+    held = saves.take(cfg, "players-only", pids=_no_pids)
+    assert saves.snapshot_world(held) is None
+    _two_worlds(cfg)
+    (cfg.save_dir / "Worlds" / f"{WORLD}.wld").write_bytes(b"A-ORIGINAL")
+    saves.take(cfg, "snapB", pids=_no_pids, world="Launched")
+
+    _fail_partway(cfg, "players-only", monkeypatch)
+    record = json.loads((saves.snapshot_root(cfg) / saves.RESTORE_STATE).read_text())
+    assert record["world"] == WORLD
+    assert _undo_world(cfg) == b"A-ORIGINAL"
+
+    with pytest.raises(saves.SaveError, match=WORLD):
+        saves.restore(cfg, "snapB", pids=_no_pids)
+    assert _undo_world(cfg) == b"A-ORIGINAL"
+
+    # POSITIVE CONTROL: the retry of the failed restore goes through, keeps
+    # the original, and removes the world the snapshot does not hold.
+    put = saves.restore(cfg, "players-only", pids=_no_pids)
+    assert put.undo_kept == "mixed" and f"Worlds/{WORLD}.wld" in put.removed
+    assert _undo_world(cfg) == b"A-ORIGINAL"

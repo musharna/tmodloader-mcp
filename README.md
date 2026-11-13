@@ -348,6 +348,11 @@ has no default either; with neither set, `launch` refuses and **lists the worlds
 actually in your save directory**, with the Windows paths it wants. `inventory`
 answers the same question without launching anything.
 
+`save_snapshot` copies that world too, unless you pass `world`. `save_restore`
+puts back the world its snapshot holds. If the last `launch` loaded a different
+world, both refuse until you pass `world`, so a restore cannot quietly miss the
+world the run changed.
+
 <details>
 <summary><code>TMODLOADER_MOD_NAME</code> — when the derived name is wrong,
 and what the name keeps apart</summary>

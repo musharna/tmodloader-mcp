@@ -32,11 +32,12 @@ the process is a copy of something mid-flight. Copying files while nothing has
 them open is the only version of this that is honest, which is why every entry
 point here refuses while a tModLoader process exists.
 
-WHAT IS COPIED: the configured world's `.wld` and `.twld`, and every `.plr` and
-`.tplr`. Not `.bak` files - those are the game's own safety net and restoring a
-stale one alongside a fresh save is worse than leaving it. Not the whole Worlds
-directory either: that measured 41MB here against 3MB for one world, and a
-snapshot nobody can afford to take is a snapshot nobody takes.
+WHAT IS COPIED: one world's `.wld` and `.twld` (the configured world unless
+the caller names another; a restore acts on the world its snapshot holds), and
+every `.plr` and `.tplr`. Not `.bak` files - those are the game's own safety
+net and restoring a stale one alongside a fresh save is worse than leaving it.
+Not the whole Worlds directory either: that measured 41MB here against 3MB for
+one world, and a snapshot nobody can afford to take is a snapshot nobody takes.
 """
 
 from __future__ import annotations
@@ -64,8 +65,6 @@ _LABEL = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 #: undo would be the thing that destroyed the state it was meant to undo.
 BEFORE_RESTORE = "auto-before-restore"
 
-_RESERVED = (BEFORE_RESTORE,)
-
 MANIFEST = "snapshot.json"
 
 #: What the last restore left on disk, in the snapshot root beside the
@@ -74,6 +73,13 @@ MANIFEST = "snapshot.json"
 #: finished, so a restore that dies partway - a /mnt/c lock, a kill - is on
 #: record as having left half of one state and half of another.
 RESTORE_STATE = "restore-state.json"
+
+#: Names a label may not take, compared CASE-INSENSITIVELY: the save directory
+#: is on NTFS, where `AUTO-BEFORE-RESTORE` opens the undo's own directory.
+#: The undo may still be named to restore or forget it; the restore record is
+#: a file in the snapshot root, so a snapshot of that name would take its path.
+_RESERVED = (BEFORE_RESTORE,)
+_NEVER = (RESTORE_STATE,)
 
 
 class SaveError(RuntimeError):
@@ -143,36 +149,65 @@ def snapshot_root(cfg: Config) -> Path:
     return cfg.save_dir.parent / ".tmodloader-mcp-snapshots"
 
 
-def _world_stem(cfg: Config) -> str:
-    """The configured world's name, with no extension and no directory.
+def world_stem(world: str) -> str:
+    """A world's name, with no extension and no directory.
 
-    `world_win` is a WINDOWS path, so the separator is a backslash and
-    `Path(...).name` on Linux would return the whole string unchanged - the
+    `world` is a WINDOWS path or a bare name, so the separator is a backslash
+    and `Path(...).name` on Linux would return the whole string unchanged - the
     kind of quiet wrong answer that produces a snapshot of nothing.
     """
-    if not cfg.world_win:
-        raise SaveError(
-            "no world is configured, so there is nothing to snapshot. Set "
-            "TMODLOADER_WORLD_WIN to the world this session drives."
-        )
-
-    name = cfg.world_win.replace("\\", "/").rsplit("/", 1)[-1]
+    name = world.replace("\\", "/").rsplit("/", 1)[-1]
     stem = name[: -len(".wld")] if name.casefold().endswith(".wld") else name
     if not stem:
-        raise SaveError(
-            f"TMODLOADER_WORLD_WIN does not name a world: {cfg.world_win!r}"
-        )
+        raise SaveError(f"{world!r} does not name a world")
     return stem
 
 
-def _sources(cfg: Config) -> list[tuple[Path, str]]:
+def _world_stem(cfg: Config, world: str | None = None) -> str:
+    """The world to act on: `world` when the caller names one, else the
+    configured world (TMODLOADER_WORLD_WIN)."""
+    if world is None:
+        if not cfg.world_win:
+            raise SaveError(
+                "no world is configured, so there is nothing to snapshot. Set "
+                "TMODLOADER_WORLD_WIN to the world this session drives, or "
+                "name the world."
+            )
+        world = cfg.world_win
+    return world_stem(world)
+
+
+def snapshot_world(held: Snapshot) -> str | None:
+    """The name of the world `held` holds, or None if it holds no world file.
+
+    Read from the file names, which `take` writes as `Worlds/<name>.wld` and
+    `.twld`, so snapshots taken before the world was recorded answer too.
+    """
+    stems = set()
+    for name in held.files:
+        if not name.startswith("Worlds/"):
+            continue
+        rest = name[len("Worlds/") :]
+        for suffix in (".twld", ".wld"):
+            if rest.endswith(suffix):
+                stems.add(rest[: -len(suffix)])
+                break
+    if len(stems) > 1:
+        raise SaveError(
+            f"the snapshot {held.label!r} holds more than one world "
+            f"({', '.join(sorted(stems))}); `take` never writes that."
+        )
+    return stems.pop() if stems else None
+
+
+def _sources(cfg: Config, world: str | None = None) -> list[tuple[Path, str]]:
     """Every file worth copying, as (path on disk, name inside the snapshot).
 
     Returned even when a file does not exist yet - the caller reports what it
     actually found, so a world that has never been saved is visible as an
     absence rather than as a snapshot that silently holds less than it claims.
     """
-    stem = _world_stem(cfg)
+    stem = _world_stem(cfg, world)
     worlds = cfg.save_dir / "Worlds"
     players = cfg.save_dir / "Players"
 
@@ -189,6 +224,7 @@ def _sources(cfg: Config) -> list[tuple[Path, str]]:
 
 
 def _check_label(label: str, *, reserved_ok: bool = False) -> str:
+    """`label` if it is usable, spelled as this module spells a reserved name."""
     if not _LABEL.match(label or ""):
         raise SaveError(
             f"{label!r} is not a usable label. Letters, digits, dot, dash and "
@@ -197,12 +233,22 @@ def _check_label(label: str, *, reserved_ok: bool = False) -> str:
             "out of the snapshot folder is refused rather than rewritten."
         )
 
-    if label in _RESERVED and not reserved_ok:
-        raise SaveError(
-            f"{label!r} is reserved: `restore` writes it automatically so that "
-            "a restore can be undone. Taking it by hand would overwrite the "
-            "one copy that undo depends on."
-        )
+    folded = label.casefold()
+    for name in _NEVER:
+        if folded == name.casefold():
+            raise SaveError(
+                f"{label!r} is reserved: the restore record is kept under that "
+                "name beside the snapshots."
+            )
+    for name in _RESERVED:
+        if folded == name.casefold():
+            if not reserved_ok:
+                raise SaveError(
+                    f"{label!r} is reserved: `restore` writes {name!r} "
+                    "automatically so that a restore can be undone. Taking it "
+                    "by hand would overwrite the one copy that undo depends on."
+                )
+            return name
 
     return label
 
@@ -240,9 +286,14 @@ def take(
     *,
     pids: Callable[[Config], set[int]] = _default_pids,
     reserved_ok: bool = False,
+    world: str | None = None,
 ) -> Snapshot:
-    """Copy the save aside under `label`, replacing any snapshot of that name."""
-    _check_label(label, reserved_ok=reserved_ok)
+    """Copy the save aside under `label`, replacing any snapshot of that name.
+
+    `world` names the world to copy (a Windows path or a bare name); the
+    configured one when it is None.
+    """
+    label = _check_label(label, reserved_ok=reserved_ok)
     _check_idle(cfg, f"take the snapshot {label!r}", pids)
 
     into = snapshot_root(cfg) / label
@@ -257,7 +308,7 @@ def take(
     copied: list[str] = []
     size = 0
     try:
-        for source, name in _sources(cfg):
+        for source, name in _sources(cfg, world):
             if not source.is_file():
                 continue
             target = staging / name
@@ -270,7 +321,7 @@ def take(
             raise NothingToSnapshot(
                 f"nothing to snapshot: no world or player files were found "
                 f"under {cfg.save_dir}. Expected "
-                f"Worlds/{_world_stem(cfg)}.wld."
+                f"Worlds/{_world_stem(cfg, world)}.wld."
             )
 
         taken = time.time()
@@ -384,12 +435,22 @@ def restore_state(cfg: Config) -> dict | None:
     restore. An unreadable record RAISES: it is what decides whether the next
     restore may overwrite the undo, and guessing there is the bug it fixes.
     """
+    record = _read_record(cfg)
+    if record is None:
+        return None
+    return {key: record[key] for key in ("state", "from", "undo")}
+
+
+def _read_record(cfg: Config) -> dict | None:
+    """`restore_state` plus the `world` the record names, when it names one
+    (records written before the world was recorded do not)."""
     path = snapshot_root(cfg) / RESTORE_STATE
     if not path.is_file():
         return None
     try:
         held = json.loads(path.read_text(encoding="utf-8"))
         state = {"state": held["state"], "from": held["from"], "undo": held["undo"]}
+        world = held.get("world")
     except (OSError, ValueError, KeyError, TypeError) as failed:
         raise SaveError(
             f"the restore record {path} cannot be read ({failed}). It says "
@@ -398,17 +459,21 @@ def restore_state(cfg: Config) -> dict | None:
         ) from failed
     if state["state"] not in ("mixed", "restored"):
         raise SaveError(f"the restore record {path} holds an unknown state: {held!r}")
+    state["world"] = world if isinstance(world, str) and world else None
     return state
 
 
-def _record_restore(cfg: Config, state: str, label: str, undo: str | None) -> None:
+def _record_restore(
+    cfg: Config, state: str, label: str, undo: str | None, world: str
+) -> None:
     root = snapshot_root(cfg)
     staging = root / f".{RESTORE_STATE}.partial"
+    # `world` is recorded rather than looked up later from `label`: a label
+    # can be retaken under another world while this record still names it.
+    record = {"state": state, "from": label, "undo": undo, "world": world}
     try:
         root.mkdir(parents=True, exist_ok=True)
-        staging.write_text(
-            json.dumps({"state": state, "from": label, "undo": undo}, indent=2) + "\n"
-        )
+        staging.write_text(json.dumps(record, indent=2) + "\n")
         staging.replace(root / RESTORE_STATE)
     except OSError as failed:
         raise SaveError(
@@ -416,10 +481,10 @@ def _record_restore(cfg: Config, state: str, label: str, undo: str | None) -> No
         ) from failed
 
 
-def _live_matches(cfg: Config, held: Snapshot) -> bool:
+def _live_matches(cfg: Config, held: Snapshot, world: str | None) -> bool:
     """Whether the save on disk is byte for byte the snapshot `held` - the
     same files in `restore`'s scope, with the same contents."""
-    live = {name: path for path, name in _sources(cfg) if path.is_file()}
+    live = {name: path for path, name in _sources(cfg, world) if path.is_file()}
     if set(live) != set(held.files):
         return False
     from_dir = snapshot_root(cfg) / held.label
@@ -432,7 +497,66 @@ def _live_matches(cfg: Config, held: Snapshot) -> bool:
         return False
 
 
-def _kept_undo(cfg: Config) -> tuple[str | None, str] | None:
+def _unheld(cfg: Config, world: str | None) -> list[str]:
+    """The files in `restore`'s scope on disk now whose bytes no snapshot holds.
+
+    Compared by content against the file of the same name in every readable
+    snapshot. A restore that overwrites or removes one of these destroys the
+    only copy, so this is checked against the DISK, never inferred from the
+    restore record: the record says what the save was when it was written,
+    and the game can have been played on since.
+    """
+    held = listing(cfg)
+    root = snapshot_root(cfg)
+    unheld = []
+    for path, name in _sources(cfg, world):
+        if not path.is_file():
+            continue
+        copies = [root / s.label / name for s in held if name in s.files]
+        try:
+            if any(
+                copy.is_file() and filecmp.cmp(path, copy, shallow=False)
+                for copy in copies
+            ):
+                continue
+        except OSError as failed:
+            raise SaveError(
+                f"could not compare {name} with the snapshots ({failed}), so "
+                "whether a restore would destroy the only copy of it is unknown."
+            ) from failed
+        unheld.append(name)
+    return unheld
+
+
+def _refuse_unheld(label: str, unheld: list[str], why: str) -> SaveError:
+    return SaveError(
+        f"refusing to restore {label!r}: the save on disk holds "
+        f"{', '.join(unheld)} as no snapshot does, and {why} Take "
+        "`save_snapshot` of it under a new label first, then restore again."
+    )
+
+
+def _record_world(cfg: Config, last: dict) -> str | None:
+    """The world the recorded restore was of, or None if that is unknown.
+
+    Written into the record since it was found that a snapshot label can be
+    retaken under another world while a stuck restore still names it. A
+    record from before that is read through its undo first (a reserved name
+    nobody can retake by hand), then through the snapshot it restored.
+    """
+    if last["world"] is not None:
+        return last["world"]
+    for label in (last["undo"], last["from"]):
+        held = read(cfg, label) if label is not None else None
+        found = snapshot_world(held) if held is not None else None
+        if found is not None:
+            return found
+    return None
+
+
+def _kept_undo(
+    cfg: Config, label: str, world: str | None
+) -> tuple[str | None, str] | None:
     """The undo to keep instead of taking a new one, and why - or None.
 
     THE LATCH. `auto-before-restore` is one slot, and re-taking it is only
@@ -442,16 +566,49 @@ def _kept_undo(cfg: Config) -> tuple[str | None, str] | None:
     exactly what the last restore put back (it is in that snapshot). Taking
     the undo from either overwrote the original - on the natural retry of a
     failed restore, and on any second restore after a first.
+
+    BOTH ARE CHECKED ON DISK. "mixed" once trusted the record alone, and a
+    save played on after the failed restore was overwritten while the undo
+    kept only the older original. When the undo holds an original and the
+    disk holds something no snapshot does, there are two only-copies and one
+    slot, so the restore REFUSES rather than choosing which one to destroy.
     """
-    last = restore_state(cfg)
+    last = _read_record(cfg)
     if last is None:
         return None
     if last["state"] == "mixed":
-        if last["undo"] is None or read(cfg, last["undo"]) is not None:
-            return last["undo"], "mixed"
+        original = last["undo"] is not None and read(cfg, last["undo"]) is not None
+        stuck = _record_world(cfg, last)
+        if stuck is not None and stuck.casefold() != _world_stem(cfg, world).casefold():
+            # THE RECORD IS ABOUT ANOTHER WORLD. Its undo holds that world's
+            # save from before the failed restore: re-taking the slot for this
+            # world destroys it, and keeping it would report that world as
+            # this restore's undo.
+            if original:
+                raise SaveError(
+                    f"refusing to restore {label!r}: a restore of "
+                    f"{last['from']!r} (world {stuck!r}) failed partway, and "
+                    f"{last['undo']!r} holds that world's save from before it. "
+                    f"Finish it first - restore {last['from']!r} again, or put "
+                    f"{last['undo']!r} back - then restore {label!r}."
+                )
+            return None
+        unheld = _unheld(cfg, world)
+        if not unheld:
+            return (last["undo"], "mixed") if original or last["undo"] is None else None
+        if original:
+            raise _refuse_unheld(
+                label,
+                unheld,
+                f"a restore of {last['from']!r} failed partway since the last "
+                f"good one, so {last['undo']!r} holds the save from before that "
+                "and cannot be taken again without losing it.",
+            )
+        # The undo slot protects nothing (there was nothing to undo to, or it
+        # is gone), so the save on disk is taken into it as usual.
         return None
     held = read(cfg, last["from"])
-    if held is not None and _live_matches(cfg, held):
+    if held is not None and _live_matches(cfg, held, world):
         return held.label, "unchanged"
     return None
 
@@ -461,9 +618,15 @@ def restore(
     label: str,
     *,
     pids: Callable[[Config], set[int]] = _default_pids,
+    world: str | None = None,
 ) -> Restored:
-    """Put `label` back, after saving what is there now so this can be undone."""
-    _check_label(label, reserved_ok=True)
+    """Put `label` back, after saving what is there now so this can be undone.
+
+    Acts on the world the snapshot holds. `world`, when given, must be that
+    world; it is never the configured one by default, because the configured
+    world can have changed since the snapshot was taken.
+    """
+    label = _check_label(label, reserved_ok=True)
     _check_idle(cfg, f"restore the snapshot {label!r}", pids)
 
     held = read(cfg, label)
@@ -474,16 +637,46 @@ def restore(
             + (f"There is: {', '.join(names)}." if names else "There are none yet.")
         )
 
+    # THE SNAPSHOT'S WORLD, NOT THE CONFIGURED ONE. Restoring a snapshot of
+    # world A while TMODLOADER_WORLD_WIN named B put A back and then REMOVED
+    # B's files, which are in the restore's scope and not in the snapshot.
+    held_world = snapshot_world(held)
+    if world is None:
+        world = held_world
+    elif held_world is not None and (
+        world_stem(world).casefold() != held_world.casefold()
+    ):
+        raise SaveError(
+            f"the snapshot {label!r} holds the world {held_world!r}, not "
+            f"{world_stem(world)!r}. Restoring it would put back one world "
+            "and leave the other as it is."
+        )
+    stem = _world_stem(cfg, world)
+
     # UNDO FIRST. This is about to overwrite a real save, and the caller may
     # have meant a different label. Taking the current state under a reserved
     # name costs one copy and makes the mistake recoverable instead of final.
     undo: str | None = None
-    kept = _kept_undo(cfg) if label != BEFORE_RESTORE else None
+    kept = _kept_undo(cfg, label, world) if label != BEFORE_RESTORE else None
+    if label == BEFORE_RESTORE:
+        # Putting the undo back takes no undo of its own - it would overwrite
+        # the slot it is reading - so it is safe only while every file on disk
+        # is already held somewhere: what the last restore put back, or the
+        # undo itself. A save played on since is not.
+        unheld = _unheld(cfg, world)
+        if unheld:
+            raise _refuse_unheld(
+                label,
+                unheld,
+                "putting the undo back takes no undo of its own.",
+            )
     if kept is not None:
         undo = kept[0]
     elif label != BEFORE_RESTORE:
         try:
-            undo = take(cfg, BEFORE_RESTORE, pids=pids, reserved_ok=True).label
+            undo = take(
+                cfg, BEFORE_RESTORE, pids=pids, reserved_ok=True, world=world
+            ).label
         except NothingToSnapshot:
             # Nothing on disk to save (a first run against an empty install) is
             # not a reason to refuse the restore - there is simply nothing to
@@ -501,7 +694,7 @@ def restore(
     # seen by the next one. `keep` is the snapshot holding a whole save to go
     # back to: the undo, or, when undoing, the undo being put back.
     keep = BEFORE_RESTORE if label == BEFORE_RESTORE else undo
-    _record_restore(cfg, "mixed", label, keep)
+    _record_restore(cfg, "mixed", label, keep, stem)
 
     from_dir = snapshot_root(cfg) / label
     put: list[str] = []
@@ -545,7 +738,7 @@ def restore(
     # rest.
     removed: list[str] = []
     recorded = set(held.files)
-    for source, name in _sources(cfg):
+    for source, name in _sources(cfg, world):
         if name in recorded or not source.is_file():
             continue
         try:
@@ -559,7 +752,7 @@ def restore(
             ) from failed
         removed.append(name)
 
-    _record_restore(cfg, "restored", label, keep)
+    _record_restore(cfg, "restored", label, keep, stem)
     return Restored(
         label=label,
         files=tuple(put),
@@ -572,7 +765,7 @@ def restore(
 
 def forget(cfg: Config, label: str) -> Snapshot | None:
     """Delete one snapshot. Returns what was deleted, or None if absent."""
-    _check_label(label, reserved_ok=True)
+    label = _check_label(label, reserved_ok=True)
     held = read(cfg, label)
     if held is None:
         return None

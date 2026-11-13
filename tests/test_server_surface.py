@@ -66,6 +66,8 @@ def session(monkeypatch):
 @pytest.fixture
 def no_session(monkeypatch):
     monkeypatch.setattr(server_mod, "_session", None)
+    # `launch` records the world it loaded here; reset so no test inherits one.
+    monkeypatch.setattr(server_mod, "_last_world", None)
 
 
 # ---- the records that were parsed and thrown away ----------------------
@@ -400,3 +402,83 @@ def test_a_real_bug_is_still_masked_rather_than_read_as_a_refusal():
 
     with pytest.raises(TypeError):
         crashes()
+
+
+# ---- the save verbs and the world `launch` loaded -----------------------
+
+
+def test_the_save_verbs_follow_the_world_launch_loaded(
+    tmp_path, monkeypatch, no_session
+):
+    """`launch(world=...)` overrides TMODLOADER_WORLD_WIN and the save verbs
+    never heard of it: after a run on the launched world, `save_restore`
+    "succeeded" by putting back the CONFIGURED world, and the world the run
+    changed stayed changed. Real files on disk; only the game is faked."""
+    from pathlib import Path
+
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from tmodloader_mcp import config as config_mod
+
+    save = tmp_path / "tModLoader"
+    (save / "Worlds").mkdir(parents=True)
+    (save / "Players").mkdir(parents=True)
+    configured = save / "Worlds" / "Configured.wld"
+    launched = save / "Worlds" / "Launched.wld"
+    configured.write_bytes(b"configured-v1")
+    launched.write_bytes(b"launched-v1")
+    (save / "Players" / "n43n.plr").write_bytes(b"player-v1")
+    cfg = config_mod.Config(
+        tml_dir=tmp_path / "game",
+        save_dir=save,
+        mod_source=tmp_path / "src",
+        mod_source_win=r"C:\src",
+        mod_name="Yours",
+        world_win=r"C:\T\Worlds\Configured.wld",
+        taskkill=Path("/taskkill"),
+        tasklist=Path("/tasklist"),
+        powershell=Path("/powershell"),
+    )
+    monkeypatch.setattr(server_mod, "_cfg", lambda: cfg)
+    monkeypatch.setattr(server_mod.session_mod, "_tml_pids", lambda _cfg: set())
+    monkeypatch.setattr(server_mod.session_mod, "stop", lambda *a, **k: [])
+
+    def fake_launch(cfg, mode, *, port, player, world, timeout):
+        fake = FakeSession()
+        fake.world = world or cfg.world_win
+        return fake
+
+    monkeypatch.setattr(server_mod.session_mod, "launch", fake_launch)
+
+    # POSITIVE CONTROL: with nothing launched yet, the configured world.
+    before = server_mod.save_snapshot("before")
+    assert "Worlds/Configured.wld" in before["files"]
+
+    server_mod.launch(world=r"C:\T\Worlds\Launched.wld")
+    server_mod.stop()
+    launched.write_bytes(b"launched-MUTATED-BY-THE-RUN")
+
+    # A label that does not exist is reported as that, not as a world mismatch.
+    with pytest.raises(ToolError, match="no snapshot called 'nope'"):
+        server_mod.save_restore("nope")
+
+    # Neither verb guesses: the configured world is not the one just driven.
+    with pytest.raises(ToolError, match="Launched"):
+        server_mod.save_snapshot("after")
+    with pytest.raises(ToolError, match="Launched"):
+        server_mod.save_restore("before")
+    assert launched.read_bytes() == b"launched-MUTATED-BY-THE-RUN"
+    assert configured.read_bytes() == b"configured-v1"
+
+    # Naming the world works, and a snapshot of it restores it by default.
+    held = server_mod.save_snapshot("of-launched", world=r"C:\T\Worlds\Launched.wld")
+    assert held["files"][0] == "Worlds/Launched.wld"
+    launched.write_bytes(b"launched-MUTATED-AGAIN")
+    put = server_mod.save_restore("of-launched")
+    assert launched.read_bytes() == b"launched-MUTATED-BY-THE-RUN"
+    assert "Worlds/Launched.wld" in put["files"]
+
+    # Asking for the configured world by name restores it, on purpose.
+    configured.write_bytes(b"configured-changed")
+    server_mod.save_restore("before", world=r"C:\T\Worlds\Configured.wld")
+    assert configured.read_bytes() == b"configured-v1"

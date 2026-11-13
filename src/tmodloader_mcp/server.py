@@ -84,6 +84,37 @@ mcp = MCPServer("tmodloader-mcp", instructions=INSTRUCTIONS)
 #: one game, one save directory, one trigger file.
 _session: session_mod.Session | None = None
 
+#: The world the most recent session from this server loaded, KEPT after
+#: `stop`. The save verbs only run with no game up, so by then `_session` is
+#: gone, and without this they could not tell that the world just driven is
+#: not the configured one they would otherwise copy. In memory only: a fresh
+#: server process has driven nothing yet.
+_last_world: str | None = None
+
+
+def _save_world(cfg: config_mod.Config, world: str | None, default: str | None):
+    """The world a save verb acts on: `world` if the caller names one, else
+    `default` - refused when that is not the world the last session loaded,
+    because acting on it would snapshot or restore a world the run never
+    touched and report success."""
+    if world is not None:
+        problem = session_mod.world_problem(world)
+        if problem:
+            raise saves_mod.SaveError(problem)
+        return world
+    if (
+        _last_world is not None
+        and default is not None
+        and saves_mod.world_stem(_last_world).casefold()
+        != saves_mod.world_stem(default).casefold()
+    ):
+        raise saves_mod.SaveError(
+            f"the last session loaded {_last_world!r}, but this would act on "
+            f"{default!r}. Pass `world` to say which world you mean."
+        )
+    return default
+
+
 #: The serialisation the module docstring explains. One lock for every tool,
 #: including the read-only ones: `captures` racing `prune_captures` is the
 #: same torn answer as `trigger` racing `trigger`, only cheaper.
@@ -494,9 +525,12 @@ def launch(
             "share one save directory and consume each other's trigger files."
         )
 
+    global _last_world
+
     _session = session_mod.launch(
         _cfg(), mode, port=port, player=player, world=world, timeout=timeout
     )
+    _last_world = _session.world
     return LaunchOut(
         mode=_session.mode,
         port=_session.port,
@@ -1110,8 +1144,15 @@ def inventory() -> InventoryOut:
 )
 @_serialized
 @_surfaces_refusals
-def save_snapshot(label: str) -> SnapshotOut:
+def save_snapshot(label: str, world: str | None = None) -> SnapshotOut:
     """Copy this world and its characters aside, so a run can be undone.
+
+    Args:
+        label: The snapshot's name: letters, digits, dot, dash, underscore.
+        world: WINDOWS path to the `.wld` to copy, as passed to `launch`.
+            Defaults to TMODLOADER_WORLD_WIN. Refused without it when the
+            last session from this server loaded a different world, rather
+            than copying a world the run never touched.
 
     WHAT THIS IS FOR. The mutating verbs write to a real install and none of
     that FAILS — it accumulates. Enemy NPCs do not survive a reload, so `spawn`
@@ -1126,12 +1167,12 @@ def save_snapshot(label: str) -> SnapshotOut:
     owns these files and writes them out on its own schedule, so a copy taken
     now is mid-write. Stop the session first.
 
-    Copies the configured world's `.wld` and `.twld` and every `.plr`/`.tplr` —
+    Copies the world's `.wld` and `.twld` and every `.plr`/`.tplr` —
     not the whole Worlds directory, which measured 41MB against 3MB for one
     world, and not `.bak` files, which are the game's own safety net.
     """
     cfg = _cfg()
-    held = saves_mod.take(cfg, label)
+    held = saves_mod.take(cfg, label, world=_save_world(cfg, world, cfg.world_win))
     return SnapshotOut(
         label=held.label,
         taken=held.taken,
@@ -1147,8 +1188,15 @@ def save_snapshot(label: str) -> SnapshotOut:
 )
 @_serialized
 @_surfaces_refusals
-def save_restore(label: str) -> RestoreOut:
+def save_restore(label: str, world: str | None = None) -> RestoreOut:
     """Overwrite the world and characters with a snapshot.
+
+    Args:
+        label: The snapshot to put back.
+        world: WINDOWS path to the `.wld`. Defaults to the world the snapshot
+            holds, and must be that world when given. Refused without it when
+            the last session from this server loaded a different world: the
+            restore would leave the world that run changed as it is.
 
     This DESTROYS what is on disk now, so it saves that first: the state being
     overwritten is copied to `auto-before-restore` and returned as `undo`,
@@ -1161,11 +1209,23 @@ def save_restore(label: str) -> RestoreOut:
     the last restore put back (`undo` is then that snapshot's label, and the
     earlier undo survives). `undo_kept` says which.
 
+    Both cases are checked against the files on disk. If the save holds files
+    no snapshot holds while the undo must be kept (the game was played after a
+    failed restore), or while restoring `auto-before-restore` itself, this
+    refuses and names them: take `save_snapshot` first, then restore again.
+
     Refuses while the game is running, and refuses a label that does not exist
     by listing the ones that do.
     """
     cfg = _cfg()
-    put = saves_mod.restore(cfg, label)
+    # The label is checked before anything is read with it, and a label with
+    # no snapshot goes straight to `restore`, whose refusal names the ones that
+    # exist - not a world mismatch about a snapshot that is not there.
+    held = saves_mod.read(cfg, saves_mod._check_label(label, reserved_ok=True))
+    if held is not None:
+        default = saves_mod.snapshot_world(held) or cfg.world_win
+        world = _save_world(cfg, world, default)
+    put = saves_mod.restore(cfg, label, world=world)
     return RestoreOut(
         label=put.label,
         files=list(put.files),
@@ -1525,9 +1585,12 @@ def restart(
                 f"build failed, so nothing was relaunched: {result.summary}"
             )
 
+    global _last_world
+
     _session = session_mod.launch(
         cfg, mode, port=port, player=player, world=world, timeout=timeout
     )
+    _last_world = _session.world
     return RestartOut(
         killed_pids=killed,
         built=built,
