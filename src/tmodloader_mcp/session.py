@@ -1930,6 +1930,32 @@ def _player_problem(player: str) -> str | None:
     return None
 
 
+def _client_join_cmd(cfg: Config, port: int, player: str) -> list[str]:
+    """The command that starts a client and joins it to the local server.
+
+    NO `-skipselect`. Next to `-join`, tModLoader 1.4.5 reads that flag as a
+    second instruction: load the first world on disk and enter it in
+    singleplayer, while `-join` connects the same client to the server. When
+    the local entry lands first, the server boots the client with "Invalid
+    operation at this state" and the call waits out its whole timeout - about
+    2 launches in 10 (issue 108, measured on 1.4.5.8). `-join` with `-player`
+    selects the character and connects without it.
+
+    ONE FUNCTION because `launch` and `join` start a client the same way. Two
+    copies of this list is how both of them carried the flag.
+    """
+    return [
+        str(cfg.dotnet),
+        "tModLoader.dll",
+        "-join",
+        "127.0.0.1",
+        "-port",
+        str(port),
+        "-player",
+        player,
+    ]
+
+
 def _client_is_ready(cfg: Config, player: str) -> bool:
     """Whether THIS player's client is up, live and in a world.
 
@@ -1949,8 +1975,9 @@ def _client_is_ready(cfg: Config, player: str) -> bool:
     return against somebody else's stale menu record before the joining client
     existed at all.
 
-    Sufficient as well as necessary: a join is always `-player <name>
-    -skipselect`, so its very first heartbeat is already the tokened one.
+    Sufficient as well as necessary: a join always starts its client with
+    `-player <name>`, so the heartbeat it writes from inside the world is the
+    tokened one.
     """
     return _heartbeat_ready(
         cfg.artifact(artifacts_for(cfg.mod_name, player).heartbeat, server=False)
@@ -2214,17 +2241,7 @@ def launch(
         )
 
         if mode == "server_client":
-            client_cmd = [
-                str(cfg.dotnet),
-                "tModLoader.dll",
-                "-join",
-                "127.0.0.1",
-                "-port",
-                str(port),
-                "-player",
-                player,
-                "-skipselect",
-            ]
+            client_cmd = _client_join_cmd(cfg, port, player)
             subprocess.Popen(
                 client_cmd,
                 cwd=str(cfg.tml_dir),
@@ -2351,17 +2368,7 @@ def join(
         )
 
     before = _tml_pids(cfg)
-    client_cmd = [
-        str(cfg.dotnet),
-        "tModLoader.dll",
-        "-join",
-        "127.0.0.1",
-        "-port",
-        str(session.port),
-        "-player",
-        player,
-        "-skipselect",
-    ]
+    client_cmd = _client_join_cmd(cfg, session.port, player)
 
     # SAME OWNERSHIP RULE `launch` HAS, and for the same reason: whoever spawns
     # owns the process until it can hand it back. A client that starts and
