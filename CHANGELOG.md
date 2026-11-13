@@ -11,6 +11,8 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-13
+
 ### Added
 
 - `save_snapshot` and `save_restore` take an optional `world`, a Windows path

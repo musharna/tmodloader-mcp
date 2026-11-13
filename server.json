@@ -8,13 +8,13 @@
     "url": "https://github.com/musharna/tmodloader-mcp",
     "source": "github"
   },
-  "version": "0.6.3",
+  "version": "0.7.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "tmodloader-mcp",
-      "version": "0.6.3",
+      "version": "0.7.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
