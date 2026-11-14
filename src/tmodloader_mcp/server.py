@@ -410,9 +410,19 @@ class ModOut(TypedDict):
     built_here: bool
 
 
+class PlayerOut(TypedDict):
+    # The name `launch(player=...)` takes, read from INSIDE the `.plr`; `file`
+    # is the file's stem, and the two can differ. Null name, difficulty and
+    # a non-null `error` mean the file is there and could not be read.
+    name: str | None
+    file: str
+    difficulty: str | None
+    error: str | None
+
+
 class InventoryOut(TypedDict):
     worlds: list[WorldOut]
-    players: list[str]
+    players: list[PlayerOut]
     mods: list[ModOut]
 
 
@@ -1110,7 +1120,11 @@ def inventory() -> InventoryOut:
     learn either was to launch and read the failure: a kick for the wrong
     character, and a readiness timeout blaming the heartbeat for the wrong
     world. Each world's `path_win` is the exact string `launch(world=...)`
-    wants.
+    wants, and each player's `name` is the exact string `launch(player=...)`
+    wants. That name is read from inside the `.plr` and can differ from the
+    file's name, which is reported as `file`. `difficulty` matters because a
+    `journey` character cannot join a non-journey world, and the other way
+    round. A character file that cannot be read is listed with `error`.
 
     The mods answer something else. `commands` reports `responder: false` for
     three different situations — the mod is not built, or it is built and
@@ -1129,7 +1143,10 @@ def inventory() -> InventoryOut:
             WorldOut(name=w.name, path_win=w.path_win)
             for w in inventory_mod.worlds(cfg.save_dir)
         ],
-        players=inventory_mod.players(cfg.save_dir),
+        players=[
+            PlayerOut(name=p.name, file=p.file, difficulty=p.difficulty, error=p.error)
+            for p in inventory_mod.players(cfg.save_dir)
+        ],
         mods=[
             ModOut(name=m.name, enabled=m.enabled, built_here=m.built_here)
             for m in inventory_mod.mods(cfg.save_dir)
@@ -1786,6 +1803,14 @@ def start_a_session() -> str:
     listing = "\n".join(
         f"  - {w.name}: {w.path_win or 'NO WINDOWS PATH'}" for w in worlds
     )
+    characters = "\n".join(
+        f"  - {p.name} ({p.difficulty or 'unknown difficulty'}"
+        + (f", file {p.file}.plr" if p.file != p.name else "")
+        + ")"
+        if p.name is not None
+        else f"  - UNREADABLE {p.file}.plr: {p.error}"
+        for p in players
+    )
     return f"""\
 Start a driven session on this machine.
 
@@ -1794,10 +1819,14 @@ WORLDS HERE (pass `world` as the Windows path, which is what tModLoader needs
 
 {listing or "  (none — a world has to be created in the game first)"}
 
-CHARACTERS HERE: {", ".join(players) or "(none — `launch` cannot create one)"}
+CHARACTERS HERE (the name inside each file, which is what `player` takes; it
+can differ from the file's name):
+
+{characters or "  (none — `launch` cannot create one)"}
 
 `player` must be one of those names. `-player` does not create a character,
-and a duplicate name is kicked rather than joined.
+and a duplicate name is kicked rather than joined. A journey character cannot
+join a non-journey world, and the other way round.
 
 THE ONLY MODE IS `server_client`. Singleplayer has no headless entry point and
 an empty dedicated server never ticks, so the mod never polls and never

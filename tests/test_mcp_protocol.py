@@ -49,6 +49,7 @@ import pytest
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.shared.exceptions import MCPError
+from plr_fixture import plr_bytes
 
 from tmodloader_mcp import server as server_mod
 
@@ -129,7 +130,10 @@ def fake_install(tmp_path):
     (save / "Worlds" / "FakeWorld.wld").write_bytes(b"")
     (save / "Worlds" / "FakeWorld.wld.bak").write_bytes(b"")
     (save / "Players").mkdir()
-    (save / "Players" / "n43n.plr").write_bytes(b"")
+    # A character whose file name is NOT its name, encrypted as the game does:
+    # `launch(player=...)` takes the name inside, so that is what has to
+    # survive the round trip, with the file stem beside it.
+    (save / "Players" / "n43n.plr").write_bytes(plr_bytes("n43n_Inside", 3))
     (save / "Players" / "n43n.plr.bak").write_bytes(b"")
     (save / "Mods").mkdir()
     (save / "Mods" / "Fakemod.tmod").write_bytes(b"")
@@ -588,7 +592,9 @@ def test_inventory_answers_the_two_preconditions_launch_could_not_check(fake_ins
     out = _structured(_run(call, fake_install))
 
     assert [w["name"] for w in out["worlds"]] == ["FakeWorld"]
-    assert out["players"] == ["n43n"]
+    assert out["players"] == [
+        {"name": "n43n_Inside", "file": "n43n", "difficulty": "journey", "error": None}
+    ]
 
 
 @needs_subprocess
@@ -851,7 +857,8 @@ def test_start_a_session_lists_the_worlds_and_characters_that_exist(fake_install
     )
 
     assert "FakeWorld" in text
-    assert "n43n" in text
+    # The name `player` takes, its difficulty, and the file it differs from.
+    assert "n43n_Inside (journey, file n43n.plr)" in text
     assert "FakeWorld.wld.bak" not in text, "it offered a backup as launchable"
 
 

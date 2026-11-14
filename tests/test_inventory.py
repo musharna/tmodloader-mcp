@@ -14,6 +14,7 @@ import os
 import time
 
 import pytest
+from plr_fixture import PLR_KEY, encrypt_block, plr_bytes
 
 from tmodloader_mcp import inventory
 
@@ -35,7 +36,9 @@ def save(tmp_path):
     players = tmp_path / "Players"
     players.mkdir()
     for name in ("n43n", "tst2"):
-        (players / f"{name}.plr").write_bytes(b"")
+        # Encrypted for real: a listing that never opens the file passes on an
+        # empty one, and an empty `.plr` is not a character.
+        (players / f"{name}.plr").write_bytes(plr_bytes(name))
         (players / f"{name}.tplr").write_bytes(b"")
         (players / f"{name}.plr.bak").write_bytes(b"")
         # tModLoader keeps a per-character DIRECTORY beside the .plr.
@@ -89,7 +92,10 @@ def test_a_world_off_a_drive_mount_reports_no_windows_path(save):
 
 def test_players_are_characters_not_backups_or_folders(save):
     """Ten entries in `Players/`, two of which are characters `launch` accepts."""
-    assert inventory.players(save) == ["n43n", "tst2"]
+    assert [(p.file, p.name) for p in inventory.players(save)] == [
+        ("n43n", "n43n"),
+        ("tst2", "tst2"),
+    ]
 
 
 def test_enabled_and_built_here_are_different_facts(save):
@@ -162,3 +168,120 @@ def test_an_absent_directory_is_empty_rather_than_a_crash(tmp_path):
     assert inventory.worlds(tmp_path) == []
     assert inventory.players(tmp_path) == []
     assert inventory.mods(tmp_path) == []
+
+
+# ---- what is INSIDE a .plr --------------------------------------------------
+#
+# `launch(player=...)` passes `-player <name>`, and tModLoader matches the name
+# stored inside the encrypted file. Measured on a real install, `Betula.plr`
+# holds `Betula_Calamity`. The files below are encrypted by `plr_fixture`,
+# which shares no code with the reader.
+
+FIPS197_KEY = bytes(range(16))
+FIPS197_PLAIN = bytes.fromhex("00112233445566778899aabbccddeeff")
+FIPS197_CIPHER = bytes.fromhex("69c4e0d86a7b0430d8cdb78070b4c55a")
+
+
+def test_the_block_cipher_matches_the_published_vector():
+    """FIPS-197 Appendix C.1, both directions.
+
+    The reader's decryption and the test-side encryption are pinned to the
+    same published vector, so the round-trip tests below cannot pass on two
+    implementations that are wrong in the same way.
+    """
+    assert inventory.aes128_cbc_decrypt(FIPS197_KEY, bytes(16), FIPS197_CIPHER) == (
+        FIPS197_PLAIN
+    )
+    assert encrypt_block(FIPS197_KEY, FIPS197_PLAIN) == FIPS197_CIPHER
+
+
+def test_the_name_is_read_from_inside_the_file_not_the_file_name(save):
+    """THE BUG: a stem-listing offered `Betula`, which `launch` cannot use.
+
+    The real install's `Betula.plr` holds a character named `Betula_Calamity`.
+    `name` is what `-player` matches; `file` is kept beside it so a caller can
+    still find the file.
+    """
+    (save / "Players" / "Betula.plr").write_bytes(plr_bytes("Betula_Calamity"))
+
+    got = {p.file: p for p in inventory.players(save)}
+
+    assert got["Betula"].name == "Betula_Calamity"
+    assert got["Betula"].error is None
+    # And the files whose names do agree still read as themselves.
+    assert got["n43n"].name == "n43n"
+
+
+@pytest.mark.parametrize(
+    ("byte", "label"),
+    [(0, "classic"), (1, "mediumcore"), (2, "hardcore"), (3, "journey"), (9, None)],
+)
+def test_difficulty_is_read_from_the_byte_after_the_name(tmp_path, byte, label):
+    """A journey character cannot join a non-journey world, so it is reported.
+
+    An unknown byte is None rather than a guess; the name is still right.
+    """
+    (tmp_path / "Players").mkdir()
+    (tmp_path / "Players" / "x.plr").write_bytes(plr_bytes("Someone", byte))
+
+    [got] = inventory.players(tmp_path)
+    assert (got.name, got.difficulty, got.error) == ("Someone", label, None)
+
+
+def test_names_beyond_ascii_and_beyond_a_one_byte_length_decode(tmp_path):
+    """The real install has `Betula-瑟银withDarkrai`. UTF-8, length-prefixed.
+
+    A 130-byte name needs a two-byte 7-bit length; a reader that takes the
+    first byte as the length reads 2 bytes of it and calls that the name.
+    """
+    long_name = "n" * 130
+    (tmp_path / "Players").mkdir()
+    (tmp_path / "Players" / "a.plr").write_bytes(plr_bytes("Betula-瑟银withHu0", 3))
+    (tmp_path / "Players" / "b.plr").write_bytes(plr_bytes(long_name))
+
+    got = {p.file: p for p in inventory.players(tmp_path)}
+    assert got["a"].name == "Betula-瑟银withHu0"
+    assert got["a"].difficulty == "journey"
+    assert got["b"].name == long_name
+
+
+def test_an_unreadable_character_is_listed_with_why_not_dropped(tmp_path):
+    """Absent and unreadable need different fixes, so both are reported.
+
+    Each of these is a way a `.plr` can be there and not be a character this
+    reader understands: empty, not encrypted, encrypted with another key,
+    another kind of Terraria file, a header cut off inside the name, and a
+    directory where the file should be (a real OSError, not a mock).
+    """
+    players = tmp_path / "Players"
+    players.mkdir()
+    (players / "empty.plr").write_bytes(b"")
+    (players / "plain.plr").write_bytes(b"relogic" * 80)
+    (players / "otherkey.plr").write_bytes(plr_bytes("Ghost", key=b"0123456789abcdef"))
+    (players / "aworld.plr").write_bytes(plr_bytes("Ghost", file_type=2))
+    (players / "cut.plr").write_bytes(plr_bytes("n" * 30)[:32])
+    (players / "folder.plr").mkdir()
+    # POSITIVE CONTROL, in the same directory: the reader is not simply broken,
+    # so the errors above are about those files.
+    (players / "good.plr").write_bytes(plr_bytes("Good"))
+
+    got = {p.file: p for p in inventory.players(tmp_path)}
+
+    assert set(got) == {"empty", "plain", "otherkey", "aworld", "cut", "folder", "good"}
+    for stem in ("empty", "plain", "otherkey", "aworld", "cut", "folder"):
+        assert got[stem].name is None, f"{stem}.plr was given a name"
+        assert got[stem].difficulty is None
+        assert got[stem].error and f"{stem}.plr" in got[stem].error, got[stem]
+    assert "magic" in got["otherkey"].error
+    assert "magic" in got["aworld"].error
+    assert "does not fit" in got["cut"].error
+    assert "cannot read" in got["folder"].error
+    assert (got["good"].name, got["good"].error) == ("Good", None)
+
+
+def test_the_reader_uses_terrarias_key(tmp_path):
+    """The key is a constant of the game, not of this module: pin its bytes."""
+    assert PLR_KEY == b"h\x003\x00y\x00_\x00g\x00U\x00y\x00Z\x00"
+    (tmp_path / "Players").mkdir()
+    (tmp_path / "Players" / "k.plr").write_bytes(plr_bytes("Keyed", key=PLR_KEY))
+    assert inventory.players(tmp_path)[0].name == "Keyed"
