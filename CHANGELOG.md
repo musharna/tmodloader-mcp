@@ -18,7 +18,14 @@ keeping, not because they broke a released API.
   local load raced the join, and when it won the server kicked the client with
   "Invalid operation at this state"; the call then waited out its whole
   timeout. Reported with the cause and the fix in issue 108, at about 2
-  launches in 10.
+  launches in 10. On 1.4.4.9 the clients join without the flag as well (one
+  live run of `tests/live_capture_check.py`).
+
+### Security
+
+- `uv.lock` pins opentelemetry-api 1.45.2 (was 1.45.1) for GHSA-mf5v-w3w3-f6cg,
+  fixed in 1.45.2. The lock is what checkouts and CI install; a `uvx` or `pip`
+  install resolves its own.
 
 ## [0.7.0] - 2026-11-13
 
