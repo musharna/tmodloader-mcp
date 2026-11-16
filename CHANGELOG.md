@@ -11,6 +11,8 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-16
+
 ### Fixed
 
 - `launch` and `join` no longer pass `-skipselect` to the client. On tModLoader
