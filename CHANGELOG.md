@@ -27,7 +27,7 @@ keeping, not because they broke a released API.
 
 - `uv.lock` pins opentelemetry-api 1.45.2 (was 1.45.1) for GHSA-mf5v-w3w3-f6cg,
   fixed in 1.45.2. The lock is what checkouts and CI install; a `uvx` or `pip`
-  install resolves its own.
+  install resolves its own dependencies.
 
 ## [0.7.0] - 2026-11-13
 
