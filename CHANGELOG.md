@@ -11,6 +11,15 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Fixed
+
+- `launch` and `join` no longer pass `-skipselect` to the client. On tModLoader
+  1.4.5 that flag, next to `-join`, also loads a local world and enters it. The
+  local load raced the join, and when it won the server kicked the client with
+  "Invalid operation at this state"; the call then waited out its whole
+  timeout. Reported with the cause and the fix in issue 108, at about 2
+  launches in 10.
+
 ## [0.7.0] - 2026-11-13
 
 ### Added
