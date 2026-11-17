@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from tmodloader_mcp import inventory
 from tmodloader_mcp.config import load
-from tmodloader_mcp.session import _tml_pids, launch, stop
+from tmodloader_mcp.session import _client_join_cmd, _tml_pids, launch, stop
 from tmodloader_mcp.triggers import artifacts_for_server
 
 PORT_A, PORT_B = 7810, 7811
@@ -103,20 +103,7 @@ def main() -> int:
             **spawn,
         )
         time.sleep(20)  # let B's server bind before its client dials it
-        subprocess.Popen(
-            [
-                str(cfg.dotnet),
-                "tModLoader.dll",
-                "-join",
-                "127.0.0.1",
-                "-port",
-                str(PORT_B),
-                "-player",
-                PLAYER_B,
-                "-skipselect",
-            ],
-            **spawn,
-        )
+        subprocess.Popen(_client_join_cmd(cfg, PORT_B, PLAYER_B), **spawn)
 
         # B's server only polls once its client is attached - an empty server
         # runs no update hooks. Its per-port heartbeat appearing proves both

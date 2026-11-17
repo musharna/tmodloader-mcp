@@ -596,6 +596,56 @@ def test_a_successful_launch_keeps_its_processes(monkeypatch):
     assert sess.started == {4808}, "the session did not record what it started"
 
 
+def _recorded_spawns(monkeypatch):
+    """Record every command the already-installed fake `Popen` is handed."""
+    inner = session_mod.subprocess.Popen
+    cmds: list[list[str]] = []
+
+    def recording(cmd, **kwargs):
+        cmds.append(list(cmd))
+        return inner(cmd, **kwargs)
+
+    monkeypatch.setattr(session_mod.subprocess, "Popen", recording)
+    return cmds
+
+
+def _join_cmd(cfg, port, player):
+    return [
+        str(cfg.dotnet),
+        "tModLoader.dll",
+        "-join",
+        "127.0.0.1",
+        "-port",
+        str(port),
+        "-player",
+        player,
+    ]
+
+
+def test_launch_starts_its_client_with_join_and_player_and_nothing_else(monkeypatch):
+    """ISSUE 108. `-skipselect` next to `-join` is a second instruction on
+    tModLoader 1.4.5: load a local world and enter it. That raced the join and
+    got the client kicked in about 2 launches of 10, each one costing the whole
+    launch timeout. The client is started with `-join` and `-player` alone.
+
+    The whole command is compared, so the flag coming back fails here and so
+    does losing the address, the port or the character.
+    """
+    _fake_launch_world(monkeypatch, existing=set(), after={4808}, ready_raises=False)
+    cmds = _recorded_spawns(monkeypatch)
+    cfg = FakeCfg(Path("/tmp"))
+
+    session_mod.launch(cfg, "server_client", port=1, player="n43n")
+
+    # Two spawns were really recorded: the server, then the client.
+    assert len(cmds) == 2, cmds
+    assert "-server" in cmds[0] and "-join" not in cmds[0], cmds[0]
+    assert cmds[1] == _join_cmd(cfg, 1, "n43n"), (
+        "the launch client was not started with exactly `-join 127.0.0.1 -port "
+        f"<port> -player <name>`: {cmds[1]}"
+    )
+
+
 def test_refusing_to_launch_over_a_running_game_kills_nothing(monkeypatch):
     """The other direction of the same worry, and why `stop()` is surgical: a
     developer usually has their own game open.
@@ -1277,6 +1327,23 @@ def test_a_joined_client_is_waited_for_and_its_pids_recorded(monkeypatch, tmp_pa
     assert 6100 in session.started, (
         "the joined client's pid never reached the session, so `stop` will "
         "leave it running and nothing else knows it exists"
+    )
+
+
+def test_a_join_starts_its_client_with_join_and_player_and_nothing_else(
+    monkeypatch, tmp_path
+):
+    """ISSUE 108, the second caller. `join` built the same command as `launch`
+    from its own copy of the list, flag included, so it is pinned separately."""
+    cfg, session, _ = _joinable(monkeypatch, tmp_path, spawns={6100}, ready_for="tst2")
+    cmds = _recorded_spawns(monkeypatch)
+
+    session_mod.join(cfg, session, "tst2", timeout=30.0)
+
+    assert session.joined == ["tst2"]  # the join really ran to the end
+    assert cmds == [_join_cmd(cfg, session.port, "tst2")], (
+        "the joining client was not started with exactly `-join 127.0.0.1 "
+        f"-port <port> -player <name>`: {cmds}"
     )
 
 
