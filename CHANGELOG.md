@@ -11,6 +11,8 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-19
+
 ### Changed
 
 - **`inventory` reports each character's name, not its file name.**
