@@ -11,6 +11,24 @@ keeping, not because they broke a released API.
 
 ## [Unreleased]
 
+### Changed
+
+- **`inventory` reports each character's name, not its file name.**
+  `players` is now a list of `{name, file, difficulty, error}` instead of a
+  list of strings (a change to the tool's output shape). `name` is read from
+  inside the encrypted `.plr` and is what `launch(player=...)` and
+  `join(player=...)` take; `file` is the `.plr` stem; `difficulty` is
+  `classic`, `mediumcore`, `hardcore` or `journey`. A `.plr` that cannot be
+  read or decoded is listed with `error` rather than dropped. The
+  `start_a_session` prompt lists the same names.
+
+### Fixed
+
+- `inventory` and `start_a_session` offered a character's file stem as the
+  name to launch with. tModLoader matches the name stored inside the file, and
+  the two can differ: a real `Betula.plr` holds `Betula_Calamity`, so the
+  offered name could not be launched.
+
 ## [0.7.1] - 2026-11-16
 
 ### Fixed
